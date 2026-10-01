@@ -1,1 +1,2 @@
 pytest>=8.0
+pymupdf>=1.24
