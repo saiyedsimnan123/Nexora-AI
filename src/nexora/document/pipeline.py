@@ -6,7 +6,7 @@ Thin orchestration layer that turns a PDF file into embedded chunks::
 
 The pipeline only coordinates existing components. It does not parse PDFs,
 clean text, split text or compute embeddings itself, and it contains no
-provider selection, environment access, or storage logic. Errors raised by
+provider selection, runtime configuration access, or storage logic. Errors raised by
 any stage propagate unchanged.
 
 Dependency direction::
