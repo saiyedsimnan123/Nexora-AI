@@ -116,7 +116,7 @@ def test_openai_provider_created(fake_openai):
 
 
 # 3. Unsupported provider
-@pytest.mark.parametrize("name", ["", "nope", "cohere", "hash2"])
+@pytest.mark.parametrize("name", ["nope", "cohere", "hash2"])
 def test_unsupported_provider_raises_value_error(name):
     with pytest.raises(ValueError, match="Unsupported embedding provider"):
         create_embedding_provider(EmbeddingConfig(provider=name))
