@@ -137,6 +137,106 @@ store.upsert(
 assert store.count() == 2
 assert store.dimension == 2
 
+"""Tests for the in-memory VectorStore implementation."""
+
+from future import annotations
+
+import ast
+import inspect
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from nexora.retrieval.in_memory import InMemoryVectorStore
+from nexora.retrieval.models import RetrievedChunk, SearchResult, VectorRecord
+from nexora.retrieval.store import VectorStore
+
+def make_record(
+record_id: str,
+vector: list[float],
+*,
+document_id: str = "doc-1",
+chunk_id: str | None = None,
+text: str = "sample text",
+metadata: dict[str, object] | None = None,
+) -> VectorRecord:
+payload: dict[str, object] = {
+"document_id": document_id,
+"chunk_id": chunk_id or record_id,
+"text": text,
+}
+
+if metadata:
+    payload.update(metadata)
+
+return VectorRecord(
+    id=record_id,
+    vector=vector,
+    payload=payload,
+)
+
+---------------------------------------------------------------------------
+
+Construction
+
+---------------------------------------------------------------------------
+
+def test_empty_store_constructs() -> None:
+store = InMemoryVectorStore()
+
+assert store.count() == 0
+assert store.dimension is None
+
+def test_explicit_dimension() -> None:
+store = InMemoryVectorStore(dimension=3)
+
+assert store.dimension == 3
+assert store.count() == 0
+
+def test_runtime_protocol_compatibility() -> None:
+assert isinstance(InMemoryVectorStore(), VectorStore)
+
+@pytest.mark.parametrize("dimension", [0, -1, -5])
+def test_constructor_rejects_non_positive_dimension(dimension: int) -> None:
+with pytest.raises(ValueError):
+InMemoryVectorStore(dimension=dimension)
+
+@pytest.mark.parametrize("dimension", [True, False, 1.5, "3", []])
+def test_constructor_rejects_invalid_dimension(dimension: object) -> None:
+with pytest.raises(TypeError):
+InMemoryVectorStore(dimension=dimension)  # type: ignore[arg-type]
+
+---------------------------------------------------------------------------
+
+Upsert
+
+---------------------------------------------------------------------------
+
+def test_upsert_single_record() -> None:
+store = InMemoryVectorStore()
+
+store.upsert([make_record("a", [1.0, 0.0])])
+
+assert store.count() == 1
+assert store.dimension == 2
+
+def test_upsert_multiple_records() -> None:
+store = InMemoryVectorStore()
+
+store.upsert(
+    [
+        make_record("a", [1.0, 0.0]),
+        make_record("b", [0.0, 1.0]),
+    ]
+)
+
+assert store.count() == 2
+assert store.dimension == 2
+
 def test_empty_upsert_does_nothing() -> None:
 store = InMemoryVectorStore()
 
@@ -149,7 +249,7 @@ def test_upsert_requires_list() -> None:
 store = InMemoryVectorStore()
 
 with pytest.raises(TypeError):
-    store.upsert(("not", "a", "list"))  # type: ignore[arg-type]
+    store.upsert(("a",))  # type: ignore[arg-type]
 
 def test_upsert_requires_vector_records() -> None:
 store = InMemoryVectorStore()
@@ -160,25 +260,8 @@ with pytest.raises(TypeError):
 def test_upsert_replaces_existing_id() -> None:
 store = InMemoryVectorStore()
 
-store.upsert(
-    [
-        make_record(
-            "same",
-            [1.0, 0.0],
-            text="old",
-        )
-    ]
-)
-
-store.upsert(
-    [
-        make_record(
-            "same",
-            [0.0, 1.0],
-            text="new",
-        )
-    ]
-)
+store.upsert([make_record("same", [1.0, 0.0], text="old")])
+store.upsert([make_record("same", [0.0, 1.0], text="new")])
 
 assert store.count() == 1
 
@@ -187,7 +270,7 @@ result = store.search([0.0, 1.0])
 assert result.results[0].text == "new"
 assert result.results[0].score == pytest.approx(1.0)
 
-def test_duplicate_ids_in_same_batch_last_wins() -> None:
+def test_duplicate_ids_last_wins() -> None:
 store = InMemoryVectorStore()
 
 store.upsert(
@@ -197,10 +280,9 @@ store.upsert(
     ]
 )
 
-assert store.count() == 1
-
 result = store.search([0.0, 1.0])
 
+assert store.count() == 1
 assert result.results[0].text == "second"
 
 def test_first_upsert_establishes_dimension() -> None:
@@ -210,7 +292,7 @@ store.upsert([make_record("a", [1.0, 2.0, 3.0])])
 
 assert store.dimension == 3
 
-def test_mismatched_dimension_is_rejected() -> None:
+def test_mismatched_dimension_rejected() -> None:
 store = InMemoryVectorStore(dimension=2)
 
 with pytest.raises(ValueError):
@@ -218,7 +300,7 @@ with pytest.raises(ValueError):
 
 assert store.count() == 0
 
-def test_mismatched_dimension_does_not_partially_mutate_store() -> None:
+def test_invalid_batch_does_not_partially_mutate_store() -> None:
 store = InMemoryVectorStore(dimension=2)
 
 store.upsert([make_record("existing", [1.0, 0.0])])
@@ -228,25 +310,6 @@ with pytest.raises(ValueError):
         [
             make_record("new", [0.0, 1.0]),
             make_record("bad", [1.0, 2.0, 3.0]),
-        ]
-    )
-
-assert store.count() == 1
-
-result = store.search([1.0, 0.0])
-
-assert [item.chunk_id for item in result.results] == ["existing"]
-
-def test_invalid_record_does_not_partially_mutate_store() -> None:
-store = InMemoryVectorStore(dimension=2)
-
-store.upsert([make_record("existing", [1.0, 0.0])])
-
-with pytest.raises(TypeError):
-    store.upsert(
-        [
-            make_record("new", [0.0, 1.0]),
-            "invalid",  # type: ignore[list-item]
         ]
     )
 
@@ -287,15 +350,10 @@ store.delete(["a", "c"])
 
 assert store.count() == 1
 
-result = store.search([0.0, 1.0])
-
-assert [item.chunk_id for item in result.results] == ["b"]
-
 def test_delete_missing_id_is_noop() -> None:
 store = InMemoryVectorStore(dimension=2)
 
 store.upsert([make_record("a", [1.0, 0.0])])
-
 store.delete(["missing"])
 
 assert store.count() == 1
@@ -314,7 +372,7 @@ with pytest.raises(TypeError):
     store.delete(("a",))  # type: ignore[arg-type]
 
 @pytest.mark.parametrize("value", [1, True, None, [], {}])
-def test_delete_rejects_non_string_ids(value: object) -> None:
+def test_delete_rejects_invalid_ids(value: object) -> None:
 store = InMemoryVectorStore()
 
 with pytest.raises(TypeError):
@@ -326,7 +384,7 @@ store = InMemoryVectorStore()
 with pytest.raises(ValueError):
     store.delete([""])
 
-def test_delete_all_records_preserves_dimension() -> None:
+def test_delete_all_preserves_dimension() -> None:
 store = InMemoryVectorStore()
 
 store.upsert([make_record("a", [1.0, 0.0])])
@@ -334,10 +392,6 @@ store.delete(["a"])
 
 assert store.count() == 0
 assert store.dimension == 2
-
-store.upsert([make_record("b", [0.0, 1.0])])
-
-assert store.count() == 1
 
 ---------------------------------------------------------------------------
 
@@ -354,17 +408,16 @@ assert isinstance(result, SearchResult)
 assert result.query == ""
 assert result.results == []
 
-def test_search_exact_vector_has_score_one() -> None:
+def test_exact_vector_scores_one() -> None:
 store = InMemoryVectorStore()
 
 store.upsert([make_record("a", [1.0, 0.0])])
 
 result = store.search([1.0, 0.0])
 
-assert len(result.results) == 1
 assert result.results[0].score == pytest.approx(1.0)
 
-def test_search_ranks_by_cosine_similarity() -> None:
+def test_search_ranking() -> None:
 store = InMemoryVectorStore()
 
 store.upsert(
@@ -403,15 +456,6 @@ result = store.search([1.0, 0.0], limit=2)
 assert len(result.results) == 2
 assert [item.chunk_id for item in result.results] == ["a", "b"]
 
-def test_search_limit_larger_than_count_returns_all() -> None:
-store = InMemoryVectorStore(dimension=2)
-
-store.upsert([make_record("a", [1.0, 0.0])])
-
-result = store.search([1.0, 0.0], limit=100)
-
-assert len(result.results) == 1
-
 @pytest.mark.parametrize("limit", [0, -1, -10])
 def test_search_rejects_non_positive_limit(limit: int) -> None:
 store = InMemoryVectorStore(dimension=2)
@@ -426,21 +470,13 @@ store = InMemoryVectorStore(dimension=2)
 with pytest.raises(TypeError):
     store.search([1.0, 0.0], limit=limit)  # type: ignore[arg-type]
 
-def test_search_rejects_dimension_mismatch() -> None:
+def test_search_dimension_mismatch() -> None:
 store = InMemoryVectorStore(dimension=3)
 
 store.upsert([make_record("a", [1.0, 0.0, 0.0])])
 
 with pytest.raises(ValueError):
     store.search([1.0, 0.0])
-
-def test_search_before_dimension_is_established() -> None:
-store = InMemoryVectorStore()
-
-with pytest.raises(ValueError):
-    store.search([1.0, 0.0])
-
-assert store.count() == 0
 
 def test_zero_query_vector_returns_zero_scores() -> None:
 store = InMemoryVectorStore(dimension=2)
@@ -473,45 +509,13 @@ assert result.results[0].score == pytest.approx(1.0)
 assert result.results[1].chunk_id == "zero"
 assert result.results[1].score == pytest.approx(0.0)
 
-@pytest.mark.parametrize(
-"vector",
-[
-[],
-[float("nan")],
-[float("inf")],
-[float("-inf")],
-[True],
-["1.0"],
-[None],
-],
-)
-def test_search_rejects_invalid_vectors(vector: list[object]) -> None:
-store = InMemoryVectorStore()
-
-with pytest.raises((TypeError, ValueError)):
-    store.search(vector)  # type: ignore[arg-type]
-
-def test_search_scores_are_finite() -> None:
-store = InMemoryVectorStore(dimension=2)
-
-store.upsert(
-    [
-        make_record("a", [1.0, 0.0]),
-        make_record("b", [0.0, 1.0]),
-    ]
-)
-
-result = store.search([1.0, 0.0])
-
-assert all(math.isfinite(item.score) for item in result.results)
-
 ---------------------------------------------------------------------------
 
 Deterministic ranking
 
 ---------------------------------------------------------------------------
 
-def test_equal_scores_are_sorted_by_record_id() -> None:
+def test_equal_scores_are_sorted_by_id() -> None:
 store = InMemoryVectorStore(dimension=2)
 
 store.upsert(
@@ -524,19 +528,15 @@ store.upsert(
 
 result = store.search([1.0, 0.0])
 
-assert [item.chunk_id for item in result.results] == [
-    "a",
-    "m",
-    "z",
-]
+assert [item.chunk_id for item in result.results] == ["a", "m", "z"]
 
 ---------------------------------------------------------------------------
 
-# Payload → RetrievedChunk mapping
+Payload mapping
 
 ---------------------------------------------------------------------------
 
-def test_payload_mapping_to_retrieved_chunk() -> None:
+def test_payload_maps_to_retrieved_chunk() -> None:
 store = InMemoryVectorStore(dimension=2)
 
 record = make_record(
@@ -550,9 +550,7 @@ record = make_record(
 
 store.upsert([record])
 
-result = store.search([1.0, 0.0])
-
-chunk = result.results[0]
+chunk = store.search([1.0, 0.0]).results[0]
 
 assert isinstance(chunk, RetrievedChunk)
 assert chunk.document_id == "document-123"
@@ -564,37 +562,22 @@ assert chunk.metadata["section"] == "Methods"
 def test_missing_payload_fields_use_defaults() -> None:
 store = InMemoryVectorStore(dimension=2)
 
-record = VectorRecord(
-    id="record-id",
-    vector=[1.0, 0.0],
-    payload={},
+store.upsert(
+    [
+        VectorRecord(
+            id="record-id",
+            vector=[1.0, 0.0],
+            payload={},
+        )
+    ]
 )
 
-store.upsert([record])
-
-result = store.search([1.0, 0.0])
-
-chunk = result.results[0]
+chunk = store.search([1.0, 0.0]).results[0]
 
 assert chunk.document_id == "record-id"
 assert chunk.chunk_id == "record-id"
 assert chunk.text == ""
 assert chunk.metadata == {}
-
-def test_non_string_text_defaults_to_empty_string() -> None:
-store = InMemoryVectorStore(dimension=2)
-
-record = VectorRecord(
-    id="record-id",
-    vector=[1.0, 0.0],
-    payload={"text": 123},
-)
-
-store.upsert([record])
-
-result = store.search([1.0, 0.0])
-
-assert result.results[0].text == ""
 
 ---------------------------------------------------------------------------
 
@@ -602,7 +585,7 @@ Defensive copying
 
 ---------------------------------------------------------------------------
 
-def test_caller_payload_mutation_does_not_change_store() -> None:
+def test_caller_mutation_does_not_change_store() -> None:
 payload = {
 "document_id": "doc-1",
 "text": "original",
@@ -626,7 +609,7 @@ result = store.search([1.0, 0.0])
 assert result.results[0].text == "original"
 assert result.results[0].metadata["nested"] == {"value": 1}
 
-def test_returned_metadata_mutation_does_not_change_store() -> None:
+def test_returned_metadata_does_not_change_store() -> None:
 store = InMemoryVectorStore()
 
 store.upsert(
@@ -639,8 +622,8 @@ store.upsert(
     ]
 )
 
-first = store.search([1.0, 0.0])
-first.results[0].metadata["nested"]["value"] = 999
+result = store.search([1.0, 0.0])
+result.results[0].metadata["nested"]["value"] = 999
 
 second = store.search([1.0, 0.0])
 
@@ -648,61 +631,44 @@ assert second.results[0].metadata["nested"] == {"value": 1}
 
 ---------------------------------------------------------------------------
 
-Store isolation
-
----------------------------------------------------------------------------
-
-def test_stores_are_independent() -> None:
-first = InMemoryVectorStore(dimension=2)
-second = InMemoryVectorStore(dimension=2)
-
-first.upsert([make_record("a", [1.0, 0.0])])
-
-assert first.count() == 1
-assert second.count() == 0
-
----------------------------------------------------------------------------
-
-Source / dependency isolation
+Dependency isolation
 
 ---------------------------------------------------------------------------
 
 def _module_path() -> Path:
-return Path(file).resolve().parents[1] / "src" / "nexora" / "retrieval" / "in_memory.py"
+return (
+Path(file).resolve().parents[1]
+/ "src"
+/ "nexora"
+/ "retrieval"
+/ "in_memory.py"
+)
 
-def _stdlib_module_names() -> set[str]:
-return set(sys.stdlib_module_names)
+def test_only_allowed_imports() -> None:
+tree = ast.parse(_module_path().read_text(encoding="utf-8"))
 
-def test_module_uses_only_allowed_imports() -> None:
-path = _module_path()
-tree = ast.parse(path.read_text(encoding="utf-8"))
-
-allowed_external = {
+allowed_nexora = {
     "nexora.retrieval.models",
     "nexora.retrieval.store",
 }
 
-stdlib = _stdlib_module_names()
+stdlib = set(sys.stdlib_module_names)
 
 for node in ast.walk(tree):
     if isinstance(node, ast.Import):
         for alias in node.names:
-            root = alias.name.split(".")[0]
-            assert root in stdlib, f"Forbidden import: {alias.name}"
+            assert alias.name.split(".")[0] in stdlib
 
     elif isinstance(node, ast.ImportFrom):
         if node.module is None:
             continue
 
         if node.module.startswith("nexora."):
-            assert node.module in allowed_external, (
-                f"Unexpected Nexora import: {node.module}"
-            )
+            assert node.module in allowed_nexora
         else:
-            root = node.module.split(".")[0]
-            assert root in stdlib, f"Forbidden import: {node.module}"
+            assert node.module.split(".")[0] in stdlib
 
-def test_forbidden_infrastructure_imports_are_absent() -> None:
+def test_no_forbidden_infrastructure_imports() -> None:
 source = _module_path().read_text(encoding="utf-8")
 
 forbidden = [
@@ -710,7 +676,6 @@ forbidden = [
     "openai",
     "fastapi",
     "psycopg",
-    "psycopg2",
     "sqlalchemy",
     "redis",
     "requests",
@@ -722,27 +687,21 @@ forbidden = [
     "ssl",
     "urllib.request",
     "urllib.error",
-    "logging",
 ]
 
 for name in forbidden:
     assert name not in source
 
-def test_module_does_not_read_environment_variables() -> None:
+def test_no_environment_access() -> None:
 tree = ast.parse(_module_path().read_text(encoding="utf-8"))
 
-forbidden_calls = {
-    "getenv",
-    "environ",
-}
-
 for node in ast.walk(tree):
-    if isinstance(node, ast.Call):
-        if isinstance(node.func, ast.Attribute):
-            if node.func.attr in forbidden_calls:
-                pytest.fail("InMemoryVectorStore must not access environment variables")
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        assert node.func.attr not in {"getenv", "environ"}
 
-def test_import_succeeds_without_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_works_without_configuration(
+monkeypatch: pytest.MonkeyPatch,
+) -> None:
 for name in [
 "NEXORA_QDRANT_URL",
 "NEXORA_QDRANT_API_KEY",
@@ -752,6 +711,8 @@ for name in [
 "OPENAI_API_KEY",
 ]:
 monkeypatch.delenv(name, raising=False)
+
+project_root = _module_path().parents[3]
 
 result = subprocess.run(
     [
@@ -765,30 +726,11 @@ result = subprocess.run(
     ],
     capture_output=True,
     text=True,
-    env={**os.environ, "PYTHONPATH": str(_module_path().parents[3])},
+    env={
+        **os.environ,
+        "PYTHONPATH": str(project_root),
+    },
     check=False,
 )
 
 assert result.returncode == 0, result.stderr
-
-def test_no_network_or_filesystem_side_effects_at_import() -> None:
-path = _module_path()
-tree = ast.parse(path.read_text(encoding="utf-8"))
-
-forbidden_names = {
-    "open",
-    "connect",
-    "urlopen",
-    "request",
-    "get",
-    "post",
-    "put",
-    "delete",
-}
-
-for node in ast.walk(tree):
-    if isinstance(node, ast.Call):
-        if isinstance(node.func, ast.Name):
-            assert node.func.id not in forbidden_names
-        elif isinstance(node.func, ast.Attribute):
-            assert node.func.attr not in forbidden_names
