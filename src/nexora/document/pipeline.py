@@ -1,35 +1,37 @@
-"""Document pipeline.
+"""Document processing pipeline.
 
-Thin orchestration layer that turns a PDF file into embedded chunks::
-
-    load_pdf_text -> clean_text -> chunk_text -> EmbeddingIntegration.embed_chunks
-
-The pipeline only coordinates existing components. It does not parse PDFs,
-clean text, split text or compute embeddings itself, and it contains no
-provider selection, runtime configuration access, or storage logic. Errors raised by
-any stage propagate unchanged.
-
-Dependency direction::
-
-    DocumentPipeline -> document components, EmbeddingIntegration
+Orchestrates PDF loading, preprocessing, chunking and embedding, and returns
+the result as a ProcessedDocument.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import uuid
+from typing import Callable
 
 from nexora.document.chunker import chunk_text
 from nexora.document.loader import load_pdf_text
+from nexora.document.models import DocumentChunk, ProcessedDocument
 from nexora.document.preprocessor import clean_text
 from nexora.embedding.integration import EmbeddedChunk, EmbeddingIntegration
 
 
-class DocumentPipeline:
-    """Processes a PDF into ``EmbeddedChunk`` objects.
+def _document_id(source: str) -> str:
+    """Return a deterministic document ID derived from the source path."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
 
-    The stage functions default to the existing Nexora document components
-    and can be replaced (for example with fakes in tests).
-    """
+
+def _to_document_chunk(chunk: EmbeddedChunk) -> DocumentChunk:
+    """Convert an EmbeddedChunk into a DocumentChunk."""
+    return DocumentChunk(
+        text=chunk.text,
+        embedding=chunk.embedding,
+        index=chunk.index,
+    )
+
+
+class DocumentPipeline:
+    """PDF -> load -> preprocess -> chunk -> embed -> ProcessedDocument."""
 
     def __init__(
         self,
@@ -41,12 +43,6 @@ class DocumentPipeline:
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
     ) -> None:
-        """Store the collaborators and chunk settings.
-
-        Construction performs no document processing and no network
-        activity. ``chunk_size`` and ``chunk_overlap`` are passed through to
-        the chunker, which owns their validation.
-        """
         self._embedding_integration = embedding_integration
         self._loader = loader
         self._preprocessor = preprocessor
@@ -54,24 +50,22 @@ class DocumentPipeline:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
 
-    def process_pdf(self, file_path: str) -> list[EmbeddedChunk]:
-        """Load, clean, chunk and embed the PDF at ``file_path``.
-
-        Returns:
-            The ``EmbeddedChunk`` list from the embedding integration,
-            unchanged and in chunk order. ``[]`` if the document yields no
-            chunks, in which case the embedding integration is not called.
-
-        Raises:
-            Any exception raised by a stage propagates unchanged.
-        """
-        raw_text = self._loader(file_path)
-        cleaned_text = self._preprocessor(raw_text)
+    def process_pdf(self, file_path: str) -> ProcessedDocument:
+        text = self._loader(file_path)
+        cleaned = self._preprocessor(text)
         chunks = self._chunker(
-            cleaned_text,
+            cleaned,
             chunk_size=self._chunk_size,
             chunk_overlap=self._chunk_overlap,
         )
-        if not chunks:
-            return []
-        return self._embedding_integration.embed_chunks(chunks)
+
+        embedded_chunks = (
+            self._embedding_integration.embed_chunks(chunks) if chunks else []
+        )
+
+        return ProcessedDocument(
+            document_id=_document_id(file_path),
+            source=file_path,
+            chunks=[_to_document_chunk(chunk) for chunk in embedded_chunks],
+            metadata={},
+        )
