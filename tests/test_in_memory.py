@@ -532,7 +532,7 @@ assert [item.chunk_id for item in result.results] == [
 
 ---------------------------------------------------------------------------
 
-Payload → RetrievedChunk mapping
+# Payload → RetrievedChunk mapping
 
 ---------------------------------------------------------------------------
 
