@@ -4,6 +4,8 @@ import hashlib
 import math
 import struct
 
+from nexora.embedding.base import validate_texts
+
 DEFAULT_DIMENSION = 128
 
 _FLOATS_PER_BLOCK = 8  # one SHA-256 digest (32 bytes) -> 8 x 4-byte values
@@ -83,3 +85,18 @@ class HashEmbeddingProvider:
         if norm == 0.0:  # practically impossible; keeps the output valid
             return values
         return [v / norm for v in values]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Return one pseudo-embedding per text, preserving input order.
+
+        Each vector is exactly what ``embed_text`` returns for that text.
+
+        Args:
+            texts: A list of non-empty strings. An empty list returns ``[]``.
+
+        Raises:
+            TypeError: If ``texts`` is not a list or an element is not a str.
+            ValueError: If an element is empty or whitespace-only.
+        """
+        validate_texts(texts)
+        return [self.embed_text(text) for text in texts]
