@@ -1,77 +1,42 @@
-"""Document pipeline.
+"""Embedding pipeline.
 
-Thin orchestration layer that turns a PDF file into embedded chunks::
+A thin orchestration layer over ``EmbeddingService``.
 
-    load_pdf_text -> clean_text -> chunk_text -> EmbeddingIntegration.embed_chunks
-
-The pipeline only coordinates existing components. It does not parse PDFs,
-clean text, split text or compute embeddings itself, and it contains no
-provider selection, environment access, or storage logic. Errors raised by
-any stage propagate unchanged.
-
-Dependency direction::
-
-    DocumentPipeline -> document components, EmbeddingIntegration
+The pipeline is the entry point other Nexora components should use to turn
+text into vectors. It intentionally contains no provider selection, no
+caching and no validation of its own: all of that belongs to the service
+(and the components behind it). The pipeline only delegates, which keeps a
+single place for future orchestration steps to be added deliberately.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from nexora.document.chunker import chunk_text
-from nexora.document.loader import load_pdf_text
-from nexora.document.preprocessor import clean_text
-from nexora.embedding.integration import EmbeddedChunk, EmbeddingIntegration
+from nexora.embedding.service import EmbeddingService
 
 
-class DocumentPipeline:
-    """Processes a PDF into ``EmbeddedChunk`` objects.
+class EmbeddingPipeline:
+    """Delegates embedding requests to an ``EmbeddingService``.
 
-    The stage functions default to the existing Nexora document components
-    and can be replaced (for example with fakes in tests).
+    Results are returned exactly as the service produced them. Ordering,
+    duplicate handling and input validation are the service's
+    responsibility, and any error it raises propagates unchanged.
     """
 
-    def __init__(
-        self,
-        embedding_integration: EmbeddingIntegration,
-        *,
-        loader: Callable[[str], str] = load_pdf_text,
-        preprocessor: Callable[[str], str] = clean_text,
-        chunker: Callable[..., list[str]] = chunk_text,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
-    ) -> None:
-        """Store the collaborators and chunk settings.
+    def __init__(self, service: EmbeddingService) -> None:
+        """Create a pipeline around ``service``.
 
-        Construction performs no document processing and no network
-        activity. ``chunk_size`` and ``chunk_overlap`` are passed through to
-        the chunker, which owns their validation.
+        Construction only stores the service; it performs no work and no
+        network activity.
         """
-        self._embedding_integration = embedding_integration
-        self._loader = loader
-        self._preprocessor = preprocessor
-        self._chunker = chunker
-        self._chunk_size = chunk_size
-        self._chunk_overlap = chunk_overlap
+        self._service = service
 
-    def process_pdf(self, file_path: str) -> list[EmbeddedChunk]:
-        """Load, clean, chunk and embed the PDF at ``file_path``.
+    def embed_text(self, text: str) -> list[float]:
+        """Embed a single text via the service and return its vector."""
+        return self._service.embed_text(text)
 
-        Returns:
-            The ``EmbeddedChunk`` list from the embedding integration,
-            unchanged and in chunk order. ``[]`` if the document yields no
-            chunks, in which case the embedding integration is not called.
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed many texts via the service.
 
-        Raises:
-            Any exception raised by a stage propagates unchanged.
+        Returns one vector per input text, in the service's order.
         """
-        raw_text = self._loader(file_path)
-        cleaned_text = self._preprocessor(raw_text)
-        chunks = self._chunker(
-            cleaned_text,
-            chunk_size=self._chunk_size,
-            chunk_overlap=self._chunk_overlap,
-        )
-        if not chunks:
-            return []
-        return self._embedding_integration.embed_chunks(chunks)
+        return self._service.embed_texts(texts)

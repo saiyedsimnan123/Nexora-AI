@@ -18,8 +18,10 @@ correctly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from nexora.embedding.pipeline import EmbeddingPipeline
+if TYPE_CHECKING:
+    from nexora.embedding.pipeline import EmbeddingPipeline
 
 
 @dataclass(frozen=True)
