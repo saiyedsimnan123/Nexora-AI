@@ -107,6 +107,9 @@ def test_custom_provider_satisfies_embedding_provider():
         def embed_text(self, text: str) -> list[float]:
             return [1.0, 0.0]
 
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
     assert isinstance(ConstantProvider(), EmbeddingProvider)
 
 
