@@ -2,3 +2,6 @@ pytest>=8.0
 pymupdf>=1.24
 openai>=1.0
 qdrant-client
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
