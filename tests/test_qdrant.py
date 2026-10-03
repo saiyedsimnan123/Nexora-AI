@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,9 @@ from nexora.retrieval.qdrant_config import QdrantConfig
 from nexora.retrieval.store import VectorStore
 
 SECRET = "super-secret-key"
-ID1 = str(uuid.UUID(int=1))
-ID2 = str(uuid.UUID(int=2))
+ID1 = "doc-1#chunk-0"
+ID2 = "doc-2#chunk-7"
+UUID_ID = str(uuid.UUID(int=1))
 
 
 class FakeClient:
@@ -105,8 +107,26 @@ def test_upsert_converts_records_and_preserves_payload():
     name, args, kwargs = client.calls[0]
     assert name == "upsert" and args == ("test_chunks",)
     pt = kwargs["points"][0]
-    assert pt.id == ID1 and list(pt.vector) == [1.0, 0.0, 0.0]
-    assert pt.payload == payload
+    assert pt.id != ID1
+    assert str(uuid.UUID(pt.id)) == pt.id  # valid Qdrant point ID
+    assert list(pt.vector) == [1.0, 0.0, 0.0]
+    assert pt.payload == {**payload, "_nexora_id": ID1}
+    assert "_nexora_id" not in payload  # caller's payload not mutated
+
+
+def test_id_mapping_is_deterministic_and_uuid_passthrough():
+    store, client = make_store()
+    rec = VectorRecord(id=ID1, vector=[1.0, 0.0, 0.0], payload={})
+    store.upsert([rec])
+    store.upsert([rec])
+    assert client.calls[0][2]["points"][0].id == client.calls[1][2]["points"][0].id
+    store.upsert([VectorRecord(id=UUID_ID, vector=[1.0, 0.0, 0.0], payload={})])
+    assert client.calls[2][2]["points"][0].id == UUID_ID
+
+
+def test_requirements_include_qdrant_client():
+    text = (Path(__file__).resolve().parent.parent / "requirements.txt").read_text()
+    assert "qdrant-client" in text
 
 
 def test_upsert_validation():
@@ -120,7 +140,7 @@ def test_upsert_validation():
     with pytest.raises(ValueError):
         store.upsert([VectorRecord(id=ID1, vector=[1.0, float("nan"), 0.0], payload={})])
     with pytest.raises(ValueError):
-        store.upsert([VectorRecord(id="not-a-uuid", vector=[1.0, 0.0, 0.0], payload={})])
+        store.upsert([VectorRecord(id="", vector=[1.0, 0.0, 0.0], payload={})])
     assert client.calls == []
 
 
@@ -136,15 +156,28 @@ def test_search_converts_points_and_keeps_order_and_scores():
     assert [r.score for r in result.results] == [0.9, 0.4]
     assert [r.text for r in result.results] == ["alpha", "beta"]
     assert [r.document_id for r in result.results] == ["d1", "d2"]
+    assert [r.chunk_id for r in result.results] == ["c1", "c2"]
+    assert result.results[0].metadata == pts[0].payload
     assert client.calls[0][2]["limit"] == 2
 
 
 def test_search_fallbacks():
-    store, _ = make_store(FakeClient(points=[point(ID1, 0.5, None)]))
+    qid = str(uuid.UUID(int=9))
+    store, _ = make_store(FakeClient(points=[point(qid, 0.5, None)]))
     chunk = store.search([1.0, 0.0, 0.0]).results[0]
-    assert chunk.document_id == ID1
-    assert chunk.chunk_id == ID1
-    assert chunk.text == ""
+    assert chunk.document_id == qid and chunk.chunk_id == qid
+    assert chunk.text == "" and chunk.metadata == {}
+
+
+def test_round_trip_preserves_original_id():
+    store, client = make_store()
+    store.upsert([VectorRecord(id=ID1, vector=[1.0, 0.0, 0.0], payload={"text": "t"})])
+    pt = client.calls[0][2]["points"][0]
+    client.points = [point(pt.id, 0.8, pt.payload)]
+    chunk = store.search([1.0, 0.0, 0.0]).results[0]
+    assert chunk.document_id == ID1 and chunk.chunk_id == ID1
+    assert chunk.text == "t" and chunk.score == 0.8
+    assert chunk.metadata["_nexora_id"] == ID1
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5, "2"])
@@ -166,8 +199,10 @@ def test_delete_and_invalid_ids():
     store, client = make_store()
     store.delete([ID1, ID2])
     name, args, kwargs = client.calls[0]
-    assert name == "delete" and kwargs["points_selector"].points == [ID1, ID2]
-    for bad in ([""], [5], ["abc"]):
+    assert name == "delete"
+    pts = kwargs["points_selector"].points
+    assert len(pts) == 2 and all(str(uuid.UUID(p)) == p for p in pts)
+    for bad in ([""], [5], ["  "]):
         with pytest.raises(ValueError):
             store.delete(bad)
     with pytest.raises(TypeError):
