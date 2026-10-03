@@ -16,14 +16,22 @@ class QdrantStoreError(RuntimeError):
     """Raised when the Qdrant service/client fails (not for bad input)."""
 
 
+_NAMESPACE = uuid.UUID("6f1c2d3e-4a5b-5c6d-8e7f-0a1b2c3d4e5f")
+_ID_KEY = "_nexora_id"
+
+
 def _validate_id(value: Any) -> str:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise ValueError("id must be a non-empty string")
-    try:
-        uuid.UUID(value)
-    except ValueError:
-        raise ValueError("id must be a valid UUID string (required by Qdrant)") from None
     return value
+
+
+def _to_point_id(value: str) -> str:
+    """Map an opaque Nexora ID to a valid Qdrant point ID (deterministic)."""
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return str(uuid.uuid5(_NAMESPACE, value))
 
 
 class QdrantVectorStore:
@@ -89,11 +97,13 @@ class QdrantVectorStore:
         for record in records:
             if not isinstance(record, VectorRecord):
                 raise TypeError("every item must be a VectorRecord")
+            original_id = _validate_id(record.id)
+            vector = self._check_vector(record.vector)
+            payload = dict(record.payload or {})
+            payload[_ID_KEY] = original_id
             points.append(
                 models.PointStruct(
-                    id=_validate_id(record.id),
-                    vector=self._check_vector(record.vector),
-                    payload=dict(record.payload or {}),
+                    id=_to_point_id(original_id), vector=vector, payload=payload
                 )
             )
         if not points:
@@ -103,7 +113,7 @@ class QdrantVectorStore:
     def delete(self, ids: list[str]) -> None:
         if not isinstance(ids, list):
             raise TypeError("ids must be a list")
-        valid = [_validate_id(i) for i in ids]
+        valid = [_to_point_id(_validate_id(i)) for i in ids]
         if not valid:
             return
         self._call(
@@ -127,14 +137,15 @@ class QdrantVectorStore:
         )
         results = []
         for point in response.points:
-            payload = point.payload or {}
-            pid = str(point.id)
+            payload = dict(point.payload or {})
+            original_id = payload.get(_ID_KEY, str(point.id))
             results.append(
                 RetrievedChunk(
-                    document_id=payload.get("document_id", pid),
-                    chunk_id=payload.get("chunk_id", pid),
+                    document_id=payload.get("document_id", original_id),
+                    chunk_id=payload.get("chunk_id", original_id),
                     text=payload.get("text", ""),
                     score=point.score,
+                    metadata=dict(payload),
                 )
             )
         return SearchResult(query="", results=results)
