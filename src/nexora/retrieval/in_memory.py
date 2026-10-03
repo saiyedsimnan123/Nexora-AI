@@ -1,90 +1,81 @@
-"""In-memory implementation of the ``VectorStore`` contract.
+"""In-memory ``VectorStore`` for development and testing.
 
-``InMemoryVectorStore`` keeps vector records in a per-instance dictionary and
-ranks them by cosine similarity. It is intended for tests and development: it
-is not persistent and has no external infrastructure dependencies. Stored data
-is defensively copied on the way in and on the way out, and ``upsert`` is
-atomic (the whole batch is validated before the store is touched).
+``InMemoryVectorStore`` keeps records in a dictionary and ranks them by cosine
+similarity with a plain scan. It is meant for tests, local experiments and
+small data sets; it is not thread-safe, not persistent and not optimized for
+large collections. It structurally satisfies ``nexora.retrieval.store.VectorStore``
+and uses only the standard library plus Nexora's retrieval models.
 """
 
 import copy
+import dataclasses
 import heapq
 import math
 
 from nexora.retrieval.models import RetrievedChunk, SearchResult, VectorRecord
-from nexora.retrieval.store import VectorStore
-
-__all__ = ["InMemoryVectorStore"]
 
 
-def _is_real_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _check_positive_int(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
 
 
-def _validate_vector(vector: object, name: str) -> None:
-    """Require a non-empty list of finite, non-bool numbers."""
+def _check_id(name: str, value: object) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty or whitespace-only")
+
+
+def _validated_vector(vector: object, name: str) -> list[float]:
+    """Validate ``vector`` and return a fresh ``list[float]`` copy."""
     if not isinstance(vector, list):
-        raise TypeError(f"{name} must be a list of numbers, got {type(vector).__name__}")
+        raise TypeError(f"{name} must be a list, got {type(vector).__name__}")
     if not vector:
         raise ValueError(f"{name} must not be empty")
+    result: list[float] = []
     for index, value in enumerate(vector):
-        if not _is_real_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(f"{name}[{index}] must be a number, got {type(value).__name__}")
-        try:
-            finite = math.isfinite(value)
-        except OverflowError:  # int too large to represent as a float
-            finite = False
-        if not finite:
+        number = float(value)
+        if not math.isfinite(number):
             raise ValueError(f"{name}[{index}] must be finite")
+        result.append(number)
+    return result
 
 
-def _validate_dimension(dimension: object) -> None:
-    if not isinstance(dimension, int) or isinstance(dimension, bool):
-        raise TypeError(f"dimension must be an int, got {type(dimension).__name__}")
-    if dimension <= 0:
-        raise ValueError("dimension must be greater than zero")
-
-
-def _validate_limit(limit: object) -> None:
-    if not isinstance(limit, int) or isinstance(limit, bool):
-        raise TypeError(f"limit must be an int, got {type(limit).__name__}")
-    if limit <= 0:
-        raise ValueError("limit must be greater than zero")
-
-
-def _unit_vector(vector: list[float]) -> list[float] | None:
-    """Return ``vector`` scaled to length 1, or None if its magnitude is zero.
-
-    ``math.hypot`` avoids overflow for very large components, and dividing
-    first keeps the later dot product within [-1, 1].
-    """
-    norm = math.hypot(*vector)
-    if norm == 0.0:
+def _scaled(vector: list[float]) -> tuple[list[float], float] | None:
+    """Scale by the largest magnitude (avoids overflow); None for a zero vector."""
+    peak = max(abs(value) for value in vector)
+    if peak == 0.0:
         return None
-    return [component / norm for component in vector]
+    scaled = [value / peak for value in vector]
+    return scaled, math.sqrt(math.fsum(value * value for value in scaled))
 
 
-def _cosine_similarity(a_unit: list[float] | None, b: list[float]) -> float:
-    """Cosine similarity of a pre-normalised vector and ``b``; 0.0 for zero vectors."""
-    if a_unit is None:
+def _cosine(
+    query: tuple[list[float], float] | None, other: tuple[list[float], float] | None
+) -> float:
+    """Cosine similarity in [-1.0, 1.0]; 0.0 if either vector is zero."""
+    if query is None or other is None:
         return 0.0
-    b_unit = _unit_vector(b)
-    if b_unit is None:
-        return 0.0
-    dot = math.fsum(x * y for x, y in zip(a_unit, b_unit))
-    return max(-1.0, min(1.0, dot))  # guard against rounding just outside [-1, 1]
+    dot = math.fsum(a * b for a, b in zip(query[0], other[0]))
+    score = dot / (query[1] * other[1])
+    return max(-1.0, min(1.0, score)) + 0.0  # "+ 0.0" turns -0.0 into 0.0
 
 
-def _text_or_default(value: object, default: str) -> str:
-    return value if isinstance(value, str) and value else default
+def _non_blank_str(value: object, default: str) -> str:
+    return value if isinstance(value, str) and value.strip() else default
 
 
 def _to_chunk(record: VectorRecord, score: float) -> RetrievedChunk:
     payload = record.payload
     text = payload.get("text")
     return RetrievedChunk(
-        document_id=_text_or_default(payload.get("document_id"), record.id),
-        chunk_id=_text_or_default(payload.get("chunk_id"), record.id),
+        document_id=_non_blank_str(payload.get("document_id"), record.id),
+        chunk_id=_non_blank_str(payload.get("chunk_id"), record.id),
         text=text if isinstance(text, str) else "",
         score=score,
         metadata=copy.deepcopy(payload),
@@ -92,105 +83,113 @@ def _to_chunk(record: VectorRecord, score: float) -> RetrievedChunk:
 
 
 class InMemoryVectorStore:
-    """A deterministic, non-persistent ``VectorStore`` using cosine similarity."""
+    """Dictionary-backed vector store using cosine similarity.
+
+    Args:
+        dimension: Required vector length. If ``None``, the first successful
+            upsert establishes it. Once established it never resets, even if
+            every record is deleted.
+
+    Raises:
+        TypeError: If ``dimension`` is not an int (bools are rejected).
+        ValueError: If ``dimension`` is not positive.
+    """
 
     def __init__(self, dimension: int | None = None) -> None:
-        """Create an empty store.
-
-        ``dimension=None`` infers the dimension from the first upserted record.
-        """
         if dimension is not None:
-            _validate_dimension(dimension)
-        self._dimension: int | None = dimension
+            _check_positive_int("dimension", dimension)
+        self._dimension = dimension
         self._records: dict[str, VectorRecord] = {}
 
     @property
     def dimension(self) -> int | None:
-        """The established vector dimension, or None if not yet known."""
+        """The established vector dimension, or ``None`` if not yet known."""
         return self._dimension
 
     def upsert(self, records: list[VectorRecord]) -> None:
-        """Insert or replace records; the batch is applied atomically.
+        """Insert or replace records atomically.
 
-        If an id appears more than once in the batch, the last occurrence wins.
+        The whole batch is validated and copied before the store changes, so
+        one invalid record leaves the store untouched. For duplicate ids in a
+        batch the last occurrence wins.
+
+        Raises:
+            TypeError: If ``records`` is not a list, an element is not a
+                ``VectorRecord``, or an id, vector or payload has a wrong type.
+            ValueError: If an id is blank, or a vector is empty, non-finite or
+                does not match the store dimension.
         """
         if not isinstance(records, list):
             raise TypeError(f"records must be a list, got {type(records).__name__}")
 
         dimension = self._dimension
-        prepared: list[VectorRecord] = []
+        staged: dict[str, VectorRecord] = {}
         for index, record in enumerate(records):
             if not isinstance(record, VectorRecord):
                 raise TypeError(
                     f"records[{index}] must be a VectorRecord, got {type(record).__name__}"
                 )
-            vector = list(record.vector)
-            _validate_vector(vector, f"records[{index}].vector")
+            _check_id(f"records[{index}].id", record.id)
+            vector = _validated_vector(record.vector, f"records[{index}].vector")
             if dimension is None:
                 dimension = len(vector)
             elif len(vector) != dimension:
                 raise ValueError(
-                    f"records[{index}].vector has dimension {len(vector)}, "
-                    f"expected {dimension}"
+                    f"records[{index}].vector has {len(vector)} dimensions, expected {dimension}"
                 )
-            prepared.append(
-                VectorRecord(
-                    id=record.id,
-                    vector=vector,
-                    payload=copy.deepcopy(record.payload),
+            if not isinstance(record.payload, dict):
+                raise TypeError(
+                    f"records[{index}].payload must be a dict, "
+                    f"got {type(record.payload).__name__}"
                 )
+            staged[record.id] = dataclasses.replace(
+                record, vector=vector, payload=copy.deepcopy(record.payload)
             )
 
-        # Everything is valid: only now is the store mutated.
-        for record in prepared:
-            self._records[record.id] = record
         self._dimension = dimension
+        self._records.update(staged)
 
     def delete(self, ids: list[str]) -> None:
-        """Delete records by id; ids that are not stored are ignored."""
+        """Remove records by id; missing ids are ignored.
+
+        Raises:
+            TypeError: If ``ids`` is not a list or an element is not a str.
+            ValueError: If an id is empty or whitespace-only.
+        """
         if not isinstance(ids, list):
             raise TypeError(f"ids must be a list, got {type(ids).__name__}")
         for index, record_id in enumerate(ids):
-            if not isinstance(record_id, str):
-                raise TypeError(f"ids[{index}] must be a string, got {type(record_id).__name__}")
-            if not record_id:
-                raise ValueError(f"ids[{index}] must not be empty")
+            _check_id(f"ids[{index}]", record_id)
         for record_id in ids:
             self._records.pop(record_id, None)
 
-    def search(
-        self,
-        vector: list[float],
-        *,
-        limit: int = 10,
-    ) -> SearchResult:
+    def search(self, vector: list[float], *, limit: int = 10) -> SearchResult:
         """Return up to ``limit`` records ranked by cosine similarity.
 
-        Ties are broken by record id ascending. The protocol supplies only a
-        vector, so the result's ``query`` is always ``""``.
+        Highest score first; equal scores are ordered by record id. An empty
+        store returns an empty result. The result's ``query`` is always ``""``.
+
+        Raises:
+            TypeError: If ``vector`` is not a list of numbers or ``limit`` is
+                not an int (bools are rejected).
+            ValueError: If ``limit`` is not positive, the vector is empty or
+                non-finite, or its length differs from the store dimension.
         """
-        _validate_limit(limit)
-        _validate_vector(vector, "vector")
-        if self._dimension is not None and len(vector) != self._dimension:
+        _check_positive_int("limit", limit)
+        query = _validated_vector(vector, "vector")
+        if self._dimension is not None and len(query) != self._dimension:
             raise ValueError(
-                f"vector has dimension {len(vector)}, expected {self._dimension}"
+                f"vector has {len(query)} dimensions, expected {self._dimension}"
             )
 
-        query_unit = _unit_vector(vector)
-        scored = [
-            (_cosine_similarity(query_unit, record.vector), record)
+        prepared = _scaled(query)
+        scored = (
+            (_cosine(prepared, _scaled(record.vector)), record)
             for record in self._records.values()
-        ]
-        best = heapq.nsmallest(limit, scored, key=lambda item: (-item[0], item[1].id))
-        return SearchResult(
-            query="",
-            results=[_to_chunk(record, score) for score, record in best],
         )
+        top = heapq.nsmallest(limit, scored, key=lambda item: (-item[0], item[1].id))
+        return SearchResult(query="", results=[_to_chunk(r, s) for s, r in top])
 
     def count(self) -> int:
         """Return the number of stored records."""
         return len(self._records)
-
-
-# Static check that the class satisfies the contract (no runtime cost).
-_: type[VectorStore] = InMemoryVectorStore
