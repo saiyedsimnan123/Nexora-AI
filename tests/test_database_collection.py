@@ -124,7 +124,7 @@ def test_collection_workspace_navigation_and_optional_description(engine):
 def test_required_columns_enforced(engine):
     with Session(engine) as session:
         user = seed(session, n_collections=0)
-        session.add(Collection(workspace_id=user.workspaces[0].id))  # no name
+        session.add(Collection(workspace_id=user.workspaces[0].id))
         with pytest.raises(IntegrityError):
             session.flush()
     with Session(engine) as session:
@@ -132,7 +132,7 @@ def test_required_columns_enforced(engine):
         with pytest.raises(IntegrityError):
             session.flush()
     with Session(engine) as session:
-        session.add(Collection(workspace_id=uuid.uuid4(), name="dangling"))  # FK enforcement is on
+        session.add(Collection(workspace_id=uuid.uuid4(), name="dangling"))
         with pytest.raises(IntegrityError):
             session.flush()
 
@@ -182,4 +182,12 @@ def test_module_is_side_effect_free():
     source = inspect.getsource(collection_module)
     for forbidden in ("os.environ", "getenv", "create_engine", "create_all", ".connect("):
         assert forbidden not in source
-    assert not hasattr(models_package, "Paper") and "papers" not in Collection.__mapper__.relationships
+
+    # 12C-3: Collection now owns Papers.
+    assert hasattr(models_package, "Paper")
+    assert "papers" in Collection.__mapper__.relationships
+
+    papers = Collection.__mapper__.relationships["papers"]
+    assert papers.passive_deletes == "all"
+    assert not papers.cascade.delete
+    assert not papers.cascade.delete_orphan

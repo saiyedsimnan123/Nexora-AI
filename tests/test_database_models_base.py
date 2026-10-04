@@ -42,7 +42,6 @@ def _remove_test_tables_from_shared_metadata():
 
 @pytest.fixture
 def engine():
-    # In-memory SQLite exists only in tests; it is never part of the production code.
     eng = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
     Base.metadata.create_all(eng, tables=[Widget.__table__, Gadget.__table__])
     yield eng
@@ -53,12 +52,10 @@ def ddl(table):
     return str(CreateTable(table).compile(dialect=PG))
 
 
-# ---- base, metadata, naming ----
-
 def test_base_importable_and_is_declarative_base():
     assert issubclass(Base, DeclarativeBase)
     assert isinstance(Base.metadata, MetaData)
-    assert not hasattr(Base, "__table__")  # Base itself maps no table
+    assert not hasattr(Base, "__table__")
 
 
 def test_naming_convention_is_complete_and_deterministic():
@@ -92,8 +89,6 @@ def test_same_convention_gives_identical_names_on_a_fresh_metadata():
     assert "pk_test_widgets" in text and "uq_test_widgets_name" in text
 
 
-# ---- declarative mapping and typing ----
-
 def test_models_inherit_base_and_register_tables():
     assert issubclass(Widget, Base) and issubclass(Gadget, Base)
     assert Widget.__table__ in Base.metadata.tables.values()
@@ -104,10 +99,8 @@ def test_mapped_annotations_resolve_to_expected_column_types():
     c = Widget.__table__.c
     assert c.name.nullable is False and c.name.type.length == 50
     assert isinstance(c.last_seen.type, DateTime) and c.last_seen.type.timezone is True
-    assert c.last_seen.nullable is True  # Mapped[datetime | None]
+    assert c.last_seen.nullable is True
 
-
-# ---- UUID strategy ----
 
 def test_uuid_primary_key_definition_is_postgresql_native():
     id_col = Widget.__table__.c.id
@@ -140,8 +133,6 @@ def test_explicit_uuid_is_respected(engine):
         assert session.get(Widget, explicit) is not None
 
 
-# ---- timestamp strategy ----
-
 def test_timestamp_columns_are_timezone_aware_with_server_defaults():
     for name in ("created_at", "updated_at"):
         col = Widget.__table__.c[name]
@@ -150,7 +141,7 @@ def test_timestamp_columns_are_timezone_aware_with_server_defaults():
     text = ddl(Widget.__table__)
     assert "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL" in text
     assert "updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL" in text
-    assert "created_at" not in Gadget.__table__.c  # timestamps are opt-in
+    assert "created_at" not in Gadget.__table__.c
 
 
 def test_utc_now_is_aware_utc():
@@ -160,10 +151,6 @@ def test_utc_now_is_aware_utc():
 
 
 def test_timestamps_set_on_insert_and_updated_at_moves_on_update(engine):
-    # SQLite does not preserve time zones for DateTime(timezone=True), so values read back
-    # from it are naive. Timezone-awareness is verified through the column type (see the
-    # timestamp-column test above) and utc_now(); here every comparison uses values that
-    # were all read back from SQLite, and no aware/naive mix is ever ordered.
     past = datetime(2000, 1, 1)
     table = Widget.__table__
     with Session(engine) as session:
@@ -173,7 +160,6 @@ def test_timestamps_set_on_insert_and_updated_at_moves_on_update(engine):
         assert widget.created_at is not None
         assert widget.updated_at is not None
 
-        # Pin updated_at to a known old value (explicit values override onupdate).
         session.execute(update(table).where(table.c.id == widget.id).values(updated_at=past))
         session.refresh(widget)
         assert widget.updated_at == past
@@ -183,12 +169,10 @@ def test_timestamps_set_on_insert_and_updated_at_moves_on_update(engine):
         session.flush()
         session.refresh(widget)
 
-        assert widget.created_at == created_before  # unchanged by the update
+        assert widget.created_at == created_before
         assert widget.updated_at != past
-        assert widget.updated_at > past  # refreshed by onupdate
+        assert widget.updated_at > past
 
-
-# ---- safety: no side effects, no globals, no env ----
 
 def test_nothing_is_created_automatically():
     eng = create_engine("sqlite+pysqlite:///:memory:", poolclass=StaticPool)
@@ -211,20 +195,29 @@ def test_module_has_no_engine_session_or_global_state():
 def test_fresh_interpreter_import_is_safe_offline_and_creates_no_engine():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("NEXORA", "DATABASE", "PG"))}
     code = (
-        f"import sys; sys.path[:0] = {sys.path!r}\n"
-        "import gc\n"
-        "import nexora.database.models as m\n"
-        "from sqlalchemy.engine import Engine\n"
-        "print(','.join(sorted(m.Base.metadata.tables)))\n"
-        "print(sum(isinstance(o, Engine) for o in gc.get_objects()))\n"
+        f"import sys; sys.path[:0] = {sys.path!r}
+"
+        "import gc
+"
+        "import nexora.database.models as m
+"
+        "from sqlalchemy.engine import Engine
+"
+        "print(','.join(sorted(m.Base.metadata.tables)))
+"
+        "print(sum(isinstance(o, Engine) for o in gc.get_objects()))
+"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 0, result.stderr
-    # Importing registers the 12C-2 tables on the metadata (definitions only); no Engine exists.
-    assert result.stdout.split() == ["collections,users,workspaces", "0"]
 
+    # Importing registers the current ORM tables on the metadata
+    # (definitions only); no Engine exists.
+    assert result.stdout.split() == [
+        "collections,documents,papers,users,workspaces",
+        "0",
+    ]
 
-# ---- public exports ----
 
 def test_public_exports():
     import nexora.database as database
