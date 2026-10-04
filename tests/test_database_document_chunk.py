@@ -364,7 +364,16 @@ def test_chunk_deletion_is_left_to_the_database():
 # Database-level constraints (bypassing the ORM validators)
 @pytest.mark.parametrize(
     "overrides",
-    [{"chunk_index": -1}, {"text": ""}, {"text": "   "}, {"text": "\n\t"}],
+    [
+        {"chunk_index": -1},
+        {"text": ""},
+        {"text": "   "},
+        {"text": "\n\t"},
+        {"text": "\r\n"},
+        {"text": "\t\t\t"},
+        {"text": " \n \r \t "},
+        {"text": "\x0b\x0c"},
+    ],
 )
 def test_database_constraints_reject_invalid_rows(session, document, overrides):
     with pytest.raises(IntegrityError):
@@ -373,6 +382,19 @@ def test_database_constraints_reject_invalid_rows(session, document, overrides):
                 **raw_row(document.id, **overrides)
             )
         )
+
+
+@pytest.mark.parametrize(
+    "text", ["x", "  padded  ", "line one\nline two", "\n x \n", "\ttabbed\t", "a\r\nb"]
+)
+def test_database_accepts_text_with_content_and_inner_whitespace(
+    session, document, text
+):
+    session.execute(
+        insert(DocumentChunkRecord.__table__).values(**raw_row(document.id, text=text))
+    )
+    session.flush()
+    assert _count(session, DocumentChunkRecord) == 1
 
 
 def test_database_accepts_valid_raw_row(session, document):
@@ -388,7 +410,8 @@ def test_postgresql_ddl_compiles():
     assert "CREATE TABLE document_chunks" in ddl
     assert "REFERENCES documents (id) ON DELETE CASCADE" in ddl
     assert "chunk_index >= 0" in ddl
-    assert "length(trim(text)) > 0" in ddl
+    assert "length(trim(replace(" in ddl
+    assert ") > 0" in ddl
     assert "UNIQUE (document_id, chunk_index)" in ddl
     for name in ("chunk_index_non_negative", "text_not_blank", "document_id_chunk_index"):
         assert name in ddl
