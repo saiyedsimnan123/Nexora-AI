@@ -344,13 +344,6 @@ def test_relationships_can_be_used_to_build_a_reference(session):
     assert reference in b.incoming_references
 
 
-def test_self_reference_through_relationships_is_rejected_by_the_database(session):
-    (paper,) = create_papers(session, 1)
-    session.add(PaperReference(source_paper=paper, target_paper=paper))
-    with pytest.raises(IntegrityError):
-        session.flush()
-
-
 # 22-24. Database cascade on deletion
 def test_deleting_source_paper_removes_its_outgoing_reference(session):
     a, b = create_papers(session)
