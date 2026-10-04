@@ -24,6 +24,7 @@ from nexora.database.models.base import (
 if TYPE_CHECKING:
     from nexora.database.models.collection import Collection
     from nexora.database.models.document import Document
+    from nexora.database.models.paper_reference import PaperReference
 
 TITLE_MAX_LENGTH = 500
 ABSTRACT_MAX_LENGTH = 20000
@@ -72,6 +73,18 @@ class Paper(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # neither deletes nor nulls children when a paper is deleted.
     documents: Mapped[list[Document]] = relationship(
         back_populates="paper",
+        passive_deletes="all",
+    )
+    outgoing_references: Mapped[list[PaperReference]] = relationship(
+        "PaperReference",
+        foreign_keys="[PaperReference.source_paper_id]",
+        back_populates="source_paper",
+        passive_deletes="all",
+    )
+    incoming_references: Mapped[list[PaperReference]] = relationship(
+        "PaperReference",
+        foreign_keys="[PaperReference.target_paper_id]",
+        back_populates="target_paper",
         passive_deletes="all",
     )
 
