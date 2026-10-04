@@ -1,4 +1,4 @@
-"""Nexora ORM models: reusable foundation (concrete models come later)."""
+"""Nexora ORM models. Importing this package registers every model on Base.metadata."""
 
 from nexora.database.models.base import (
     NAMING_CONVENTION,
@@ -7,5 +7,17 @@ from nexora.database.models.base import (
     UUIDPrimaryKeyMixin,
     utc_now,
 )
+from nexora.database.models.collection import Collection
+from nexora.database.models.user import User
+from nexora.database.models.workspace import Workspace
 
-__all__ = ["NAMING_CONVENTION", "Base", "TimestampMixin", "UUIDPrimaryKeyMixin", "utc_now"]
+__all__ = [
+    "NAMING_CONVENTION",
+    "Base",
+    "Collection",
+    "TimestampMixin",
+    "UUIDPrimaryKeyMixin",
+    "User",
+    "Workspace",
+    "utc_now",
+]
