@@ -8,6 +8,7 @@ from nexora.database.models.base import (
     Base,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
+    utc_now,
 )
 from nexora.database.models.collection import Collection
 from nexora.database.models.document import Document
@@ -27,4 +28,5 @@ __all__ = [
     "UUIDPrimaryKeyMixin",
     "User",
     "Workspace",
+    "utc_now",
 ]
