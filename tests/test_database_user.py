@@ -8,7 +8,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import RelationshipDirection, Session, sessionmaker
-from sqlalchemy.orm import inspect as orm_inspect
+from sqlalchemy import inspect as orm_inspect
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable, UniqueConstraint
 
