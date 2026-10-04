@@ -208,19 +208,20 @@ def test_module_has_no_engine_session_or_global_state():
         assert forbidden not in source
 
 
-def test_fresh_interpreter_import_is_safe_offline_and_creates_no_tables():
+def test_fresh_interpreter_import_is_safe_offline_and_creates_no_engine():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("NEXORA", "DATABASE", "PG"))}
     code = (
         f"import sys; sys.path[:0] = {sys.path!r}\n"
         "import gc\n"
         "import nexora.database.models as m\n"
         "from sqlalchemy.engine import Engine\n"
-        "print(len(m.Base.metadata.tables))\n"
+        "print(','.join(sorted(m.Base.metadata.tables)))\n"
         "print(sum(isinstance(o, Engine) for o in gc.get_objects()))\n"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["0", "0"]
+    # Importing registers the 12C-2 tables on the metadata (definitions only); no Engine exists.
+    assert result.stdout.split() == ["collections,users,workspaces", "0"]
 
 
 # ---- public exports ----
@@ -229,6 +230,6 @@ def test_public_exports():
     import nexora.database as database
     import nexora.database.models as models
 
-    assert models.__all__ == ["NAMING_CONVENTION", "Base", "TimestampMixin", "UUIDPrimaryKeyMixin", "utc_now"]
+    assert {"NAMING_CONVENTION", "Base", "TimestampMixin", "UUIDPrimaryKeyMixin", "utc_now"} <= set(models.__all__)
     assert database.Base is Base and "Base" in database.__all__
     assert models.UUIDPrimaryKeyMixin is UUIDPrimaryKeyMixin and models.TimestampMixin is TimestampMixin
