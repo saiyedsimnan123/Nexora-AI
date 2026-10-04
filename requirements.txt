@@ -5,3 +5,4 @@ qdrant-client
 fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
+SQLAlchemy>=2.0,<3.0
