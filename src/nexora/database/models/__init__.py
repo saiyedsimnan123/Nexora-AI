@@ -1,4 +1,7 @@
-"""Nexora ORM models. Importing this package registers every model on Base.metadata."""
+"""Nexora ORM models.
+
+Importing this package registers every model on Base.metadata.
+"""
 
 from nexora.database.models.base import (
     NAMING_CONVENTION,
@@ -8,6 +11,8 @@ from nexora.database.models.base import (
     utc_now,
 )
 from nexora.database.models.collection import Collection
+from nexora.database.models.document import Document
+from nexora.database.models.paper import Paper
 from nexora.database.models.user import User
 from nexora.database.models.workspace import Workspace
 
@@ -15,6 +20,8 @@ __all__ = [
     "NAMING_CONVENTION",
     "Base",
     "Collection",
+    "Document",
+    "Paper",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
     "User",
