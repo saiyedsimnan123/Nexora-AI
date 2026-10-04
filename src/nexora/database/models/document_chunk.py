@@ -32,6 +32,20 @@ if TYPE_CHECKING:
 
 CHUNK_TEXT_MAX_LENGTH = 100_000
 
+# ``trim()`` removes only spaces on both SQLite and PostgreSQL, so the other
+# ASCII whitespace characters are stripped with ``replace()`` first. Both
+# functions exist, with the same argument order, on both databases. Unicode
+# whitespace beyond ASCII is rejected by the model validator.
+_ASCII_WHITESPACE_TO_STRIP = ("\n", "\r", "\t", "\x0b", "\x0c")
+
+
+def _not_blank_sql(column: str) -> str:
+    """SQL condition that is true when ``column`` has a non-whitespace character."""
+    expression = column
+    for character in _ASCII_WHITESPACE_TO_STRIP:
+        expression = f"replace({expression}, '{character}', '')"
+    return f"length(trim({expression})) > 0"
+
 
 class DocumentChunkRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """One chunk of a document, identified by its zero-based position.
@@ -46,7 +60,7 @@ class DocumentChunkRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "document_id", "chunk_index", name="document_id_chunk_index"
         ),
         CheckConstraint("chunk_index >= 0", name="chunk_index_non_negative"),
-        CheckConstraint("length(trim(text)) > 0", name="text_not_blank"),
+        CheckConstraint(_not_blank_sql("text"), name="text_not_blank"),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
