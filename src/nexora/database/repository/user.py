@@ -24,3 +24,7 @@ class UserRepository(BaseRepository[User]):
         """Get a user by email, or None if not found."""
         stmt = select(User).where(User.email == email)
         return self._session.scalars(stmt).first()
+
+    def update(self, id: UUID, *, email: str) -> User:
+        """Update an existing user."""
+        return self._update(id, email=email)
