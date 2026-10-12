@@ -130,3 +130,69 @@ def test_list_all(session):
 
     res = repo.list_all(offset=1, limit=1)
     assert len(res) == 1
+
+def test_unrelated_pending_changes_are_safely_persisted_on_error(session):
+    repo = UserRepository(session)
+    ws_repo = WorkspaceRepository(session)
+
+    # 1. Start a transaction by creating a valid record without flushing immediately in the caller
+    valid_user = User(email="pending@example.com")
+    session.add(valid_user)
+
+    # 2. Try to create an invalid record using the repository (e.g., missing foreign key constraint)
+    # The repository will flush the pending user FIRST successfully, then fail on the invalid workspace
+    with pytest.raises(ConstraintError):
+        ws_repo.create(user_id=uuid4(), name="Invalid WS")
+
+    # 3. The invalid workspace creation failed (and rolled back its savepoint).
+    # But the pending valid user should have been flushed beforehand and persisted.
+    session.commit() # The user manually commits
+
+    # Ensure the valid record exists
+    assert repo.get_by_email("pending@example.com") is not None
+
+def test_delete_constraint_failure(session):
+    user_repo = UserRepository(session)
+    ws_repo = WorkspaceRepository(session)
+
+    # Create user and workspace
+    user = user_repo.create(email="delete_test@example.com")
+    ws = ws_repo.create(user_id=user.id, name="WS for delete")
+    session.commit()
+
+    # Manually delete user without using repository to bypass Python-level cascades,
+    # OR set up a scenario where deletion fails due to DB constraints.
+    # For a User, foreign keys on Workspaces are set to ON DELETE CASCADE, so deleting a User
+    # will actually succeed and cascade to the Workspace.
+    user_id = user.id
+
+    # We want to mock session.flush ONLY when it's called from inside the `begin_nested()` block
+    # so the first flush (for pending changes) succeeds, and the second one fails.
+    import unittest.mock
+    original_flush = session.flush
+    flush_call_count = 0
+
+    def side_effect(*args, **kwargs):
+        nonlocal flush_call_count
+        flush_call_count += 1
+        if flush_call_count == 2:
+            raise IntegrityError("mock", "mock", "mock")
+        return original_flush(*args, **kwargs)
+
+    with unittest.mock.patch.object(session, 'flush', side_effect=side_effect):
+        with pytest.raises(ConstraintError):
+            user_repo.delete(user_id)
+
+def test_transaction_recovery_on_update_constraint_error(session):
+    repo = UserRepository(session)
+    user1 = repo.create(email="user1@example.com")
+    user2 = repo.create(email="user2@example.com")
+
+    # Trigger duplicate error on update
+    with pytest.raises(DuplicateRecordError):
+        repo.update(user2.id, email="user1@example.com")
+
+    # Test session is still usable
+    repo.create(email="user3@example.com")
+    session.commit()
+    assert repo.get_by_email("user3@example.com") is not None
