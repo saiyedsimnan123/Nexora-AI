@@ -27,16 +27,22 @@ class WorkspaceRepository(Repository[Workspace]):
         try:
             self._session.flush()
         except IntegrityError as e:
-            raise RepositoryError(f"Failed to add Workspace: constraint violation") from e
+            self._session.rollback()
+            raise RepositoryError("Failed to add Workspace: constraint violation") from e
         return entity
 
     def update(self, entity: Workspace) -> Workspace:
         try:
             self._session.flush()
         except IntegrityError as e:
-            raise RepositoryError(f"Failed to update Workspace: constraint violation") from e
+            self._session.rollback()
+            raise RepositoryError("Failed to update Workspace: constraint violation") from e
         return entity
 
     def delete(self, entity: Workspace) -> None:
         self._session.delete(entity)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as e:
+            self._session.rollback()
+            raise RepositoryError("Failed to delete Workspace: constraint violation") from e

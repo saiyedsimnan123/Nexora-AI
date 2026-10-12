@@ -30,7 +30,8 @@ class UserRepository(Repository[User]):
         try:
             self._session.flush()
         except IntegrityError as e:
-            raise RepositoryError(f"Failed to add User: constraint violation") from e
+            self._session.rollback()
+            raise RepositoryError("Failed to add User: constraint violation") from e
         return entity
 
     def update(self, entity: User) -> User:
@@ -38,9 +39,14 @@ class UserRepository(Repository[User]):
         try:
             self._session.flush()
         except IntegrityError as e:
-            raise RepositoryError(f"Failed to update User: constraint violation") from e
+            self._session.rollback()
+            raise RepositoryError("Failed to update User: constraint violation") from e
         return entity
 
     def delete(self, entity: User) -> None:
         self._session.delete(entity)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as e:
+            self._session.rollback()
+            raise RepositoryError("Failed to delete User: constraint violation") from e

@@ -84,7 +84,7 @@ def test_user_repository_not_found(db_session: Session):
         repo.get_by_email("missing@example.com")
 
 
-def test_user_repository_constraint_violation(db_session: Session):
+def test_user_repository_constraint_violation_and_recovery(db_session: Session):
     repo = UserRepository(db_session)
     user1 = User(email="duplicate@example.com")
     repo.add(user1)
@@ -93,7 +93,12 @@ def test_user_repository_constraint_violation(db_session: Session):
     with pytest.raises(RepositoryError, match="Failed to add User: constraint violation"):
         repo.add(user2)
 
-    db_session.rollback()
+    # Session should have been rolled back to a clean state by the repository after the error,
+    # allowing subsequent valid operations to succeed in the same session wrapper
+    # (Though in actual usage, the caller's transaction block might still need to handle it or abort)
+    user3 = User(email="valid@example.com")
+    repo.add(user3)
+    assert user3.id is not None
 
 
 def test_workspace_repository_crud(db_session: Session):
@@ -128,7 +133,7 @@ def test_workspace_repository_crud(db_session: Session):
         repo.get_by_id(ws.id)
 
 
-def test_workspace_repository_foreign_key_violation(db_session: Session):
+def test_workspace_repository_foreign_key_violation_and_recovery(db_session: Session):
     repo = WorkspaceRepository(db_session)
     # Trying to add workspace with non-existent user_id
     ws = Workspace(user_id=uuid.uuid4(), name="Invalid", description="Desc")
@@ -136,4 +141,10 @@ def test_workspace_repository_foreign_key_violation(db_session: Session):
     with pytest.raises(RepositoryError, match="Failed to add Workspace: constraint violation"):
         repo.add(ws)
 
-    db_session.rollback()
+    user_repo = UserRepository(db_session)
+    user = User(email="owner2@example.com")
+    user_repo.add(user)
+
+    ws2 = Workspace(user_id=user.id, name="Valid", description="Desc")
+    repo.add(ws2)
+    assert ws2.id is not None
