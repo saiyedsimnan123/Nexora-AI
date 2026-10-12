@@ -63,6 +63,10 @@ class BaseRepository(Generic[ModelT]):
 
     def _create(self, **kwargs: Any) -> ModelT:
         """Internal helper to create a record and flush."""
+        # Flush unrelated pending changes first. If they fail, they should fail
+        # normally and not be mapped as a repository error for this record.
+        self._session.flush()
+
         record = self._model_cls(**kwargs)
 
         # Use a nested transaction (savepoint) so an IntegrityError does not invalidate
@@ -80,17 +84,19 @@ class BaseRepository(Generic[ModelT]):
 
     def _update(self, id: UUID, **kwargs: Any) -> ModelT:
         """Internal helper to update a record."""
+        # Flush unrelated pending changes first.
+        self._session.flush()
+
         record = self.get_by_id_or_raise(id)
-        for key, value in kwargs.items():
-            setattr(record, key, value)
 
         try:
             with self._session.begin_nested():
+                for key, value in kwargs.items():
+                    setattr(record, key, value)
                 self._session.flush()
         except IntegrityError as e:
-            # Refresh to revert attributes or expunge if it somehow got removed
-            if record in self._session:
-                self._session.refresh(record)
+            # The transaction is rolled back to the savepoint, so pending state is reverted.
+            # We don't need to refresh, SQLAlchemy handles expiring the modified attributes.
             error_str = str(e.orig).lower() if e.orig else str(e).lower()
             if "unique" in error_str or "duplicate" in error_str:
                 raise DuplicateRecordError(str(e)) from e
@@ -99,6 +105,18 @@ class BaseRepository(Generic[ModelT]):
 
     def delete(self, id: UUID) -> None:
         """Delete a record by ID."""
+        # Flush unrelated pending changes first.
+        try:
+            self._session.flush()
+        except IntegrityError:
+            raise # Unrelated pending changes failed, don't map this to the current operation
+
         record = self.get_by_id_or_raise(id)
-        self._session.delete(record)
-        self._session.flush()
+
+        try:
+            with self._session.begin_nested():
+                self._session.delete(record)
+                self._session.flush()
+        except IntegrityError as e:
+            error_str = str(e.orig).lower() if e.orig else str(e).lower()
+            raise ConstraintError(str(e)) from e
