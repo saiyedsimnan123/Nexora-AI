@@ -34,7 +34,7 @@ class PaperAuthor(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "paper_authors"
     __table_args__ = (
         CheckConstraint("author_order >= 1", name="author_order_positive"),
-        UniqueConstraint("paper_id", "author_id", name="uq_paper_author"),
+        UniqueConstraint("paper_id", "author_id", name="paper_author_unique"),
     )
 
     paper_id: Mapped[uuid.UUID] = mapped_column(
