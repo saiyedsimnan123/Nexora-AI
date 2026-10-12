@@ -24,6 +24,7 @@ from nexora.database.models.base import (
 if TYPE_CHECKING:
     from nexora.database.models.collection import Collection
     from nexora.database.models.document import Document
+    from nexora.database.models.paper_author import PaperAuthor
     from nexora.database.models.paper_reference import PaperReference
 
 TITLE_MAX_LENGTH = 500
@@ -85,6 +86,11 @@ class Paper(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         "PaperReference",
         foreign_keys="[PaperReference.target_paper_id]",
         back_populates="target_paper",
+        passive_deletes="all",
+    )
+    authorships: Mapped[list[PaperAuthor]] = relationship(
+        "PaperAuthor",
+        back_populates="paper",
         passive_deletes="all",
     )
 

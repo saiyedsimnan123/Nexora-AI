@@ -10,21 +10,25 @@ from nexora.database.models.base import (
     UUIDPrimaryKeyMixin,
     utc_now,
 )
+from nexora.database.models.author import Author
 from nexora.database.models.collection import Collection
 from nexora.database.models.document import Document
 from nexora.database.models.document_chunk import DocumentChunkRecord
 from nexora.database.models.paper import Paper
+from nexora.database.models.paper_author import PaperAuthor
 from nexora.database.models.paper_reference import PaperReference
 from nexora.database.models.user import User
 from nexora.database.models.workspace import Workspace
 
 __all__ = [
     "NAMING_CONVENTION",
+    "Author",
     "Base",
     "Collection",
     "Document",
     "DocumentChunkRecord",
     "Paper",
+    "PaperAuthor",
     "PaperReference",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
