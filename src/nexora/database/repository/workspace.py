@@ -24,3 +24,12 @@ class WorkspaceRepository(BaseRepository[Workspace]):
         """List workspaces for a specific user."""
         stmt = select(Workspace).where(Workspace.user_id == user_id).offset(offset).limit(limit)
         return self._session.scalars(stmt).all()
+
+    def update(self, id: UUID, *, name: str | None = None, description: str | None = None) -> Workspace:
+        """Update an existing workspace. Only updates provided fields."""
+        kwargs = {}
+        if name is not None:
+            kwargs["name"] = name
+        if description is not None:
+            kwargs["description"] = description
+        return self._update(id, **kwargs)

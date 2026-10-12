@@ -21,6 +21,9 @@ class RecordNotFoundError(RepositoryError):
     """Raised when a record is not found."""
 
 
+class ConstraintError(RepositoryError):
+    """Raised when an operation violates a database constraint (e.g. foreign key, check)."""
+
 class DuplicateRecordError(RepositoryError):
     """Raised when creating or updating a record would cause a uniqueness violation."""
 
@@ -61,17 +64,37 @@ class BaseRepository(Generic[ModelT]):
     def _create(self, **kwargs: Any) -> ModelT:
         """Internal helper to create a record and flush."""
         record = self._model_cls(**kwargs)
-        self._session.add(record)
+
+        # Use a nested transaction (savepoint) so an IntegrityError does not invalidate
+        # the caller's entire transaction.
         try:
-            self._session.flush()
+            with self._session.begin_nested():
+                self._session.add(record)
+                self._session.flush()
         except IntegrityError as e:
-            # We don't rollback the entire transaction here automatically because
-            # SQLAlchemy handles savepoints, but the caller should usually handle
-            # this, or rollback if needed. We translate the exception.
-            # Usually IntegrityError due to unique constraint or foreign key.
-            # For this base implementation we map to DuplicateRecordError for simplicity
-            # if it looks like a duplicate.
-            raise DuplicateRecordError(str(e)) from e
+            error_str = str(e.orig).lower() if e.orig else str(e).lower()
+            if "unique" in error_str or "duplicate" in error_str:
+                raise DuplicateRecordError(str(e)) from e
+            raise ConstraintError(str(e)) from e
+        return record
+
+    def _update(self, id: UUID, **kwargs: Any) -> ModelT:
+        """Internal helper to update a record."""
+        record = self.get_by_id_or_raise(id)
+        for key, value in kwargs.items():
+            setattr(record, key, value)
+
+        try:
+            with self._session.begin_nested():
+                self._session.flush()
+        except IntegrityError as e:
+            # Refresh to revert attributes or expunge if it somehow got removed
+            if record in self._session:
+                self._session.refresh(record)
+            error_str = str(e.orig).lower() if e.orig else str(e).lower()
+            if "unique" in error_str or "duplicate" in error_str:
+                raise DuplicateRecordError(str(e)) from e
+            raise ConstraintError(str(e)) from e
         return record
 
     def delete(self, id: UUID) -> None:
