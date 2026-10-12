@@ -8,6 +8,7 @@ from nexora.database.models.base import Base
 from nexora.database.repository.base import BaseRepository, RecordNotFoundError, DuplicateRecordError, ConstraintError
 from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
+from nexora.database.repository.collection import CollectionRepository
 from nexora.database.models.user import User
 
 @pytest.fixture
@@ -196,3 +197,71 @@ def test_transaction_recovery_on_update_constraint_error(session):
     repo.create(email="user3@example.com")
     session.commit()
     assert repo.get_by_email("user3@example.com") is not None
+
+
+def test_collection_repository(session):
+    user_repo = UserRepository(session)
+    ws_repo = WorkspaceRepository(session)
+    repo = CollectionRepository(session)
+
+    user = user_repo.create(email="c@example.com")
+    ws = ws_repo.create(user_id=user.id, name="Workspace for Collection")
+
+    # Create
+    col = repo.create(workspace_id=ws.id, name="Test Collection", description="Collection Description")
+
+    # Read
+    found = repo.get_by_id(col.id)
+    assert found is not None
+    assert found.name == "Test Collection"
+    assert found.description == "Collection Description"
+
+    # List by workspace
+    collections = repo.list_by_workspace_id(ws.id)
+    assert len(collections) == 1
+    assert collections[0].id == col.id
+
+    # Pagination
+    col2 = repo.create(workspace_id=ws.id, name="Test Collection 2")
+    col_page_1 = repo.list_by_workspace_id(ws.id, offset=0, limit=1)
+    assert len(col_page_1) == 1
+
+    # Update
+    col = repo.update(col.id, name="Renamed Collection", description="New Description")
+    assert col.name == "Renamed Collection"
+    assert col.description == "New Description"
+
+    # Update partial
+    col = repo.update(col.id, name="Renamed Again")
+    assert col.name == "Renamed Again"
+    assert col.description == "New Description"
+
+    # Delete
+    repo.delete(col.id)
+    assert repo.get_by_id(col.id) is None
+
+    # Constraint mapping test for Foreign Key
+    with pytest.raises(ConstraintError):
+        repo.create(workspace_id=uuid4(), name="Invalid Collection")
+
+    # Constraint mapping test for check constraint (blank name)
+    # The check constraint CK_collections_name_not_blank will trigger
+    with pytest.raises(ConstraintError):
+        repo.create(workspace_id=ws.id, name="   ")
+
+
+def test_collection_repository_update_description_to_none(session):
+    user_repo = UserRepository(session)
+    ws_repo = WorkspaceRepository(session)
+    repo = CollectionRepository(session)
+
+    user = user_repo.create(email="d@example.com")
+    ws = ws_repo.create(user_id=user.id, name="Workspace")
+
+    # Create with description
+    col = repo.create(workspace_id=ws.id, name="Test Collection", description="Desc")
+    assert col.description == "Desc"
+
+    # Explicitly clear description
+    col = repo.update(col.id, description=None)
+    assert col.description is None
