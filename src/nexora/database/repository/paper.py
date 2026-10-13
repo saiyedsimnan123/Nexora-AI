@@ -88,3 +88,8 @@ class PaperRepository(BaseRepository[Paper]):
         if collection_id is not _UNSET:
             kwargs["collection_id"] = collection_id
         return self._update(id, **kwargs)
+
+    def get_by_id_for_update(self, id: UUID) -> Paper | None:
+        """Get a paper by ID with a database row lock (FOR UPDATE), or None if not found."""
+        stmt = select(Paper).where(Paper.id == id).with_for_update()
+        return self._session.scalars(stmt).first()

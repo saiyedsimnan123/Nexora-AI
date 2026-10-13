@@ -100,8 +100,11 @@ class DocumentPersistenceService:
                 f"processed_document must be a ProcessedDocument, got {type(processed_document).__name__}"
             )
 
-        # 1. Verify that owning paper exists
-        paper = self._paper_repo.get_by_id(paper_id)
+        # 1. Verify that owning paper exists (and acquire row lock in supported databases)
+        if hasattr(self._paper_repo, "get_by_id_for_update") and callable(self._paper_repo.get_by_id_for_update):
+            paper = self._paper_repo.get_by_id_for_update(paper_id)
+        else:
+            paper = self._paper_repo.get_by_id(paper_id)
         if paper is None:
             raise RecordNotFoundError(f"Paper with id {paper_id} not found")
 

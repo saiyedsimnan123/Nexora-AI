@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import TYPE_CHECKING, Any, Sequence
 from uuid import UUID
+
+from sqlalchemy.exc import IntegrityError
 
 from nexora.database.models.document import Document
 from nexora.database.models.document_chunk import DocumentChunkRecord
@@ -15,6 +18,19 @@ from nexora.document.models import DocumentChunk, ProcessedDocument
 from nexora.document.service import DocumentPersistenceService
 from nexora.retrieval.models import VectorRecord
 from nexora.retrieval.store import VectorStore
+
+_PAPER_INGESTION_LOCKS: dict[UUID, threading.Lock] = {}
+_PAPER_LOCKS_REGISTRY_MUTEX = threading.Lock()
+
+
+def get_paper_ingestion_lock(paper_id: UUID) -> threading.Lock:
+    """Retrieve or register a thread-safe mutex for concurrent ingestion per paper."""
+    with _PAPER_LOCKS_REGISTRY_MUTEX:
+        lock = _PAPER_INGESTION_LOCKS.get(paper_id)
+        if lock is None:
+            lock = threading.Lock()
+            _PAPER_INGESTION_LOCKS[paper_id] = lock
+        return lock
 
 
 class IngestionError(Exception):
@@ -156,6 +172,16 @@ class DocumentIngestionService:
             return doc, chunk_records, vector_ids
         except (DuplicateRecordError, RecordNotFoundError, ValueError, TypeError):
             raise
+        except IntegrityError as exc:
+            if vector_ids:
+                try:
+                    self._vector_store.delete(vector_ids)
+                except Exception:
+                    pass
+            error_str = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
+            if "unique" in error_str or "duplicate" in error_str:
+                raise DuplicateRecordError(str(exc)) from exc
+            raise
         except Exception as exc:
             if vector_ids:
                 try:
@@ -193,27 +219,43 @@ class DocumentIngestionService:
                 f"got {type(processed_document).__name__}"
             )
 
-        # 1. Resolve embeddings for all chunks (outside DB transaction to prevent holding DB locks)
-        try:
-            resolved_vectors = self._resolve_chunk_vectors(
-                processed_document.chunks, force_reembed=force_reembed
-            )
-        except (ValueError, TypeError):
-            raise
-        except Exception as exc:
-            raise VectorIndexingError(
-                f"Failed to generate chunk embeddings: {exc}"
-            ) from exc
+        with get_paper_ingestion_lock(paper_id):
+            # 1. Resolve embeddings for all chunks (outside DB transaction to prevent holding DB locks)
+            try:
+                resolved_vectors = self._resolve_chunk_vectors(
+                    processed_document.chunks, force_reembed=force_reembed
+                )
+            except (ValueError, TypeError):
+                raise
+            except Exception as exc:
+                raise VectorIndexingError(
+                    f"Failed to generate chunk embeddings: {exc}"
+                ) from exc
 
-        if self._session_factory is not None:
-            from nexora.database.session import database_transaction
-            from nexora.document.service import DocumentPersistenceService
+            if self._session_factory is not None:
+                from nexora.database.session import database_transaction
+                from nexora.document.service import DocumentPersistenceService
 
-            with database_transaction(self._session_factory) as session:
-                persistence = DocumentPersistenceService(session)
+                with database_transaction(self._session_factory) as session:
+                    persistence = DocumentPersistenceService(session)
+                    doc, chunk_records, vector_ids = self._persist_and_index_records(
+                        session,
+                        persistence,
+                        paper_id,
+                        processed_document,
+                        resolved_vectors,
+                        filename=filename,
+                        mime_type=mime_type,
+                        file_size=file_size,
+                        checksum=checksum,
+                        storage_key=storage_key,
+                        allow_duplicate=allow_duplicate,
+                    )
+            else:
+                session = self._persistence_service._session
                 doc, chunk_records, vector_ids = self._persist_and_index_records(
                     session,
-                    persistence,
+                    self._persistence_service,
                     paper_id,
                     processed_document,
                     resolved_vectors,
@@ -224,31 +266,16 @@ class DocumentIngestionService:
                     storage_key=storage_key,
                     allow_duplicate=allow_duplicate,
                 )
-        else:
-            session = self._persistence_service._session
-            doc, chunk_records, vector_ids = self._persist_and_index_records(
-                session,
-                self._persistence_service,
-                paper_id,
-                processed_document,
-                resolved_vectors,
-                filename=filename,
-                mime_type=mime_type,
-                file_size=file_size,
-                checksum=checksum,
-                storage_key=storage_key,
-                allow_duplicate=allow_duplicate,
-            )
 
-        return IngestionResult(
-            document_id=doc.id,
-            paper_id=paper_id,
-            chunks_count=len(chunk_records),
-            indexed_chunks_count=len(vector_ids),
-            vector_ids=vector_ids,
-            document=doc,
-            chunk_records=chunk_records,
-        )
+            return IngestionResult(
+                document_id=doc.id,
+                paper_id=paper_id,
+                chunks_count=len(chunk_records),
+                indexed_chunks_count=len(vector_ids),
+                vector_ids=vector_ids,
+                document=doc,
+                chunk_records=chunk_records,
+            )
 
     def process_and_ingest(
         self,
