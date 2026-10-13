@@ -192,17 +192,6 @@ def build_http_app(
                 qdrant_client=qdrant_client,
             )
 
-    if document_pipeline is None:
-        try:
-            from nexora.embedding.integration import EmbeddingIntegration
-            from nexora.document.pipeline import DocumentPipeline
-
-            document_pipeline = DocumentPipeline(
-                EmbeddingIntegration(embedding_service)
-            )
-        except Exception:
-            document_pipeline = None
-
     return create_app(
         research_service,
         ingestion_service=ingestion_service,
