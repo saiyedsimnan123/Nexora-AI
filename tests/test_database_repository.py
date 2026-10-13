@@ -5,10 +5,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from nexora.database.models.base import Base
 
+from datetime import date
+
 from nexora.database.repository.base import BaseRepository, RecordNotFoundError, DuplicateRecordError, ConstraintError
 from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
+from nexora.database.repository.paper import PaperRepository
+from nexora.database.repository.author import AuthorRepository
 from nexora.database.models.user import User
+from nexora.database.models.collection import Collection
+from nexora.database.models.paper import Paper
+from nexora.database.models.author import Author
 
 @pytest.fixture
 def engine():
@@ -196,3 +203,353 @@ def test_transaction_recovery_on_update_constraint_error(session):
     repo.create(email="user3@example.com")
     session.commit()
     assert repo.get_by_email("user3@example.com") is not None
+
+
+def _make_collection(session, name="Collection"):
+    user_repo = UserRepository(session)
+    ws_repo = WorkspaceRepository(session)
+    user = user_repo.create(email=f"user_{uuid4()}@example.com")
+    ws = ws_repo.create(user_id=user.id, name=f"WS_{uuid4()}")
+    col = Collection(workspace_id=ws.id, name=name)
+    session.add(col)
+    session.flush()
+    return col
+
+
+def test_paper_repository_create_and_read(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+
+    # Create with required fields
+    paper = repo.create(collection_id=col.id, title="Attention Is All You Need")
+    assert paper.id is not None
+    assert paper.collection_id == col.id
+    assert paper.title == "Attention Is All You Need"
+    assert paper.abstract is None
+    assert paper.doi is None
+    assert paper.external_id is None
+    assert paper.publication_date is None
+    assert paper.created_at is not None
+    assert paper.updated_at is not None
+
+    # Read by ID
+    found = repo.get_by_id(paper.id)
+    assert found is not None
+    assert found.id == paper.id
+    assert found.title == "Attention Is All You Need"
+
+    # Missing lookup
+    missing_id = uuid4()
+    assert repo.get_by_id(missing_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.get_by_id_or_raise(missing_id)
+
+    assert repo.get_by_id_or_raise(paper.id).id == paper.id
+
+
+def test_paper_repository_create_all_fields(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+    pub_date = date(2017, 6, 12)
+
+    paper = repo.create(
+        collection_id=col.id,
+        title="Attention Is All You Need",
+        abstract="The dominant sequence transduction models are based on complex recurrent or convolutional neural networks.",
+        doi="10.48550/arXiv.1706.03762",
+        external_id="arXiv:1706.03762",
+        publication_date=pub_date,
+    )
+
+    found = repo.get_by_id_or_raise(paper.id)
+    assert found.title == "Attention Is All You Need"
+    assert found.abstract.startswith("The dominant sequence")
+    assert found.doi == "10.48550/arXiv.1706.03762"
+    assert found.external_id == "arXiv:1706.03762"
+    assert found.publication_date == pub_date
+
+
+def test_paper_repository_list_by_collection_id(session):
+    col1 = _make_collection(session, name="Collection 1")
+    col2 = _make_collection(session, name="Collection 2")
+    repo = PaperRepository(session)
+
+    p1 = repo.create(collection_id=col1.id, title="Paper 1")
+    p2 = repo.create(collection_id=col1.id, title="Paper 2")
+    p3 = repo.create(collection_id=col1.id, title="Paper 3")
+    p_other = repo.create(collection_id=col2.id, title="Other Collection Paper")
+
+    # List col1 papers
+    col1_papers = repo.list_by_collection_id(col1.id)
+    assert len(col1_papers) == 3
+    col1_ids = {p.id for p in col1_papers}
+    assert col1_ids == {p1.id, p2.id, p3.id}
+    assert p_other.id not in col1_ids
+
+    # List col2 papers
+    col2_papers = repo.list_by_collection_id(col2.id)
+    assert len(col2_papers) == 1
+    assert col2_papers[0].id == p_other.id
+
+    # List non-existent collection returns empty list
+    assert repo.list_by_collection_id(uuid4()) == []
+
+    # Pagination
+    page_1 = repo.list_by_collection_id(col1.id, offset=0, limit=2)
+    assert len(page_1) == 2
+    page_2 = repo.list_by_collection_id(col1.id, offset=2, limit=2)
+    assert len(page_2) == 1
+
+
+def test_paper_repository_pagination_validation(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_collection_id(col.id, offset=-1)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_collection_id(col.id, offset=True)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_collection_id(col.id, limit=0)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_collection_id(col.id, limit=-5)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_collection_id(col.id, limit=False)
+
+
+def test_paper_repository_update_full_and_partial(session):
+    col1 = _make_collection(session, name="Collection 1")
+    col2 = _make_collection(session, name="Collection 2")
+    repo = PaperRepository(session)
+
+    paper = repo.create(
+        collection_id=col1.id,
+        title="Initial Title",
+        abstract="Initial Abstract",
+        doi="10.1000/1",
+        external_id="ext-1",
+        publication_date=date(2020, 1, 1),
+    )
+
+    # Partial update: title only (other fields must remain untouched)
+    updated = repo.update(paper.id, title="Updated Title Only")
+    assert updated.title == "Updated Title Only"
+    assert updated.abstract == "Initial Abstract"
+    assert updated.doi == "10.1000/1"
+    assert updated.external_id == "ext-1"
+    assert updated.publication_date == date(2020, 1, 1)
+
+    # Partial update: clearing nullable fields to None
+    updated = repo.update(paper.id, abstract=None, doi=None)
+    assert updated.title == "Updated Title Only"
+    assert updated.abstract is None
+    assert updated.doi is None
+    assert updated.external_id == "ext-1"
+
+    # Moving to a different collection
+    updated = repo.update(paper.id, collection_id=col2.id)
+    assert updated.collection_id == col2.id
+
+    # Update non-existent paper
+    with pytest.raises(RecordNotFoundError):
+        repo.update(uuid4(), title="Nonexistent")
+
+
+def test_paper_repository_delete(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+
+    paper = repo.create(collection_id=col.id, title="To be deleted")
+    paper_id = paper.id
+
+    repo.delete(paper_id)
+    assert repo.get_by_id(paper_id) is None
+
+    # Deleting missing paper raises RecordNotFoundError
+    with pytest.raises(RecordNotFoundError):
+        repo.delete(uuid4())
+
+
+def test_paper_repository_constraints_and_validation(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+
+    # Foreign key violation (collection does not exist)
+    with pytest.raises(ConstraintError):
+        repo.create(collection_id=uuid4(), title="Invalid Collection")
+
+    # In-memory validation violations from Paper model validators
+    with pytest.raises(ValueError, match="title must not be blank"):
+        repo.create(collection_id=col.id, title="")
+
+    with pytest.raises(ValueError, match="title must not be blank"):
+        repo.create(collection_id=col.id, title="   ")
+
+    with pytest.raises(ValueError, match="title must be at most 500 characters"):
+        repo.create(collection_id=col.id, title="T" * 501)
+
+    with pytest.raises(ValueError, match="abstract must be at most 20000 characters"):
+        repo.create(collection_id=col.id, title="Valid Title", abstract="A" * 20001)
+
+    with pytest.raises(ValueError, match="doi must be at most 255 characters"):
+        repo.create(collection_id=col.id, title="Valid Title", doi="D" * 256)
+
+    with pytest.raises(ValueError, match="external_id must be at most 255 characters"):
+        repo.create(collection_id=col.id, title="Valid Title", external_id="E" * 256)
+
+    # Invalid collection in update triggers ConstraintError
+    valid_paper = repo.create(collection_id=col.id, title="Valid Paper")
+    with pytest.raises(ConstraintError):
+        repo.update(valid_paper.id, collection_id=uuid4())
+
+
+def test_paper_repository_transaction_recovery(session):
+    col = _make_collection(session)
+    repo = PaperRepository(session)
+
+    # Initial valid paper
+    p1 = repo.create(collection_id=col.id, title="First Valid Paper")
+
+    # Trigger a ConstraintError (invalid foreign key)
+    with pytest.raises(ConstraintError):
+        repo.create(collection_id=uuid4(), title="Failing Paper")
+
+    # Session is preserved and functional due to begin_nested()
+    p2 = repo.create(collection_id=col.id, title="Second Valid Paper")
+    session.commit()
+
+    assert repo.get_by_id(p1.id) is not None
+    assert repo.get_by_id(p2.id) is not None
+
+
+def test_author_repository_create_and_read(session):
+    repo = AuthorRepository(session)
+
+    # Create
+    author = repo.create(name="Ashish Vaswani")
+    assert author.id is not None
+    assert author.name == "Ashish Vaswani"
+    assert author.created_at is not None
+    assert author.updated_at is not None
+
+    # Read by ID
+    found = repo.get_by_id(author.id)
+    assert found is not None
+    assert found.id == author.id
+    assert found.name == "Ashish Vaswani"
+
+    # Missing ID
+    missing_id = uuid4()
+    assert repo.get_by_id(missing_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.get_by_id_or_raise(missing_id)
+
+    assert repo.get_by_id_or_raise(author.id).id == author.id
+
+
+def test_author_repository_get_by_name(session):
+    repo = AuthorRepository(session)
+
+    author = repo.create(name="Noam Shazeer")
+    found = repo.get_by_name("Noam Shazeer")
+    assert found is not None
+    assert found.id == author.id
+    assert found.name == "Noam Shazeer"
+
+    # Missing name
+    assert repo.get_by_name("Nonexistent Author") is None
+
+
+def test_author_repository_list_all(session):
+    repo = AuthorRepository(session)
+
+    a1 = repo.create(name="Author 1")
+    a2 = repo.create(name="Author 2")
+
+    all_authors = repo.list_all()
+    assert len(all_authors) == 2
+
+    page_1 = repo.list_all(offset=0, limit=1)
+    assert len(page_1) == 1
+
+    page_2 = repo.list_all(offset=1, limit=1)
+    assert len(page_2) == 1
+
+
+def test_author_repository_update(session):
+    repo = AuthorRepository(session)
+
+    author = repo.create(name="Original Author Name")
+
+    # Update name
+    updated = repo.update(author.id, name="Updated Author Name")
+    assert updated.name == "Updated Author Name"
+    assert repo.get_by_id(author.id).name == "Updated Author Name"
+
+    # Update with unset name does not change name
+    updated_same = repo.update(author.id)
+    assert updated_same.name == "Updated Author Name"
+
+    # Update non-existent author
+    with pytest.raises(RecordNotFoundError):
+        repo.update(uuid4(), name="Missing")
+
+
+def test_author_repository_delete(session):
+    repo = AuthorRepository(session)
+
+    author = repo.create(name="Author To Delete")
+    author_id = author.id
+
+    repo.delete(author_id)
+    assert repo.get_by_id(author_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.delete(uuid4())
+
+
+def test_author_repository_validation_and_constraints(session):
+    repo = AuthorRepository(session)
+
+    # Blank name
+    with pytest.raises(ValueError, match="name must not be blank"):
+        repo.create(name="")
+
+    with pytest.raises(ValueError, match="name must not be blank"):
+        repo.create(name="   ")
+
+    # Overlength name
+    with pytest.raises(ValueError, match="name must be at most 500 characters"):
+        repo.create(name="A" * 501)
+
+    # Non-string name
+    with pytest.raises(TypeError, match="name must be a str"):
+        repo.create(name=123)
+
+    # Update with invalid name
+    author = repo.create(name="Valid Author")
+    with pytest.raises(ValueError, match="name must not be blank"):
+        repo.update(author.id, name="")
+
+
+def test_author_repository_transaction_recovery(session):
+    repo = AuthorRepository(session)
+
+    a1 = repo.create(name="First Valid Author")
+
+    # Invalid creation should not corrupt transaction
+    with pytest.raises(ValueError):
+        repo.create(name="")
+
+    a2 = repo.create(name="Second Valid Author")
+    session.commit()
+
+    assert repo.get_by_id(a1.id) is not None
+    assert repo.get_by_id(a2.id) is not None
+
