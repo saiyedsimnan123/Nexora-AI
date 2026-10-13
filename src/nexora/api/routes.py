@@ -136,6 +136,7 @@ async def ingest_document(
     request: Request,
     paper_id: str = Form(...),
     file: UploadFile = File(...),
+    durable: bool = Form(False),
     service: Any = Depends(get_ingestion_service),
 ) -> DocumentIngestResponseBody:
     """Upload and ingest a research paper PDF into relational storage and vector index."""
@@ -214,14 +215,24 @@ async def ingest_document(
                         pipeline=pipeline,
                         filename=safe_filename,
                         checksum=file_checksum,
+                        durable=durable,
                     )
                 except TypeError:
-                    result = service.process_and_ingest(
-                        paper_id=paper_uuid,
-                        file_path=str(tmp_path),
-                        pipeline=pipeline,
-                        filename=safe_filename,
-                    )
+                    try:
+                        result = service.process_and_ingest(
+                            paper_id=paper_uuid,
+                            file_path=str(tmp_path),
+                            pipeline=pipeline,
+                            filename=safe_filename,
+                            checksum=file_checksum,
+                        )
+                    except TypeError:
+                        result = service.process_and_ingest(
+                            paper_id=paper_uuid,
+                            file_path=str(tmp_path),
+                            pipeline=pipeline,
+                            filename=safe_filename,
+                        )
             elif hasattr(service, "ingest_file"):
                 result = service.ingest_file(
                     paper_id=paper_uuid,

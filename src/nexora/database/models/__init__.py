@@ -12,7 +12,7 @@ from nexora.database.models.base import (
 )
 from nexora.database.models.author import Author
 from nexora.database.models.collection import Collection
-from nexora.database.models.document import Document
+from nexora.database.models.document import Document, IndexingStatus
 from nexora.database.models.document_chunk import DocumentChunkRecord
 from nexora.database.models.paper import Paper
 from nexora.database.models.paper_author import PaperAuthor
@@ -27,6 +27,7 @@ __all__ = [
     "Collection",
     "Document",
     "DocumentChunkRecord",
+    "IndexingStatus",
     "Paper",
     "PaperAuthor",
     "PaperReference",

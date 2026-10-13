@@ -9,11 +9,13 @@ and is referenced by ``storage_key``.
 
 from __future__ import annotations
 
+import datetime
+from enum import Enum
 import re
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from nexora.database.models.base import (
@@ -30,6 +32,8 @@ FILENAME_MAX_LENGTH = 255
 MIME_TYPE_MAX_LENGTH = 255
 CHECKSUM_LENGTH = 64
 STORAGE_KEY_MAX_LENGTH = 1024
+INDEXING_STATUS_MAX_LENGTH = 32
+INDEXING_ERROR_MAX_LENGTH = 2000
 
 _SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -38,6 +42,14 @@ _REQUIRED_TEXT_LIMITS = {
     "mime_type": MIME_TYPE_MAX_LENGTH,
     "storage_key": STORAGE_KEY_MAX_LENGTH,
 }
+
+
+class IndexingStatus(str, Enum):
+    """Lifecycle status of vector indexing for a Document."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -59,6 +71,14 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             f"length(checksum) = {CHECKSUM_LENGTH}", name="checksum_length"
         ),
+        CheckConstraint(
+            "indexing_status IN ('pending', 'completed', 'failed')",
+            name="indexing_status_valid",
+        ),
+        CheckConstraint(
+            "indexing_attempts >= 0",
+            name="indexing_attempts_non_negative",
+        ),
     )
 
     paper_id: Mapped[uuid.UUID] = mapped_column(
@@ -74,6 +94,27 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     checksum: Mapped[str] = mapped_column(String(CHECKSUM_LENGTH), nullable=False)
     storage_key: Mapped[str] = mapped_column(
         String(STORAGE_KEY_MAX_LENGTH), nullable=False
+    )
+    indexing_status: Mapped[str] = mapped_column(
+        String(INDEXING_STATUS_MAX_LENGTH),
+        nullable=False,
+        default=IndexingStatus.PENDING.value,
+        server_default=text("'pending'"),
+        index=True,
+    )
+    indexing_error: Mapped[str | None] = mapped_column(
+        String(INDEXING_ERROR_MAX_LENGTH),
+        nullable=True,
+    )
+    indexed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    indexing_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
 
     paper: Mapped[Paper] = relationship(back_populates="documents")
@@ -109,6 +150,26 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             raise TypeError(f"checksum must be a str, got {type(value).__name__}")
         if not _SHA256_HEX.fullmatch(value):
             raise ValueError("checksum must be 64 hexadecimal characters (SHA-256)")
+        return value
+
+    @validates("indexing_status")
+    def _validate_indexing_status(self, key: str, value: Any) -> str:
+        if isinstance(value, IndexingStatus):
+            return value.value
+        if not isinstance(value, str):
+            raise TypeError(f"indexing_status must be a str or IndexingStatus, got {type(value).__name__}")
+        normalized = value.strip().lower()
+        valid = {s.value for s in IndexingStatus}
+        if normalized not in valid:
+            raise ValueError(f"indexing_status must be one of {valid}, got {value!r}")
+        return normalized
+
+    @validates("indexing_attempts")
+    def _validate_indexing_attempts(self, key: str, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"indexing_attempts must be an int, got {type(value).__name__}")
+        if value < 0:
+            raise ValueError("indexing_attempts must be non-negative")
         return value
 
     def __repr__(self) -> str:

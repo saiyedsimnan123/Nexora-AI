@@ -165,7 +165,7 @@ def postgres_engine():
         with engine.connect() as conn:
             conn.execute(select(1))
     except Exception as exc:
-        pytest.skip(f"PostgreSQL server not accessible at {url}: {exc}")
+        pytest.fail(f"PostgreSQL server configured at {url} is not accessible: {exc}")
 
     # Ensure all tables exist in PostgreSQL
     Base.metadata.create_all(engine)

@@ -261,3 +261,43 @@ class DocumentPersistenceService:
         return self._chunk_repo.list_by_document_id(
             document_id, offset=offset, limit=limit
         )
+
+    def update_document_indexing_status(
+        self,
+        document_id: UUID,
+        status: Any,
+        *,
+        error: str | None = None,
+        indexed_at: Any = None,
+        attempts_increment: int = 0,
+    ) -> Document:
+        """Update a document's durable indexing status."""
+        return self._doc_repo.update_indexing_status(
+            document_id,
+            status,
+            error=error,
+            indexed_at=indexed_at,
+            attempts_increment=attempts_increment,
+        )
+
+    def list_unindexed_documents(
+        self,
+        status: Sequence[str] = ("pending", "failed"),
+        *,
+        limit: int = 100,
+        max_attempts: int | None = None,
+        for_update: bool = False,
+        skip_locked: bool = False,
+    ) -> Sequence[Document]:
+        """List unindexed documents (pending or failed) for bounded recovery."""
+        return self._doc_repo.list_unindexed(
+            status=status,
+            limit=limit,
+            max_attempts=max_attempts,
+            for_update=for_update,
+            skip_locked=skip_locked,
+        )
+
+    def count_indexing_status(self) -> dict[str, int]:
+        """Return counts of documents grouped by indexing status."""
+        return self._doc_repo.count_by_indexing_status()

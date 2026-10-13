@@ -17,13 +17,14 @@ Concurrency and Locking Architecture:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime
 import threading
 from typing import TYPE_CHECKING, Any, Sequence
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
-from nexora.database.models.document import Document
+from nexora.database.models.document import Document, IndexingStatus
 from nexora.database.models.document_chunk import DocumentChunkRecord
 from nexora.database.repository.base import (
     DuplicateRecordError,
@@ -270,6 +271,12 @@ class DocumentIngestionService:
                         vector_ids.append(rec_id)
 
                     self._vector_store.upsert(records_to_upsert)
+                persistence_service.update_document_indexing_status(
+                    doc.id,
+                    IndexingStatus.COMPLETED,
+                    error=None,
+                    indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                )
             return doc, chunk_records, vector_ids
         except (DuplicateRecordError, RecordNotFoundError, ValueError, TypeError):
             raise
@@ -305,12 +312,15 @@ class DocumentIngestionService:
         storage_key: str | None = None,
         allow_duplicate: bool = False,
         force_reembed: bool = False,
+        durable: bool = False,
     ) -> IngestionResult:
         """Ingest a ProcessedDocument into both the relational database and the vector store.
 
         All relational persistence operations run within a managed transaction. If vector
-        indexing fails, the relational changes are rolled back and partial vectors are cleaned
-        up, ensuring failure atomicity.
+        indexing fails in standard mode (durable=False), the relational changes are rolled
+        back and partial vectors are cleaned up, ensuring failure atomicity.
+        In durable mode (durable=True), relational records are preserved with indexing_status
+        set to FAILED for out-of-band recovery.
         """
         if not isinstance(paper_id, UUID):
             raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
@@ -333,6 +343,132 @@ class DocumentIngestionService:
                     f"Failed to generate chunk embeddings: {exc}"
                 ) from exc
 
+            if durable:
+                # In durable mode, relational persistence commits first so that unexpected
+                # crashes leave records in 'pending' status for recovery.
+                if self._session_factory is not None:
+                    from nexora.database.session import database_transaction
+                    from nexora.document.service import DocumentPersistenceService
+
+                    with database_transaction(self._session_factory) as session:
+                        persistence = DocumentPersistenceService(session)
+                        doc = persistence.persist_processed_document(
+                            paper_id,
+                            processed_document,
+                            filename=filename,
+                            mime_type=mime_type,
+                            file_size=file_size,
+                            checksum=checksum,
+                            storage_key=storage_key,
+                            allow_duplicate=allow_duplicate,
+                        )
+                        chunk_records = list(
+                            persistence.list_chunks_for_document(doc.id)
+                        )
+                        doc_id = doc.id
+                        doc_filename = doc.filename
+                        doc_storage_key = doc.storage_key
+                else:
+                    session = self._persistence_service._session
+                    doc = self._persistence_service.persist_processed_document(
+                        paper_id,
+                        processed_document,
+                        filename=filename,
+                        mime_type=mime_type,
+                        file_size=file_size,
+                        checksum=checksum,
+                        storage_key=storage_key,
+                        allow_duplicate=allow_duplicate,
+                    )
+                    chunk_records = list(
+                        self._persistence_service.list_chunks_for_document(doc.id)
+                    )
+                    session.commit()
+                    doc_id = doc.id
+                    doc_filename = doc.filename
+                    doc_storage_key = doc.storage_key
+
+                vector_ids: list[str] = []
+                if chunk_records:
+                    records_to_upsert: list[VectorRecord] = []
+                    for chunk_rec, vector in zip(chunk_records, resolved_vectors):
+                        if not vector:
+                            raise ValueError(
+                                f"Empty embedding vector for chunk index {chunk_rec.chunk_index}"
+                            )
+                        rec_id = str(chunk_rec.id)
+                        payload: dict[str, object] = {
+                            "document_id": str(doc_id),
+                            "chunk_id": rec_id,
+                            "paper_id": str(paper_id),
+                            "chunk_index": chunk_rec.chunk_index,
+                            "text": chunk_rec.text,
+                            "filename": doc_filename,
+                            "source": doc_storage_key,
+                        }
+                        for k, v in processed_document.metadata.items():
+                            if k not in payload and isinstance(k, str):
+                                payload[k] = v
+
+                        records_to_upsert.append(
+                            VectorRecord(id=rec_id, vector=vector, payload=payload)
+                        )
+                        vector_ids.append(rec_id)
+
+                    try:
+                        self._vector_store.upsert(records_to_upsert)
+                    except Exception as exc:
+                        if self._session_factory is not None:
+                            with database_transaction(self._session_factory) as session:
+                                persistence = DocumentPersistenceService(session)
+                                persistence.update_document_indexing_status(
+                                    doc_id,
+                                    IndexingStatus.FAILED,
+                                    error=str(exc),
+                                    attempts_increment=1,
+                                )
+                        else:
+                            self._persistence_service.update_document_indexing_status(
+                                doc_id,
+                                IndexingStatus.FAILED,
+                                error=str(exc),
+                                attempts_increment=1,
+                            )
+                            session.commit()
+                        raise VectorIndexingError(
+                            f"Vector store indexing failed during ingestion: {exc}"
+                        ) from exc
+
+                # On success, mark completed
+                if self._session_factory is not None:
+                    with database_transaction(self._session_factory) as session:
+                        persistence = DocumentPersistenceService(session)
+                        doc = persistence.update_document_indexing_status(
+                            doc_id,
+                            IndexingStatus.COMPLETED,
+                            error=None,
+                            indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                        )
+                else:
+                    doc = self._persistence_service.update_document_indexing_status(
+                        doc_id,
+                        IndexingStatus.COMPLETED,
+                        error=None,
+                        indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                    )
+                    session.commit()
+
+                return IngestionResult(
+                    document_id=doc.id,
+                    paper_id=paper_id,
+                    chunks_count=len(chunk_records),
+                    indexed_chunks_count=len(vector_ids),
+                    vector_ids=vector_ids,
+                    document=doc,
+                    chunk_records=chunk_records,
+                )
+
+            # Standard non-durable mode: atomic rollback on any failure
             if self._session_factory is not None:
                 from nexora.database.session import database_transaction
                 from nexora.document.service import DocumentPersistenceService
@@ -391,6 +527,7 @@ class DocumentIngestionService:
         storage_key: str | None = None,
         allow_duplicate: bool = False,
         force_reembed: bool = False,
+        durable: bool = False,
     ) -> IngestionResult:
         """Process a file via DocumentPipeline and perform end-to-end ingestion."""
         if not isinstance(file_path, str):
@@ -409,6 +546,7 @@ class DocumentIngestionService:
             storage_key=storage_key,
             allow_duplicate=allow_duplicate,
             force_reembed=force_reembed,
+            durable=durable,
         )
 
     def _do_reindex_document(
@@ -426,6 +564,12 @@ class DocumentIngestionService:
             persistence_service.list_chunks_for_document(document_id)
         )
         if not chunk_records:
+            persistence_service.update_document_indexing_status(
+                doc.id,
+                IndexingStatus.COMPLETED,
+                error=None,
+                indexed_at=datetime.datetime.now(datetime.timezone.utc),
+            )
             return IngestionResult(
                 document_id=doc.id,
                 paper_id=doc.paper_id,
@@ -467,7 +611,19 @@ class DocumentIngestionService:
 
         try:
             self._vector_store.upsert(records_to_upsert)
+            persistence_service.update_document_indexing_status(
+                doc.id,
+                IndexingStatus.COMPLETED,
+                error=None,
+                indexed_at=datetime.datetime.now(datetime.timezone.utc),
+            )
         except Exception as exc:
+            persistence_service.update_document_indexing_status(
+                doc.id,
+                IndexingStatus.FAILED,
+                error=str(exc),
+                attempts_increment=1,
+            )
             raise VectorIndexingError(
                 f"Failed to reindex document {document_id} in vector store: {exc}"
             ) from exc
@@ -491,7 +647,7 @@ class DocumentIngestionService:
         """Reindex an already persisted document in the vector store.
 
         Reconciles relational chunk records with the vector store or retries
-        previously failed indexing.
+        previously failed indexing. Updates durable indexing status.
         """
         if not isinstance(document_id, UUID):
             raise TypeError(f"document_id must be a UUID, got {type(document_id).__name__}")
@@ -500,14 +656,47 @@ class DocumentIngestionService:
             from nexora.database.session import database_transaction
             from nexora.document.service import DocumentPersistenceService
 
-            with database_transaction(self._session_factory) as session:
-                persistence = DocumentPersistenceService(session)
-                return self._do_reindex_document(
-                    persistence, document_id, force_reembed=force_reembed
-                )
+            try:
+                with database_transaction(self._session_factory) as session:
+                    persistence = DocumentPersistenceService(session)
+                    return self._do_reindex_document(
+                        persistence, document_id, force_reembed=force_reembed
+                    )
+            except Exception as exc:
+                try:
+                    with database_transaction(self._session_factory) as fail_session:
+                        fail_persistence = DocumentPersistenceService(fail_session)
+                        fail_persistence.update_document_indexing_status(
+                            document_id,
+                            IndexingStatus.FAILED,
+                            error=str(exc),
+                            attempts_increment=1,
+                        )
+                except Exception:
+                    pass
+                raise
         return self._do_reindex_document(
             self._persistence_service, document_id, force_reembed=force_reembed
         )
+
+    def recover_indexing(
+        self,
+        document_id: UUID | None = None,
+        batch_size: int = 10,
+    ) -> Any:
+        """Convenience method to recover vector indexing using DocumentRecoveryService."""
+        if self._session_factory is None:
+            raise ValueError("recover_indexing requires session_factory to be configured")
+        from nexora.document.recovery import DocumentRecoveryService
+
+        recovery_svc = DocumentRecoveryService(
+            self._session_factory,
+            self._vector_store,
+            self._embedding_service,
+        )
+        if document_id is not None:
+            return recovery_svc.recover_document(document_id)
+        return recovery_svc.recover_batch(batch_size=batch_size)
 
     def delete_document_vectors(self, document_id: UUID) -> int:
         """Delete all indexed vectors for a document from the vector store."""

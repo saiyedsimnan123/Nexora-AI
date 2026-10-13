@@ -36,4 +36,11 @@ def test_migrations(tmp_path, monkeypatch):
     for t in expected_tables:
         assert t in tables, f"Missing table {t}"
 
+    cursor.execute("PRAGMA table_info(documents);")
+    doc_columns = {r[1] for r in cursor.fetchall()}
+    assert "indexing_status" in doc_columns
+    assert "indexing_error" in doc_columns
+    assert "indexed_at" in doc_columns
+    assert "indexing_attempts" in doc_columns
+
     conn.close()
