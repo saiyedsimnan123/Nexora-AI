@@ -13,11 +13,13 @@ from nexora.database.repository.workspace import WorkspaceRepository
 from nexora.database.repository.paper import PaperRepository
 from nexora.database.repository.author import AuthorRepository
 from nexora.database.repository.paper_author import PaperAuthorRepository
+from nexora.database.repository.paper_reference import PaperReferenceRepository
 from nexora.database.models.user import User
 from nexora.database.models.collection import Collection
 from nexora.database.models.paper import Paper
 from nexora.database.models.author import Author
 from nexora.database.models.paper_author import PaperAuthor
+from nexora.database.models.paper_reference import PaperReference
 
 @pytest.fixture
 def engine():
@@ -769,5 +771,201 @@ def test_paper_author_repository_transaction_recovery(session):
 
     assert repo.get_by_id(pa1.id) is not None
     assert repo.get_by_id(pa2.id) is not None
+
+
+def _make_two_papers(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    p1 = paper_repo.create(collection_id=col.id, title="Source Paper")
+    p2 = paper_repo.create(collection_id=col.id, title="Target Paper")
+    return p1, p2
+
+
+def test_paper_reference_repository_create_and_read(session):
+    p1, p2 = _make_two_papers(session)
+    repo = PaperReferenceRepository(session)
+
+    ref = repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+    assert ref.id is not None
+    assert ref.source_paper_id == p1.id
+    assert ref.target_paper_id == p2.id
+    assert ref.created_at is not None
+    assert ref.updated_at is not None
+
+    found = repo.get_by_id(ref.id)
+    assert found is not None
+    assert found.id == ref.id
+
+    missing_id = uuid4()
+    assert repo.get_by_id(missing_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.get_by_id_or_raise(missing_id)
+
+    assert repo.get_by_id_or_raise(ref.id).id == ref.id
+
+
+def test_paper_reference_repository_get_by_source_and_target(session):
+    p1, p2 = _make_two_papers(session)
+    repo = PaperReferenceRepository(session)
+
+    ref = repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    found = repo.get_by_source_and_target(p1.id, p2.id)
+    assert found is not None
+    assert found.id == ref.id
+
+    assert repo.get_by_source_and_target(p2.id, p1.id) is None
+    assert repo.get_by_source_and_target(uuid4(), p2.id) is None
+
+
+def test_paper_reference_repository_list_outgoing(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    p1 = paper_repo.create(collection_id=col.id, title="Source Paper")
+    p2 = paper_repo.create(collection_id=col.id, title="Target 1")
+    p3 = paper_repo.create(collection_id=col.id, title="Target 2")
+
+    repo = PaperReferenceRepository(session)
+    ref1 = repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+    ref2 = repo.create(source_paper_id=p1.id, target_paper_id=p3.id)
+
+    outgoing = repo.list_outgoing(p1.id)
+    assert len(outgoing) == 2
+    expected_outgoing = sorted([ref1, ref2], key=lambda r: (r.created_at, r.id))
+    expected_outgoing_ids = [r.id for r in expected_outgoing]
+    assert [r.id for r in outgoing] == expected_outgoing_ids
+
+    page_1 = repo.list_outgoing(p1.id, offset=0, limit=1)
+    assert len(page_1) == 1
+    assert page_1[0].id == expected_outgoing_ids[0]
+
+    page_2 = repo.list_outgoing(p1.id, offset=1, limit=1)
+    assert len(page_2) == 1
+    assert page_2[0].id == expected_outgoing_ids[1]
+
+    assert repo.list_outgoing(uuid4()) == []
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_outgoing(p1.id, offset=-1)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_outgoing(p1.id, offset=True)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_outgoing(p1.id, limit=0)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_outgoing(p1.id, limit=False)
+
+
+def test_paper_reference_repository_list_incoming(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    p1 = paper_repo.create(collection_id=col.id, title="Citing Paper 1")
+    p2 = paper_repo.create(collection_id=col.id, title="Citing Paper 2")
+    p3 = paper_repo.create(collection_id=col.id, title="Cited Paper Target")
+
+    repo = PaperReferenceRepository(session)
+    ref1 = repo.create(source_paper_id=p1.id, target_paper_id=p3.id)
+    ref2 = repo.create(source_paper_id=p2.id, target_paper_id=p3.id)
+
+    incoming = repo.list_incoming(p3.id)
+    assert len(incoming) == 2
+    expected_incoming = sorted([ref1, ref2], key=lambda r: (r.created_at, r.id))
+    expected_incoming_ids = [r.id for r in expected_incoming]
+    assert [r.id for r in incoming] == expected_incoming_ids
+
+    page_1 = repo.list_incoming(p3.id, offset=0, limit=1)
+    assert len(page_1) == 1
+    assert page_1[0].id == expected_incoming_ids[0]
+
+    page_2 = repo.list_incoming(p3.id, offset=1, limit=1)
+    assert len(page_2) == 1
+    assert page_2[0].id == expected_incoming_ids[1]
+
+    assert repo.list_incoming(uuid4()) == []
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_incoming(p3.id, offset=-1)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_incoming(p3.id, limit=0)
+
+
+def test_paper_reference_repository_delete(session):
+    p1, p2 = _make_two_papers(session)
+    repo = PaperReferenceRepository(session)
+
+    ref = repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+    ref_id = ref.id
+
+    repo.delete(ref_id)
+    assert repo.get_by_id(ref_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.delete(uuid4())
+
+
+def test_paper_reference_repository_delete_by_source_and_target(session):
+    p1, p2 = _make_two_papers(session)
+    repo = PaperReferenceRepository(session)
+
+    repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    repo.delete_by_source_and_target(p1.id, p2.id)
+    assert repo.get_by_source_and_target(p1.id, p2.id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.delete_by_source_and_target(p1.id, p2.id)
+
+
+def test_paper_reference_repository_uniqueness_and_constraints(session):
+    p1, p2 = _make_two_papers(session)
+    repo = PaperReferenceRepository(session)
+
+    # Self-citation rejected
+    with pytest.raises(ValueError, match="source_paper_id and target_paper_id must be different"):
+        repo.create(source_paper_id=p1.id, target_paper_id=p1.id)
+
+    # Valid creation
+    repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    # Duplicate citation rejected
+    with pytest.raises(DuplicateRecordError):
+        repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    # Foreign key violations
+    with pytest.raises(ConstraintError):
+        repo.create(source_paper_id=uuid4(), target_paper_id=p2.id)
+
+    with pytest.raises(ConstraintError):
+        repo.create(source_paper_id=p1.id, target_paper_id=uuid4())
+
+    # Invalid types
+    with pytest.raises(TypeError):
+        repo.create(source_paper_id="not-a-uuid", target_paper_id=p2.id)
+
+
+def test_paper_reference_repository_transaction_recovery(session):
+    p1, p2 = _make_two_papers(session)
+    col = _make_collection(session)
+    p3 = PaperRepository(session).create(collection_id=col.id, title="Third Paper")
+    repo = PaperReferenceRepository(session)
+
+    # First valid
+    ref1 = repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    # Duplicate error
+    with pytest.raises(DuplicateRecordError):
+        repo.create(source_paper_id=p1.id, target_paper_id=p2.id)
+
+    # Outer session remains valid
+    ref2 = repo.create(source_paper_id=p1.id, target_paper_id=p3.id)
+    session.commit()
+
+    assert repo.get_by_id(ref1.id) is not None
+    assert repo.get_by_id(ref2.id) is not None
+
 
 
