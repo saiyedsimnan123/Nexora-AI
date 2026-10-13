@@ -10,6 +10,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nexora_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,7 +39,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run Alembic migrations on PostgreSQL
+        env:
+          PYTHONPATH: src
+          NEXORA_DATABASE_URL: postgresql+psycopg://test_user:test_password@localhost:5432/nexora_test
+        run: |
+          alembic upgrade head
+
       - name: Run tests
         env:
           PYTHONPATH: src
+          TEST_POSTGRES_URL: postgresql+psycopg://test_user:test_password@localhost:5432/nexora_test
+          NEXORA_DATABASE_URL: postgresql+psycopg://test_user:test_password@localhost:5432/nexora_test
         run: pytest -q

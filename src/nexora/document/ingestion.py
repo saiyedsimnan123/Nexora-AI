@@ -1,4 +1,19 @@
-"""End-to-end document ingestion: relational persistence + embedding + vector store indexing."""
+"""End-to-end document ingestion: relational persistence + embedding + vector store indexing.
+
+Concurrency and Locking Architecture:
+- In-process synchronization (`PaperIngestionLock`): Serializes document ingestion per paper
+  across threads within the same application process, computing embeddings outside database
+  transactions to prevent holding database connections or row locks during embedding generation.
+  Unused locks are cleaned up via reference-counting to avoid unbounded memory growth.
+- Relational database locking: `PaperRepository.get_by_id_for_update` acquires a row lock
+  (`SELECT ... FOR UPDATE`) within the persistence transaction prior to duplicate verification
+  and chunk creation.
+  - PostgreSQL: Row-level locking serializes concurrent uploads for the SAME paper while
+    allowing true parallel concurrent writes for DIFFERENT papers across separate processes
+    and server replicas.
+  - SQLite: Database-level write locking (`BEGIN IMMEDIATE` / file write lock) serializes all
+    writes across the entire database file.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,18 +34,104 @@ from nexora.document.service import DocumentPersistenceService
 from nexora.retrieval.models import VectorRecord
 from nexora.retrieval.store import VectorStore
 
-_PAPER_INGESTION_LOCKS: dict[UUID, threading.Lock] = {}
+
+class _PaperLockEntry:
+    __slots__ = ("lock", "ref_count")
+
+    def __init__(self, lock: threading.Lock, ref_count: int = 0) -> None:
+        self.lock = lock
+        self.ref_count = ref_count
+
+
+_PAPER_INGESTION_LOCKS: dict[UUID, _PaperLockEntry] = {}
 _PAPER_LOCKS_REGISTRY_MUTEX = threading.Lock()
 
 
-def get_paper_ingestion_lock(paper_id: UUID) -> threading.Lock:
-    """Retrieve or register a thread-safe mutex for concurrent ingestion per paper."""
+class PaperIngestionLock:
+    """Thread-safe reference-counted lock proxy for per-paper ingestion concurrency.
+
+    Prevents unbounded memory growth by tracking active/waiting references and
+    removing entries from `_PAPER_INGESTION_LOCKS` when reference count reaches zero.
+    A lock entry is NEVER removed while another thread holds or waits on it.
+    """
+
+    def __init__(self, paper_id: UUID) -> None:
+        self.paper_id = paper_id
+        self._acquired = False
+        self._lock: threading.Lock | None = None
+        self._entry: _PaperLockEntry | None = None
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._acquired:
+            return True
+        with _PAPER_LOCKS_REGISTRY_MUTEX:
+            entry = _PAPER_INGESTION_LOCKS.get(self.paper_id)
+            if entry is None:
+                entry = _PaperLockEntry(threading.Lock(), 0)
+                _PAPER_INGESTION_LOCKS[self.paper_id] = entry
+            entry.ref_count += 1
+            self._entry = entry
+            self._lock = entry.lock
+
+        acquired = self._lock.acquire(blocking, timeout)
+        if acquired:
+            self._acquired = True
+            return True
+        else:
+            with _PAPER_LOCKS_REGISTRY_MUTEX:
+                entry.ref_count -= 1
+                if entry.ref_count <= 0 and _PAPER_INGESTION_LOCKS.get(self.paper_id) is entry:
+                    _PAPER_INGESTION_LOCKS.pop(self.paper_id, None)
+            self._lock = None
+            self._entry = None
+            return False
+
+    def release(self) -> None:
+        if not self._acquired or self._lock is None or self._entry is None:
+            raise RuntimeError("cannot release un-acquired lock")
+        lock = self._lock
+        entry = self._entry
+        self._acquired = False
+        self._lock = None
+        self._entry = None
+        try:
+            lock.release()
+        finally:
+            with _PAPER_LOCKS_REGISTRY_MUTEX:
+                entry.ref_count -= 1
+                if entry.ref_count <= 0 and _PAPER_INGESTION_LOCKS.get(self.paper_id) is entry:
+                    _PAPER_INGESTION_LOCKS.pop(self.paper_id, None)
+
+    def locked(self) -> bool:
+        if self._lock is not None:
+            return self._lock.locked()
+        with _PAPER_LOCKS_REGISTRY_MUTEX:
+            entry = _PAPER_INGESTION_LOCKS.get(self.paper_id)
+            return entry.lock.locked() if entry is not None else False
+
+    def __enter__(self) -> PaperIngestionLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
+def get_paper_ingestion_lock(paper_id: UUID) -> PaperIngestionLock:
+    """Retrieve a thread-safe reference-counted lock guard for concurrent ingestion per paper."""
+    return PaperIngestionLock(paper_id)
+
+
+def paper_ingestion_guard(paper_id: UUID) -> PaperIngestionLock:
+    """Convenience alias for get_paper_ingestion_lock."""
+    return PaperIngestionLock(paper_id)
+
+
+def active_paper_locks_count() -> int:
+    """Return the number of currently active or queued paper locks in memory."""
     with _PAPER_LOCKS_REGISTRY_MUTEX:
-        lock = _PAPER_INGESTION_LOCKS.get(paper_id)
-        if lock is None:
-            lock = threading.Lock()
-            _PAPER_INGESTION_LOCKS[paper_id] = lock
-        return lock
+        return len(_PAPER_INGESTION_LOCKS)
+
 
 
 class IngestionError(Exception):

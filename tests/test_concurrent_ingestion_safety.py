@@ -21,6 +21,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
+import threading
 from uuid import UUID, uuid4
 
 import pytest
@@ -38,7 +39,11 @@ from nexora.database.repository.paper import PaperRepository
 from nexora.document.ingestion import (
     DocumentIngestionService,
     IngestionResult,
+    PaperIngestionLock,
     VectorIndexingError,
+    active_paper_locks_count,
+    get_paper_ingestion_lock,
+    paper_ingestion_guard,
 )
 from nexora.document.models import DocumentChunk, ProcessedDocument
 from nexora.retrieval.in_memory import InMemoryVectorStore
@@ -659,4 +664,141 @@ def test_reindex_document_remains_separate_reconciliation_operation(test_db):
     # Database still has exactly 1 document
     with Session(engine) as s:
         assert s.query(Document).filter_by(paper_id=paper_id).count() == 1
+
+
+# ==============================================================================
+# 4. In-Process Lock Registry Lifecycle Tests
+# ==============================================================================
+
+
+def test_lock_registry_reference_counting_and_clean_removal():
+    """Verifies that acquiring a lock guard increments references and cleans up
+    completely from the registry upon exit, leaving zero memory leakage.
+    """
+    pid = uuid4()
+    assert active_paper_locks_count() == 0
+
+    with get_paper_ingestion_lock(pid) as guard:
+        assert isinstance(guard, PaperIngestionLock)
+        assert guard.locked() is True
+        assert active_paper_locks_count() == 1
+
+    # After exit, registry entry is removed because ref_count dropped to zero
+    assert active_paper_locks_count() == 0
+
+
+def test_lock_registry_reuse_and_concurrency_contention():
+    """Verifies that concurrent threads for the same paper reuse the same lock,
+    serialize their execution, track ref_count correctly, and clean up only when
+    all threads have released.
+    """
+    import time
+    pid = uuid4()
+    thread_1_started = threading.Event()
+    thread_2_queued = threading.Event()
+    thread_1_can_finish = threading.Event()
+
+    execution_order: list[str] = []
+
+    def _worker_1():
+        with get_paper_ingestion_lock(pid):
+            execution_order.append("worker_1_acquired")
+            thread_1_started.set()
+            thread_1_can_finish.wait(timeout=5.0)
+            execution_order.append("worker_1_releasing")
+
+    def _worker_2():
+        thread_1_started.wait(timeout=5.0)
+        thread_2_queued.set()
+        with get_paper_ingestion_lock(pid):
+            execution_order.append("worker_2_acquired")
+
+    t1 = threading.Thread(target=_worker_1)
+    t2 = threading.Thread(target=_worker_2)
+
+    t1.start()
+    thread_1_started.wait(timeout=5.0)
+
+    t2.start()
+    thread_2_queued.wait(timeout=5.0)
+
+    # Allow worker 2 a moment to queue up on the lock
+    time.sleep(0.05)
+
+    # During contention, exactly 1 lock entry exists in the registry with ref_count == 2
+    assert active_paper_locks_count() == 1
+
+    # Release worker 1
+    thread_1_can_finish.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    # Worker 1 had to finish releasing before worker 2 could acquire
+    assert execution_order == [
+        "worker_1_acquired",
+        "worker_1_releasing",
+        "worker_2_acquired",
+    ]
+
+    # After both completed, lock entry is completely removed
+    assert active_paper_locks_count() == 0
+
+
+def test_lock_registry_distinct_papers_concurrent_execution():
+    """Verifies that threads locking different papers execute concurrently without
+    blocking each other, maintaining independent lock entries that clean up independently.
+    """
+    pid_1 = uuid4()
+    pid_2 = uuid4()
+
+    p1_active = threading.Event()
+    p2_active = threading.Event()
+    proceed = threading.Event()
+
+    def _worker_p1():
+        with paper_ingestion_guard(pid_1):
+            p1_active.set()
+            proceed.wait(timeout=5.0)
+
+    def _worker_p2():
+        with paper_ingestion_guard(pid_2):
+            p2_active.set()
+            proceed.wait(timeout=5.0)
+
+    t1 = threading.Thread(target=_worker_p1)
+    t2 = threading.Thread(target=_worker_p2)
+
+    t1.start()
+    t2.start()
+
+    p1_active.wait(timeout=5.0)
+    p2_active.wait(timeout=5.0)
+
+    # Both locks are concurrently held in memory
+    assert active_paper_locks_count() == 2
+
+    proceed.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    # Both cleaned up cleanly
+    assert active_paper_locks_count() == 0
+
+
+def test_lock_registry_exception_safety_cleanup():
+    """Verifies that an unhandled exception inside the critical section still
+    properly releases the lock and cleans up the registry entry.
+    """
+    pid = uuid4()
+
+    class CustomTestError(Exception):
+        pass
+
+    with pytest.raises(CustomTestError):
+        with get_paper_ingestion_lock(pid):
+            assert active_paper_locks_count() == 1
+            raise CustomTestError("Simulated unhandled failure")
+
+    assert active_paper_locks_count() == 0
+
 
