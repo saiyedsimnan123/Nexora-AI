@@ -1,6 +1,14 @@
 """Document intelligence layer for Nexora AI.
 
-This package will contain the document ingestion and document-processing
-functionality for research documents. It is the entry point of the Nexora
-pipeline, ahead of chunking, embeddings, retrieval and RAG.
+This package contains the document ingestion, processing, and persistence
+functionality for research documents.
 """
+
+from nexora.document.models import DocumentChunk, ProcessedDocument
+from nexora.document.service import DocumentPersistenceService
+
+__all__ = [
+    "DocumentChunk",
+    "DocumentPersistenceService",
+    "ProcessedDocument",
+]

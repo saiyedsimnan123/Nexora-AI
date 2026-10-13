@@ -14,12 +14,16 @@ from nexora.database.repository.paper import PaperRepository
 from nexora.database.repository.author import AuthorRepository
 from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.database.repository.paper_reference import PaperReferenceRepository
+from nexora.database.repository.document import DocumentRepository
+from nexora.database.repository.document_chunk import DocumentChunkRepository
 from nexora.database.models.user import User
 from nexora.database.models.collection import Collection
 from nexora.database.models.paper import Paper
 from nexora.database.models.author import Author
 from nexora.database.models.paper_author import PaperAuthor
 from nexora.database.models.paper_reference import PaperReference
+from nexora.database.models.document import Document
+from nexora.database.models.document_chunk import DocumentChunkRecord
 
 @pytest.fixture
 def engine():
@@ -966,6 +970,271 @@ def test_paper_reference_repository_transaction_recovery(session):
 
     assert repo.get_by_id(ref1.id) is not None
     assert repo.get_by_id(ref2.id) is not None
+
+
+_VALID_HEX = "0123456789abcdef" * 4
+
+
+def _make_paper(session, title="Test Paper"):
+    col = _make_collection(session)
+    return PaperRepository(session).create(collection_id=col.id, title=title)
+
+
+def test_document_repository_create_and_read(session):
+    paper = _make_paper(session)
+    repo = DocumentRepository(session)
+
+    doc = repo.create(
+        paper_id=paper.id,
+        filename="paper.pdf",
+        mime_type="application/pdf",
+        file_size=1024,
+        checksum=_VALID_HEX,
+        storage_key="papers/doc1.pdf",
+    )
+    assert doc.id is not None
+    assert doc.paper_id == paper.id
+    assert doc.filename == "paper.pdf"
+    assert doc.file_size == 1024
+    assert doc.checksum == _VALID_HEX
+
+    found = repo.get_by_id(doc.id)
+    assert found is not None
+    assert found.id == doc.id
+
+    assert repo.get_by_id(uuid4()) is None
+    with pytest.raises(RecordNotFoundError):
+        repo.get_by_id_or_raise(uuid4())
+
+
+def test_document_repository_list_by_paper_id(session):
+    paper = _make_paper(session)
+    repo = DocumentRepository(session)
+
+    d1 = repo.create(
+        paper_id=paper.id,
+        filename="v1.pdf",
+        file_size=100,
+        checksum=_VALID_HEX,
+        storage_key="k1",
+    )
+    d2 = repo.create(
+        paper_id=paper.id,
+        filename="v2.pdf",
+        file_size=200,
+        checksum=_VALID_HEX,
+        storage_key="k2",
+    )
+
+    docs = repo.list_by_paper_id(paper.id)
+    assert len(docs) == 2
+    expected_order = sorted([d1, d2], key=lambda d: (d.created_at, d.id))
+    expected_ids = [d.id for d in expected_order]
+    assert [d.id for d in docs] == expected_ids
+
+    page1 = repo.list_by_paper_id(paper.id, offset=0, limit=1)
+    assert len(page1) == 1
+    assert page1[0].id == expected_ids[0]
+
+    page2 = repo.list_by_paper_id(paper.id, offset=1, limit=1)
+    assert len(page2) == 1
+    assert page2[0].id == expected_ids[1]
+
+    assert repo.list_by_paper_id(uuid4()) == []
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_paper_id(paper.id, offset=-1)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_paper_id(paper.id, offset=True)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_paper_id(paper.id, limit=0)
+
+
+def test_document_repository_get_by_storage_key_and_checksum(session):
+    paper = _make_paper(session)
+    repo = DocumentRepository(session)
+
+    doc = repo.create(
+        paper_id=paper.id,
+        filename="paper.pdf",
+        file_size=500,
+        checksum=_VALID_HEX,
+        storage_key="unique/storage/key.pdf",
+    )
+
+    found_key = repo.get_by_storage_key("unique/storage/key.pdf")
+    assert found_key is not None
+    assert found_key.id == doc.id
+    assert repo.get_by_storage_key("missing/key") is None
+
+    found_sum = repo.get_by_checksum_and_paper(paper.id, _VALID_HEX)
+    assert found_sum is not None
+    assert found_sum.id == doc.id
+    assert repo.get_by_checksum_and_paper(uuid4(), _VALID_HEX) is None
+
+
+def test_document_repository_delete(session):
+    paper = _make_paper(session)
+    repo = DocumentRepository(session)
+
+    doc = repo.create(
+        paper_id=paper.id,
+        filename="paper.pdf",
+        file_size=500,
+        checksum=_VALID_HEX,
+        storage_key="delete_me.pdf",
+    )
+    doc_id = doc.id
+    repo.delete(doc_id)
+    assert repo.get_by_id(doc_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.delete(uuid4())
+
+
+def test_document_repository_constraints_and_transaction_recovery(session):
+    paper = _make_paper(session)
+    repo = DocumentRepository(session)
+
+    # Missing paper FK
+    with pytest.raises(ConstraintError):
+        repo.create(
+            paper_id=uuid4(),
+            filename="bad.pdf",
+            file_size=10,
+            checksum=_VALID_HEX,
+            storage_key="bad_k",
+        )
+
+    # Valid doc after constraint error (session intact)
+    valid_doc = repo.create(
+        paper_id=paper.id,
+        filename="good.pdf",
+        file_size=10,
+        checksum=_VALID_HEX,
+        storage_key="good_k",
+    )
+    assert valid_doc.id is not None
+    assert repo.get_by_id(valid_doc.id) is not None
+
+
+def test_document_chunk_repository_create_and_read(session):
+    paper = _make_paper(session)
+    doc = DocumentRepository(session).create(
+        paper_id=paper.id,
+        filename="doc.pdf",
+        file_size=10,
+        checksum=_VALID_HEX,
+        storage_key="k_chunk",
+    )
+    chunk_repo = DocumentChunkRepository(session)
+
+    chunk = chunk_repo.create(document_id=doc.id, chunk_index=0, text="First chunk text")
+    assert chunk.id is not None
+    assert chunk.document_id == doc.id
+    assert chunk.chunk_index == 0
+    assert chunk.text == "First chunk text"
+
+    found = chunk_repo.get_by_id(chunk.id)
+    assert found is not None
+    assert found.id == chunk.id
+
+    found_idx = chunk_repo.get_by_document_and_index(doc.id, 0)
+    assert found_idx is not None
+    assert found_idx.id == chunk.id
+    assert chunk_repo.get_by_document_and_index(doc.id, 99) is None
+
+
+def test_document_chunk_repository_list_and_count(session):
+    paper = _make_paper(session)
+    doc = DocumentRepository(session).create(
+        paper_id=paper.id,
+        filename="doc.pdf",
+        file_size=10,
+        checksum=_VALID_HEX,
+        storage_key="k_chunks_list",
+    )
+    chunk_repo = DocumentChunkRepository(session)
+
+    c0 = chunk_repo.create(document_id=doc.id, chunk_index=0, text="Chunk 0")
+    c1 = chunk_repo.create(document_id=doc.id, chunk_index=1, text="Chunk 1")
+    c2 = chunk_repo.create(document_id=doc.id, chunk_index=2, text="Chunk 2")
+
+    assert chunk_repo.count_by_document_id(doc.id) == 3
+
+    chunks = chunk_repo.list_by_document_id(doc.id)
+    assert len(chunks) == 3
+    assert [c.chunk_index for c in chunks] == [0, 1, 2]
+    assert [c.id for c in chunks] == [c0.id, c1.id, c2.id]
+
+    page1 = chunk_repo.list_by_document_id(doc.id, offset=0, limit=2)
+    assert len(page1) == 2
+    assert [c.id for c in page1] == [c0.id, c1.id]
+
+    page2 = chunk_repo.list_by_document_id(doc.id, offset=2, limit=2)
+    assert len(page2) == 1
+    assert page2[0].id == c2.id
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        chunk_repo.list_by_document_id(doc.id, offset=-1)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        chunk_repo.list_by_document_id(doc.id, limit=0)
+
+
+def test_document_chunk_repository_delete(session):
+    paper = _make_paper(session)
+    doc = DocumentRepository(session).create(
+        paper_id=paper.id,
+        filename="doc.pdf",
+        file_size=10,
+        checksum=_VALID_HEX,
+        storage_key="k_delete_chunk",
+    )
+    chunk_repo = DocumentChunkRepository(session)
+
+    c = chunk_repo.create(document_id=doc.id, chunk_index=0, text="To delete")
+    chunk_repo.delete(c.id)
+    assert chunk_repo.get_by_id(c.id) is None
+
+    chunk_repo.create(document_id=doc.id, chunk_index=0, text="A")
+    chunk_repo.create(document_id=doc.id, chunk_index=1, text="B")
+    assert chunk_repo.count_by_document_id(doc.id) == 2
+
+    deleted_count = chunk_repo.delete_by_document_id(doc.id)
+    assert deleted_count == 2
+    assert chunk_repo.count_by_document_id(doc.id) == 0
+
+
+def test_document_chunk_repository_uniqueness_and_transaction_recovery(session):
+    paper = _make_paper(session)
+    doc = DocumentRepository(session).create(
+        paper_id=paper.id,
+        filename="doc.pdf",
+        file_size=10,
+        checksum=_VALID_HEX,
+        storage_key="k_unique_chunk",
+    )
+    chunk_repo = DocumentChunkRepository(session)
+
+    c0 = chunk_repo.create(document_id=doc.id, chunk_index=0, text="Initial chunk")
+
+    # Duplicate (document_id, chunk_index) -> DuplicateRecordError
+    with pytest.raises(DuplicateRecordError):
+        chunk_repo.create(document_id=doc.id, chunk_index=0, text="Duplicate index chunk")
+
+    # Foreign key constraint error on non-existent document_id
+    with pytest.raises(ConstraintError):
+        chunk_repo.create(document_id=uuid4(), chunk_index=1, text="No doc")
+
+    # Session remains usable after savepoint rollback
+    c1 = chunk_repo.create(document_id=doc.id, chunk_index=1, text="Second chunk")
+    session.commit()
+
+    assert chunk_repo.get_by_id(c0.id) is not None
+    assert chunk_repo.get_by_id(c1.id) is not None
 
 
 
