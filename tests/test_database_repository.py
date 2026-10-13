@@ -476,12 +476,22 @@ def test_author_repository_list_all(session):
 
     all_authors = repo.list_all()
     assert len(all_authors) == 2
+    assert [a.id for a in all_authors] == [a1.id, a2.id]
 
     page_1 = repo.list_all(offset=0, limit=1)
     assert len(page_1) == 1
+    assert page_1[0].id == a1.id
 
     page_2 = repo.list_all(offset=1, limit=1)
     assert len(page_2) == 1
+    assert page_2[0].id == a2.id
+
+    # Pagination validation
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_all(offset=-1)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_all(limit=0)
 
 
 def test_author_repository_update(session):

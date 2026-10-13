@@ -56,6 +56,7 @@ class PaperRepository(BaseRepository[Paper]):
         stmt = (
             select(Paper)
             .where(Paper.collection_id == collection_id)
+            .order_by(Paper.created_at, Paper.id)
             .offset(offset)
             .limit(limit)
         )

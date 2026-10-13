@@ -50,7 +50,7 @@ class PaperAuthorRepository(BaseRepository[PaperAuthor]):
         stmt = (
             select(PaperAuthor)
             .where(PaperAuthor.paper_id == paper_id)
-            .order_by(PaperAuthor.author_order)
+            .order_by(PaperAuthor.author_order, PaperAuthor.id)
         )
         return self._session.scalars(stmt).all()
 
@@ -70,6 +70,7 @@ class PaperAuthorRepository(BaseRepository[PaperAuthor]):
         stmt = (
             select(PaperAuthor)
             .where(PaperAuthor.author_id == author_id)
+            .order_by(PaperAuthor.created_at, PaperAuthor.id)
             .offset(offset)
             .limit(limit)
         )
