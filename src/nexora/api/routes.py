@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -113,6 +114,7 @@ async def ingest_document(
 
     safe_filename = Path(raw_filename).name or "document.pdf"
     max_size = getattr(request.app.state, "max_upload_size_bytes", 50 * 1024 * 1024)
+    hasher = hashlib.sha256()
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
@@ -125,45 +127,77 @@ async def ingest_document(
                         f"Uploaded file exceeds maximum allowed size of {max_size} bytes."
                     )
                 tmp_file.write(chunk)
+                hasher.update(chunk)
             tmp_file.flush()
         except Exception:
             tmp_file.close()
             if tmp_path.exists():
-                os.unlink(tmp_path)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             raise
 
     if total_bytes == 0:
         if tmp_path.exists():
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         raise InvalidRequestError("Uploaded file is empty.")
+
+    file_checksum = hasher.hexdigest()
 
     try:
         pipeline = getattr(request.app.state, "document_pipeline", None)
 
-        if hasattr(service, "process_and_ingest"):
-            result = service.process_and_ingest(
-                paper_id=paper_uuid,
-                file_path=str(tmp_path),
-                pipeline=pipeline,
-                filename=safe_filename,
-            )
-        elif hasattr(service, "ingest_file"):
-            result = service.ingest_file(
-                paper_id=paper_uuid,
-                file_path=str(tmp_path),
-                pipeline=pipeline,
-                filename=safe_filename,
-            )
-        elif hasattr(service, "ingest"):
-            result = service.ingest(
-                paper_id=paper_uuid,
-                file_path=str(tmp_path),
-                filename=safe_filename,
-            )
-        else:
-            raise InvalidConfigurationError(
-                "ingestion_service does not support document ingestion"
-            )
+        if pipeline is not None and hasattr(pipeline, "_loader") and callable(pipeline._loader):
+            try:
+                pipeline._loader(str(tmp_path))
+            except Exception as exc:
+                raise InvalidRequestError("The uploaded file is not a valid or readable PDF.") from exc
+
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is not None and hasattr(service, "_session_factory"):
+            if getattr(service, "_session_factory", None) is None:
+                service._session_factory = session_factory
+
+        try:
+            if hasattr(service, "process_and_ingest"):
+                try:
+                    result = service.process_and_ingest(
+                        paper_id=paper_uuid,
+                        file_path=str(tmp_path),
+                        pipeline=pipeline,
+                        filename=safe_filename,
+                        checksum=file_checksum,
+                    )
+                except TypeError:
+                    result = service.process_and_ingest(
+                        paper_id=paper_uuid,
+                        file_path=str(tmp_path),
+                        pipeline=pipeline,
+                        filename=safe_filename,
+                    )
+            elif hasattr(service, "ingest_file"):
+                result = service.ingest_file(
+                    paper_id=paper_uuid,
+                    file_path=str(tmp_path),
+                    pipeline=pipeline,
+                    filename=safe_filename,
+                )
+            elif hasattr(service, "ingest"):
+                result = service.ingest(
+                    paper_id=paper_uuid,
+                    file_path=str(tmp_path),
+                    filename=safe_filename,
+                )
+            else:
+                raise InvalidConfigurationError(
+                    "ingestion_service does not support document ingestion"
+                )
+        except ValueError as exc:
+            raise InvalidRequestError("The uploaded file is not a valid or readable PDF.") from exc
 
         return DocumentIngestResponseBody(
             document_id=str(result.document_id),
@@ -173,4 +207,7 @@ async def ingest_document(
         )
     finally:
         if tmp_path.exists():
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

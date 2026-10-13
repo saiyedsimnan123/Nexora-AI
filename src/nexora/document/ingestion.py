@@ -60,18 +60,24 @@ class DocumentIngestionService:
 
     def __init__(
         self,
-        persistence_service: DocumentPersistenceService,
-        vector_store: VectorStore,
+        persistence_service: DocumentPersistenceService | None = None,
+        vector_store: VectorStore | None = None,
         *,
         embedding_service: Any = None,
+        session_factory: Any = None,
     ) -> None:
-        if not isinstance(persistence_service, DocumentPersistenceService) and not hasattr(
-            persistence_service, "persist_processed_document"
-        ):
+        if persistence_service is None and session_factory is None:
+            raise TypeError("Either persistence_service or session_factory must be provided")
+
+        if persistence_service is not None and not isinstance(
+            persistence_service, DocumentPersistenceService
+        ) and not hasattr(persistence_service, "persist_processed_document"):
             raise TypeError(
                 f"persistence_service must be a DocumentPersistenceService, "
                 f"got {type(persistence_service).__name__}"
             )
+        if session_factory is not None and not callable(session_factory):
+            raise TypeError("session_factory must be callable")
         if not isinstance(vector_store, VectorStore):
             raise TypeError(
                 f"vector_store must implement VectorStore protocol, "
@@ -84,13 +90,17 @@ class DocumentIngestionService:
             raise TypeError("embedding_service must provide embed_texts or embed_text")
 
         self._persistence_service = persistence_service
+        self._session_factory = session_factory
         self._vector_store = vector_store
         self._embedding_service = embedding_service
 
-    def ingest_processed_document(
+    def _persist_and_index_records(
         self,
+        session: Any,
+        persistence_service: Any,
         paper_id: UUID,
         processed_document: ProcessedDocument,
+        resolved_vectors: Sequence[Sequence[float]],
         *,
         filename: str | None = None,
         mime_type: str | None = None,
@@ -98,41 +108,11 @@ class DocumentIngestionService:
         checksum: str | None = None,
         storage_key: str | None = None,
         allow_duplicate: bool = False,
-        force_reembed: bool = False,
-    ) -> IngestionResult:
-        """Ingest a ProcessedDocument into both the relational database and the vector store.
-
-        All relational persistence operations run in a transaction savepoint. If vector
-        indexing fails, the relational savepoint is rolled back and partial vectors are cleaned
-        up, ensuring failure atomicity.
-        """
-        if not isinstance(paper_id, UUID):
-            raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
-        if not isinstance(processed_document, ProcessedDocument):
-            raise TypeError(
-                f"processed_document must be a ProcessedDocument, "
-                f"got {type(processed_document).__name__}"
-            )
-
-        # 1. Resolve embeddings for all chunks
-        try:
-            resolved_vectors = self._resolve_chunk_vectors(
-                processed_document.chunks, force_reembed=force_reembed
-            )
-        except (ValueError, TypeError):
-            raise
-        except Exception as exc:
-            raise VectorIndexingError(
-                f"Failed to generate chunk embeddings: {exc}"
-            ) from exc
-
-        session = self._persistence_service._session
+    ) -> tuple[Any, list[Any], list[str]]:
         vector_ids: list[str] = []
-
         try:
             with session.begin_nested():
-                # 2. Relational persistence
-                doc = self._persistence_service.persist_processed_document(
+                doc = persistence_service.persist_processed_document(
                     paper_id,
                     processed_document,
                     filename=filename,
@@ -143,10 +123,9 @@ class DocumentIngestionService:
                     allow_duplicate=allow_duplicate,
                 )
                 chunk_records = list(
-                    self._persistence_service.list_chunks_for_document(doc.id)
+                    persistence_service.list_chunks_for_document(doc.id)
                 )
 
-                # 3. Vector records creation and indexing
                 if chunk_records:
                     records_to_upsert: list[VectorRecord] = []
                     for chunk_rec, vector in zip(chunk_records, resolved_vectors):
@@ -174,12 +153,10 @@ class DocumentIngestionService:
                         vector_ids.append(rec_id)
 
                     self._vector_store.upsert(records_to_upsert)
-
+            return doc, chunk_records, vector_ids
         except (DuplicateRecordError, RecordNotFoundError, ValueError, TypeError):
-            # Domain and validation errors propagate unchanged
             raise
         except Exception as exc:
-            # Vector store or unexpected indexing error: clean up any partially indexed vectors
             if vector_ids:
                 try:
                     self._vector_store.delete(vector_ids)
@@ -188,6 +165,80 @@ class DocumentIngestionService:
             raise VectorIndexingError(
                 f"Vector store indexing failed during ingestion: {exc}"
             ) from exc
+
+    def ingest_processed_document(
+        self,
+        paper_id: UUID,
+        processed_document: ProcessedDocument,
+        *,
+        filename: str | None = None,
+        mime_type: str | None = None,
+        file_size: int | None = None,
+        checksum: str | None = None,
+        storage_key: str | None = None,
+        allow_duplicate: bool = False,
+        force_reembed: bool = False,
+    ) -> IngestionResult:
+        """Ingest a ProcessedDocument into both the relational database and the vector store.
+
+        All relational persistence operations run within a managed transaction. If vector
+        indexing fails, the relational changes are rolled back and partial vectors are cleaned
+        up, ensuring failure atomicity.
+        """
+        if not isinstance(paper_id, UUID):
+            raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
+        if not isinstance(processed_document, ProcessedDocument):
+            raise TypeError(
+                f"processed_document must be a ProcessedDocument, "
+                f"got {type(processed_document).__name__}"
+            )
+
+        # 1. Resolve embeddings for all chunks (outside DB transaction to prevent holding DB locks)
+        try:
+            resolved_vectors = self._resolve_chunk_vectors(
+                processed_document.chunks, force_reembed=force_reembed
+            )
+        except (ValueError, TypeError):
+            raise
+        except Exception as exc:
+            raise VectorIndexingError(
+                f"Failed to generate chunk embeddings: {exc}"
+            ) from exc
+
+        if self._session_factory is not None:
+            from nexora.database.session import database_transaction
+            from nexora.document.service import DocumentPersistenceService
+
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                doc, chunk_records, vector_ids = self._persist_and_index_records(
+                    session,
+                    persistence,
+                    paper_id,
+                    processed_document,
+                    resolved_vectors,
+                    filename=filename,
+                    mime_type=mime_type,
+                    file_size=file_size,
+                    checksum=checksum,
+                    storage_key=storage_key,
+                    allow_duplicate=allow_duplicate,
+                )
+        else:
+            session = self._persistence_service._session
+            doc, chunk_records, vector_ids = self._persist_and_index_records(
+                session,
+                self._persistence_service,
+                paper_id,
+                processed_document,
+                resolved_vectors,
+                filename=filename,
+                mime_type=mime_type,
+                file_size=file_size,
+                checksum=checksum,
+                storage_key=storage_key,
+                allow_duplicate=allow_duplicate,
+            )
 
         return IngestionResult(
             document_id=doc.id,
@@ -232,26 +283,19 @@ class DocumentIngestionService:
             force_reembed=force_reembed,
         )
 
-    def reindex_document(
+    def _do_reindex_document(
         self,
+        persistence_service: Any,
         document_id: UUID,
         *,
         force_reembed: bool = True,
     ) -> IngestionResult:
-        """Reindex an already persisted document in the vector store.
-
-        Reconciles relational chunk records with the vector store or retries
-        previously failed indexing.
-        """
-        if not isinstance(document_id, UUID):
-            raise TypeError(f"document_id must be a UUID, got {type(document_id).__name__}")
-
-        doc = self._persistence_service.get_document(document_id)
+        doc = persistence_service.get_document(document_id)
         if doc is None:
             raise RecordNotFoundError(f"Document with id {document_id} not found")
 
         chunk_records = list(
-            self._persistence_service.list_chunks_for_document(document_id)
+            persistence_service.list_chunks_for_document(document_id)
         )
         if not chunk_records:
             return IngestionResult(
@@ -310,9 +354,45 @@ class DocumentIngestionService:
             chunk_records=chunk_records,
         )
 
+    def reindex_document(
+        self,
+        document_id: UUID,
+        *,
+        force_reembed: bool = True,
+    ) -> IngestionResult:
+        """Reindex an already persisted document in the vector store.
+
+        Reconciles relational chunk records with the vector store or retries
+        previously failed indexing.
+        """
+        if not isinstance(document_id, UUID):
+            raise TypeError(f"document_id must be a UUID, got {type(document_id).__name__}")
+
+        if self._session_factory is not None:
+            from nexora.database.session import database_transaction
+            from nexora.document.service import DocumentPersistenceService
+
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                return self._do_reindex_document(
+                    persistence, document_id, force_reembed=force_reembed
+                )
+        return self._do_reindex_document(
+            self._persistence_service, document_id, force_reembed=force_reembed
+        )
+
     def delete_document_vectors(self, document_id: UUID) -> int:
         """Delete all indexed vectors for a document from the vector store."""
-        chunk_records = self._persistence_service.list_chunks_for_document(document_id)
+        if self._session_factory is not None:
+            from nexora.database.session import database_transaction
+            from nexora.document.service import DocumentPersistenceService
+
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                chunk_records = persistence.list_chunks_for_document(document_id)
+        else:
+            chunk_records = self._persistence_service.list_chunks_for_document(document_id)
+
         ids = [str(c.id) for c in chunk_records]
         if ids:
             self._vector_store.delete(ids)

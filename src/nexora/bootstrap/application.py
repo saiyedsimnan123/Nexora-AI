@@ -93,6 +93,7 @@ def build_research_application(
 def build_ingestion_service(
     settings: AppSettings,
     *,
+    session_factory: Any = None,
     persistence_service: Any = None,
     session: Any = None,
     vector_store: VectorStore | None = None,
@@ -117,9 +118,20 @@ def build_ingestion_service(
         raise ConfigurationError("vector_store must implement the VectorStore protocol")
     _check_dimension("vector_store", vector_store, settings.embedding_dimension)
 
+    if session_factory is not None:
+        from nexora.document.ingestion import DocumentIngestionService
+
+        return DocumentIngestionService(
+            vector_store=vector_store,
+            embedding_service=embedding_service,
+            session_factory=session_factory,
+        )
+
     if persistence_service is None:
         if session is None:
-            raise ConfigurationError("persistence_service or session is required")
+            raise ConfigurationError(
+                "persistence_service, session, or session_factory is required"
+            )
         from nexora.document.service import DocumentPersistenceService
 
         persistence_service = DocumentPersistenceService(session)
@@ -169,15 +181,27 @@ def build_http_app(
 
     if ingestion_service is None:
         session = dependencies.get("session")
-        if persistence_service is not None or session is not None:
+        if session_factory is not None or persistence_service is not None or session is not None:
             ingestion_service = build_ingestion_service(
                 settings,
+                session_factory=session_factory,
                 persistence_service=persistence_service,
                 session=session,
                 vector_store=vector_store,
                 embedding_service=embedding_service,
                 qdrant_client=qdrant_client,
             )
+
+    if document_pipeline is None:
+        try:
+            from nexora.embedding.integration import EmbeddingIntegration
+            from nexora.document.pipeline import DocumentPipeline
+
+            document_pipeline = DocumentPipeline(
+                EmbeddingIntegration(embedding_service)
+            )
+        except Exception:
+            document_pipeline = None
 
     return create_app(
         research_service,
