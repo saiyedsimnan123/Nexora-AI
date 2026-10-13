@@ -65,7 +65,9 @@ class DocumentIngestionService:
         *,
         embedding_service: Any = None,
     ) -> None:
-        if not isinstance(persistence_service, DocumentPersistenceService):
+        if not isinstance(persistence_service, DocumentPersistenceService) and not hasattr(
+            persistence_service, "persist_processed_document"
+        ):
             raise TypeError(
                 f"persistence_service must be a DocumentPersistenceService, "
                 f"got {type(persistence_service).__name__}"

@@ -90,8 +90,99 @@ def build_research_application(
     return ResearchApplicationService(query_service)
 
 
-def build_http_app(settings: AppSettings, **dependencies: Any) -> Any:
-    """Compose the pipeline and wrap it in the FastAPI app (create_app is unchanged)."""
+def build_ingestion_service(
+    settings: AppSettings,
+    *,
+    persistence_service: Any = None,
+    session: Any = None,
+    vector_store: VectorStore | None = None,
+    embedding_service: Any,
+    qdrant_client: Any = None,
+) -> Any:
+    """Assemble DocumentIngestionService using settings and injected dependencies.
+
+    Keeps construction lazy; performs no network calls and creates no database tables.
+    """
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+    if not callable(getattr(embedding_service, "embed_text", None)) and not callable(
+        getattr(embedding_service, "embed_texts", None)
+    ):
+        raise ConfigurationError("embedding_service must provide embed_text/embed_texts")
+    _check_dimension("embedding_service", embedding_service, settings.embedding_dimension)
+
+    if vector_store is None:
+        vector_store = _select_vector_store(settings, qdrant_client)
+    elif not isinstance(vector_store, VectorStore):
+        raise ConfigurationError("vector_store must implement the VectorStore protocol")
+    _check_dimension("vector_store", vector_store, settings.embedding_dimension)
+
+    if persistence_service is None:
+        if session is None:
+            raise ConfigurationError("persistence_service or session is required")
+        from nexora.document.service import DocumentPersistenceService
+
+        persistence_service = DocumentPersistenceService(session)
+
+    from nexora.document.ingestion import DocumentIngestionService
+
+    return DocumentIngestionService(
+        persistence_service,
+        vector_store=vector_store,
+        embedding_service=embedding_service,
+    )
+
+
+def build_http_app(
+    settings: AppSettings,
+    *,
+    embedding_service: Any,
+    vector_store: VectorStore | None = None,
+    llm_provider: Any = None,
+    qdrant_client: Any = None,
+    session_factory: Any = None,
+    persistence_service: Any = None,
+    ingestion_service: Any = None,
+    document_pipeline: Any = None,
+    max_upload_size_bytes: int = 50 * 1024 * 1024,
+    **dependencies: Any,
+) -> Any:
+    """Compose the pipeline and wrap it in the FastAPI app."""
     from nexora.api.app import create_app  # local import keeps FastAPI optional here
 
-    return create_app(build_research_application(settings, **dependencies))
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if vector_store is None:
+        vector_store = _select_vector_store(settings, qdrant_client)
+    elif not isinstance(vector_store, VectorStore):
+        raise ConfigurationError("vector_store must implement the VectorStore protocol")
+    _check_dimension("vector_store", vector_store, settings.embedding_dimension)
+
+    research_service = build_research_application(
+        settings,
+        embedding_service=embedding_service,
+        vector_store=vector_store,
+        llm_provider=llm_provider,
+        qdrant_client=qdrant_client,
+    )
+
+    if ingestion_service is None:
+        session = dependencies.get("session")
+        if persistence_service is not None or session is not None:
+            ingestion_service = build_ingestion_service(
+                settings,
+                persistence_service=persistence_service,
+                session=session,
+                vector_store=vector_store,
+                embedding_service=embedding_service,
+                qdrant_client=qdrant_client,
+            )
+
+    return create_app(
+        research_service,
+        ingestion_service=ingestion_service,
+        document_pipeline=document_pipeline,
+        session_factory=session_factory,
+        max_upload_size_bytes=max_upload_size_bytes,
+    )

@@ -1,8 +1,4 @@
-"""Expected application-level errors, ready for a future HTTP exception handler.
-
-Suggested mapping: InvalidRequestError -> 4xx, ResearchServiceError -> 5xx/502,
-InvalidConfigurationError -> 5xx (a deployment/wiring problem, not the caller's).
-"""
+"""Expected application-level errors, ready for HTTP exception handlers."""
 
 from __future__ import annotations
 
@@ -17,3 +13,15 @@ class InvalidConfigurationError(RuntimeError):
 
 class ResearchServiceError(RuntimeError):
     """The research pipeline failed; the original error is chained as __cause__."""
+
+
+class FileTooLargeError(InvalidRequestError):
+    """The uploaded file exceeds the configured maximum upload size."""
+
+
+class DocumentNotFoundError(LookupError):
+    """The requested paper or document was not found."""
+
+
+class DocumentIngestionApiError(RuntimeError):
+    """Document ingestion failed; the original error is chained as __cause__."""

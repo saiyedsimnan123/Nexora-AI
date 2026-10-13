@@ -75,3 +75,22 @@ class ResearchResponse:
             "usage": None if self.usage is None else dict(self.usage),
             "evidence_count": self.evidence_count,
         }
+
+
+@dataclass(frozen=True)
+class DocumentIngestResponse:
+    """Public view of a document ingestion result."""
+
+    document_id: str
+    paper_id: str
+    chunks_count: int
+    indexed_chunks_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "document_id": self.document_id,
+            "paper_id": self.paper_id,
+            "chunks_count": self.chunks_count,
+            "indexed_chunks_count": self.indexed_chunks_count,
+        }

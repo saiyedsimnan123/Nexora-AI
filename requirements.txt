@@ -8,3 +8,4 @@ httpx>=0.27
 SQLAlchemy>=2.0,<3.0
 alembic
 psycopg[binary]
+python-multipart

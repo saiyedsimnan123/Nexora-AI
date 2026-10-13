@@ -10,11 +10,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexora import __version__
 from nexora.api.errors import (
+    DocumentNotFoundError,
+    FileTooLargeError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
 )
 from nexora.api.routes import health_router, v1_router
+from nexora.database.repository.base import (
+    DuplicateRecordError,
+    RecordNotFoundError,
+)
+from nexora.document.ingestion import VectorIndexingError
 
 
 def _error_response(
@@ -30,6 +37,22 @@ async def _invalid_request(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(400, "invalid_request", "Invalid research request.")
 
 
+async def _file_too_large(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(413, "file_too_large", "Uploaded file exceeds maximum allowed size.")
+
+
+async def _not_found(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(404, "not_found", "The requested resource was not found.")
+
+
+async def _conflict(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(409, "conflict", "The resource already exists.")
+
+
+async def _indexing_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "indexing_failed", "Document indexing failed.")
+
+
 async def _research_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "research_failed", "The research request could not be completed.")
 
@@ -40,7 +63,6 @@ async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
 
 async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RequestValidationError)
-    # Only locations and error types: never echo the submitted input.
     details = [
         {"loc": [str(part) for part in err.get("loc", ())], "type": str(err.get("type", ""))}
         for err in exc.errors()
@@ -61,21 +83,37 @@ async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "internal_error", "An internal error occurred.")
 
 
-def create_app(research_service: Any) -> FastAPI:
-    """Build the app around an injected ResearchApplicationService.
-
-    Creates no clients and performs no network calls.
-    """
+def create_app(
+    research_service: Any,
+    *,
+    ingestion_service: Any = None,
+    document_pipeline: Any = None,
+    session_factory: Any = None,
+    max_upload_size_bytes: int = 50 * 1024 * 1024,
+) -> FastAPI:
+    """Build the app around injected research and ingestion services."""
     if not callable(getattr(research_service, "ask", None)):
         raise InvalidConfigurationError("research_service must provide ask(request)")
+
     app = FastAPI(
         title="Nexora AI",
         description="Research intelligence API: evidence-grounded answers to research questions.",
         version=__version__,
     )
     app.state.research_service = research_service
+    app.state.ingestion_service = ingestion_service
+    app.state.document_pipeline = document_pipeline
+    app.state.session_factory = session_factory
+    app.state.max_upload_size_bytes = max_upload_size_bytes
+
     app.include_router(health_router)
     app.include_router(v1_router)
+
+    app.add_exception_handler(FileTooLargeError, _file_too_large)
+    app.add_exception_handler(DocumentNotFoundError, _not_found)
+    app.add_exception_handler(RecordNotFoundError, _not_found)
+    app.add_exception_handler(DuplicateRecordError, _conflict)
+    app.add_exception_handler(VectorIndexingError, _indexing_failed)
     app.add_exception_handler(InvalidRequestError, _invalid_request)
     app.add_exception_handler(ResearchServiceError, _research_failed)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
