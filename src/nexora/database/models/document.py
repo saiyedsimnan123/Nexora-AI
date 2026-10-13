@@ -48,6 +48,7 @@ class IndexingStatus(str, Enum):
     """Lifecycle status of vector indexing for a Document."""
 
     PENDING = "pending"
+    PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -72,7 +73,7 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             f"length(checksum) = {CHECKSUM_LENGTH}", name="checksum_length"
         ),
         CheckConstraint(
-            "indexing_status IN ('pending', 'completed', 'failed')",
+            "indexing_status IN ('pending', 'processing', 'completed', 'failed')",
             name="indexing_status_valid",
         ),
         CheckConstraint(
@@ -115,6 +116,15 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=0,
         server_default=text("0"),
+    )
+    claimed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
     )
 
     paper: Mapped[Paper] = relationship(back_populates="documents")

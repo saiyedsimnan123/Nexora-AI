@@ -42,5 +42,7 @@ def test_migrations(tmp_path, monkeypatch):
     assert "indexing_error" in doc_columns
     assert "indexed_at" in doc_columns
     assert "indexing_attempts" in doc_columns
+    assert "claimed_at" in doc_columns
+    assert "claimed_by" in doc_columns
 
     conn.close()

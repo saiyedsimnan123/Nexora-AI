@@ -681,3 +681,249 @@ def test_durable_recovery_against_live_postgresql():
         assert rec_doc.indexing_status == IndexingStatus.COMPLETED.value
         assert rec_doc.indexing_error is None
         assert rec_doc.indexed_at is not None
+
+
+def test_independent_workers_contention_and_crash_recovery(session_factory, seed_paper):
+    """Verify independent workers contending with atomic claims and recovering crashed claims."""
+    vector_store = InMemoryVectorStore()
+    embedder = DummyEmbeddingService()
+    fail_store = ControllableVectorStore(fail_on_upsert=True)
+    ingestion_service = DocumentIngestionService(
+        session_factory=session_factory,
+        vector_store=fail_store,
+        embedding_service=embedder,
+    )
+
+    # Ingest 3 failed documents
+    doc_ids = []
+    for i in range(3):
+        cs = f"{i:02x}" * 32
+        pdoc = _make_processed_doc(num_chunks=2)
+        with pytest.raises(VectorIndexingError):
+            ingestion_service.ingest_processed_document(
+                paper_id=seed_paper,
+                processed_document=pdoc,
+                filename=f"contention_{i}.pdf",
+                checksum=cs,
+                storage_key=f"keys/contention_{i}.pdf",
+                allow_duplicate=True,
+                durable=True,
+            )
+        with session_factory() as session:
+            d = session.query(Document).filter_by(checksum=cs).one()
+            doc_ids.append(d.id)
+
+    # Add a 4th document that was claimed by a crashed worker 600 seconds ago (expired claim)
+    crashed_cs = "cc" * 32
+    with session_factory() as session:
+        crashed_doc = Document(
+            paper_id=seed_paper,
+            filename="crashed_worker.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum=crashed_cs,
+            storage_key="keys/crashed_worker.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=1,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="dead_worker_token",
+        )
+        session.add(crashed_doc)
+        session.flush()
+        for idx in range(2):
+            session.add(
+                DocumentChunkRecord(
+                    document_id=crashed_doc.id,
+                    chunk_index=idx,
+                    text=f"Crashed chunk text {idx}",
+                )
+            )
+        session.commit()
+        doc_ids.append(crashed_doc.id)
+
+    # Two independent worker instances
+    worker_1 = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+    worker_2 = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+
+    def _run_worker(w):
+        return w.recover_batch(batch_size=2)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(_run_worker, worker_1)
+        f2 = executor.submit(_run_worker, worker_2)
+        res1 = f1.result()
+        res2 = f2.result()
+
+    total_recovered = res1.recovered_count + res2.recovered_count
+    # In SQLite, both workers together claimed and recovered all 4 documents
+    # (if the first worker claimed 2 and the second claimed 2, total is 4; or remaining on next pass)
+    if total_recovered < 4:
+        # Run another pass to drain remaining
+        pass2 = worker_1.recover_batch(batch_size=4)
+        total_recovered += pass2.recovered_count
+
+    assert total_recovered == 4
+    assert res1.failed_count == 0
+    assert res2.failed_count == 0
+
+    # Verify all 4 documents reached COMPLETED
+    with session_factory() as session:
+        for did in doc_ids:
+            doc = session.query(Document).filter_by(id=did).one()
+            assert doc.indexing_status == IndexingStatus.COMPLETED.value
+            assert doc.indexed_at is not None
+            assert doc.indexing_error is None
+            assert doc.claimed_at is None
+            assert doc.claimed_by is None
+            assert doc.indexing_attempts <= 2
+
+            chunks = session.query(DocumentChunkRecord).filter_by(document_id=did).all()
+            assert len(chunks) == 2
+
+    assert vector_store.count() == 8
+
+
+def test_postgresql_independent_workers_contention_and_recovery():
+    """Verify independent workers contending on PostgreSQL with SKIP LOCKED and crash recovery."""
+    url = _get_postgres_test_url()
+    if not url:
+        pytest.skip(
+            "Live PostgreSQL database URL not configured. Set TEST_POSTGRES_URL or NEXORA_DATABASE_URL "
+            "to run live PostgreSQL contention tests."
+        )
+
+    try:
+        engine = create_engine(url, pool_size=10, max_overflow=10, pool_timeout=10)
+        with engine.connect() as conn:
+            conn.execute(select(1))
+    except Exception as exc:
+        pytest.fail(f"PostgreSQL server configured at {url} is not accessible: {exc}")
+
+    Base.metadata.create_all(engine)
+    pg_session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with pg_session_factory() as session:
+        user = User(email=f"pg_worker_contention_{uuid4()}@example.com")
+        session.add(user)
+        session.flush()
+        workspace = Workspace(name="PG Contention WS", user_id=user.id)
+        session.add(workspace)
+        session.flush()
+        col = Collection(name="PG Contention Col", workspace_id=workspace.id)
+        session.add(col)
+        session.flush()
+        paper = Paper(collection=col, title="PG Multi-Worker Paper")
+        session.add(paper)
+        session.commit()
+        paper_id = paper.id
+
+    vector_store = InMemoryVectorStore()
+    embedder = DummyEmbeddingService()
+
+    doc_ids = []
+    fail_store = ControllableVectorStore(fail_on_upsert=True)
+    ingestion_service = DocumentIngestionService(
+        session_factory=pg_session_factory,
+        vector_store=fail_store,
+        embedding_service=embedder,
+    )
+    for i in range(4):
+        cs = f"{i:02x}" * 32
+        pdoc = _make_processed_doc(num_chunks=2)
+        with pytest.raises(VectorIndexingError):
+            ingestion_service.ingest_processed_document(
+                paper_id=paper_id,
+                processed_document=pdoc,
+                filename=f"contention_{i}.pdf",
+                checksum=cs,
+                storage_key=f"keys/contention_{i}.pdf",
+                allow_duplicate=True,
+                durable=True,
+            )
+        with pg_session_factory() as session:
+            d = session.query(Document).filter_by(checksum=cs).one()
+            doc_ids.append(d.id)
+
+    # Simulate 5th document claimed by a crashed worker 600s ago
+    crashed_cs = "cc" * 32
+    with pg_session_factory() as session:
+        crashed_doc = Document(
+            paper_id=paper_id,
+            filename="crashed_worker.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum=crashed_cs,
+            storage_key="keys/crashed_worker.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=1,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="dead_worker_token",
+        )
+        session.add(crashed_doc)
+        session.flush()
+        for idx in range(2):
+            session.add(
+                DocumentChunkRecord(
+                    document_id=crashed_doc.id,
+                    chunk_index=idx,
+                    text=f"Crashed chunk text {idx}",
+                )
+            )
+        session.commit()
+        doc_ids.append(crashed_doc.id)
+
+    worker_1 = DocumentRecoveryService(
+        session_factory=pg_session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+    worker_2 = DocumentRecoveryService(
+        session_factory=pg_session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+
+    def _run_worker(w):
+        return w.recover_batch(batch_size=3)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(_run_worker, worker_1)
+        f2 = executor.submit(_run_worker, worker_2)
+        res1 = f1.result()
+        res2 = f2.result()
+
+    total_recovered = res1.recovered_count + res2.recovered_count
+    if total_recovered < 5:
+        pass2 = worker_1.recover_batch(batch_size=5)
+        total_recovered += pass2.recovered_count
+
+    assert total_recovered == 5
+    assert res1.failed_count == 0
+    assert res2.failed_count == 0
+
+    with pg_session_factory() as session:
+        for did in doc_ids:
+            doc = session.query(Document).filter_by(id=did).one()
+            assert doc.indexing_status == IndexingStatus.COMPLETED.value
+            assert doc.indexed_at is not None
+            assert doc.indexing_error is None
+            assert doc.claimed_at is None
+            assert doc.claimed_by is None
+            assert doc.indexing_attempts <= 2
+
+            chunks = session.query(DocumentChunkRecord).filter_by(document_id=did).all()
+            assert len(chunks) == 2
+
+    assert vector_store.count() == 10

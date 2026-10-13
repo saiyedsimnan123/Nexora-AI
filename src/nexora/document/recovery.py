@@ -1,26 +1,38 @@
-"""Durable vector indexing recovery service (Milestone 12C-22).
+"""Durable vector indexing recovery service (Milestone 12C-22 & Follow-up).
 
 Provides bounded, idempotent, out-of-band recovery for documents whose relational
 metadata was persisted but whose vector-store indexing is pending, failed, or inconsistent
 (e.g., following process crashes, network partitions, or vector cluster outages).
 
-Design & Architectural Trade-offs:
-- Durable indexing status on `documents` table:
-  Every document record durably stores `indexing_status` ('pending', 'completed', 'failed'),
-  `indexing_error` (last failure message), `indexed_at` (successful timestamp), and
-  `indexing_attempts` (retry attempt counter).
-- Trade-off vs Transactional Outbox:
-  A separate transactional outbox table adds duplicate state tracking and separate table
-  joins for 1-to-1 document-indexing lifecycles. Maintaining status directly on `Document`
-  keeps relational integrity atomic, simplifies queries, avoids orphan jobs, and does not
-  require Redis or external message brokers.
-- Concurrency & Idempotency:
-  - Vector record IDs are deterministically derived from relational chunk UUIDs (`str(chunk.id)`).
-    Re-indexing a document performs an idempotent upsert that overwrites existing vectors in-place
-    without creating duplicate vectors.
-  - Per-paper locking (`get_paper_ingestion_lock`) serializes recovery with concurrent live
-    ingestion requests for the same paper, preventing race conditions.
-  - Recovery does not perform bulk deletions of other documents' vectors.
+Cross-Worker & Multi-Process Coordination Design:
+1. PostgreSQL-Backed Atomic Claims:
+   Independent recovery workers running across multiple processes coordinate via
+   database row locks with `SKIP LOCKED` (`claim_unindexed_documents`).
+   In a short atomic claim transaction (< 5ms):
+   - Candidate unindexed or expired processing documents are locked using
+     `SELECT ... FOR UPDATE SKIP LOCKED`.
+   - Their status is atomically transitioned to `processing`, `claimed_at` is set,
+     `claimed_by` is tagged with a unique worker token, and `indexing_attempts` is incremented.
+   - The transaction commits immediately.
+   Concurrent workers in separate processes will skip locked rows and claim distinct
+   batches without contention or deadlocks.
+2. Zero Transactions Held During Embedding / Vector Work:
+   All embedding generation and vector store upserts take place OUTSIDE any database
+   transaction. Database connections and locks are released before calling the embedding
+   service or vector store, preventing connection pool starvation or lock retention.
+3. Safe Expiry & Crash Recovery Semantics:
+   If a worker process terminates abruptly mid-flight, documents remain in `processing`
+   state with their `claimed_at` timestamp.
+   When `claim_timeout_seconds` elapses, the claim is considered expired/stale.
+   Subsequent recovery passes automatically re-claim stale documents.
+   Retries are bounded by `indexing_attempts < max_attempts`, preventing infinite crash loops.
+   Fencing tokens (`claimed_by`) guard finalization so zombie workers cannot overwrite
+   state if another worker completed the job.
+4. Concurrency & Idempotency:
+   - Derived vector record IDs are deterministic (`str(chunk.id)`), ensuring all upserts
+     are idempotent and overwrite existing vectors in-place without duplicates.
+   - In-process paper locking (`get_paper_ingestion_lock`) remains active as a fast local
+     optimization to serialize recovery with live ingestion in the same process.
 """
 from __future__ import annotations
 
@@ -28,7 +40,7 @@ from dataclasses import dataclass, field
 import datetime
 import logging
 from typing import Any, Sequence
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from nexora.database.models.document import IndexingStatus
 from nexora.database.repository.base import RecordNotFoundError
@@ -72,6 +84,8 @@ class DocumentRecoveryService:
         session_factory: Any,
         vector_store: VectorStore,
         embedding_service: Any,
+        *,
+        default_claim_timeout_seconds: float = 300.0,
     ) -> None:
         if session_factory is None or not callable(session_factory):
             raise TypeError("session_factory must be a callable session factory")
@@ -88,6 +102,7 @@ class DocumentRecoveryService:
         self._session_factory = session_factory
         self._vector_store = vector_store
         self._embedding_service = embedding_service
+        self._default_claim_timeout = default_claim_timeout_seconds
 
     def _resolve_vectors(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -96,30 +111,57 @@ class DocumentRecoveryService:
             return self._embedding_service.embed_texts(texts)
         return [self._embedding_service.embed_text(t) for t in texts]
 
-    def _recover_single_document(
-        self, persistence: DocumentPersistenceService, doc: Any
+    def _execute_document_indexing(
+        self,
+        doc_id: UUID,
+        paper_id: UUID,
+        claim_token: str,
+        attempts: int,
     ) -> RecoveryItemResult:
-        """Process vector reindexing and state transition for a single document."""
-        chunk_records = list(persistence.list_chunks_for_document(doc.id))
-        chunks_count = len(chunk_records)
+        """Process vector reindexing and state transition for a claimed document.
 
+        Must be called under `get_paper_ingestion_lock(paper_id)` to serialize threads in
+        the same process.
+        """
+        # 1. Read chunks from DB in a short read transaction
+        with database_transaction(self._session_factory) as session:
+            persistence = DocumentPersistenceService(session)
+            doc = persistence.get_document(doc_id)
+            if doc is None:
+                return RecoveryItemResult(
+                    document_id=doc_id,
+                    paper_id=paper_id,
+                    status=IndexingStatus.FAILED,
+                    chunks_count=0,
+                    indexed_chunks_count=0,
+                    error="Document not found during processing",
+                    attempts=attempts,
+                )
+            chunk_records = list(persistence.list_chunks_for_document(doc_id))
+            filename = doc.filename
+            storage_key = doc.storage_key
+
+        chunks_count = len(chunk_records)
         if chunks_count == 0:
-            # Document has no chunks, mark as completed directly
-            persistence.update_document_indexing_status(
-                doc.id,
-                IndexingStatus.COMPLETED,
-                error=None,
-                indexed_at=datetime.datetime.now(datetime.timezone.utc),
-            )
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                persistence.finalize_document_indexing(
+                    doc_id,
+                    IndexingStatus.COMPLETED,
+                    claim_token=claim_token,
+                    error=None,
+                    indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                )
             return RecoveryItemResult(
-                document_id=doc.id,
-                paper_id=doc.paper_id,
+                document_id=doc_id,
+                paper_id=paper_id,
                 status=IndexingStatus.COMPLETED,
                 chunks_count=0,
                 indexed_chunks_count=0,
-                attempts=doc.indexing_attempts,
+                attempts=attempts,
             )
 
+        # 2. Embedding generation and vector store upsert (OUTSIDE ANY DB TRANSACTION)
         try:
             texts = [c.text for c in chunk_records]
             vectors = self._resolve_vectors(texts)
@@ -128,62 +170,78 @@ class DocumentRecoveryService:
             for chunk_rec, vector in zip(chunk_records, vectors):
                 rec_id = str(chunk_rec.id)
                 payload: dict[str, object] = {
-                    "document_id": str(doc.id),
+                    "document_id": str(doc_id),
                     "chunk_id": rec_id,
-                    "paper_id": str(doc.paper_id),
+                    "paper_id": str(paper_id),
                     "chunk_index": chunk_rec.chunk_index,
                     "text": chunk_rec.text,
-                    "filename": doc.filename,
-                    "source": doc.storage_key,
+                    "filename": filename,
+                    "source": storage_key,
                 }
                 records_to_upsert.append(
                     VectorRecord(id=rec_id, vector=vector, payload=payload)
                 )
 
-            # Idempotent upsert in vector store
             self._vector_store.upsert(records_to_upsert)
 
-            # Update durable status to COMPLETED
-            updated_doc = persistence.update_document_indexing_status(
-                doc.id,
-                IndexingStatus.COMPLETED,
-                error=None,
-                indexed_at=datetime.datetime.now(datetime.timezone.utc),
-            )
+            # 3. Finalize in short write transaction
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                persistence.finalize_document_indexing(
+                    doc_id,
+                    IndexingStatus.COMPLETED,
+                    claim_token=claim_token,
+                    error=None,
+                    indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+
             return RecoveryItemResult(
-                document_id=doc.id,
-                paper_id=doc.paper_id,
+                document_id=doc_id,
+                paper_id=paper_id,
                 status=IndexingStatus.COMPLETED,
                 chunks_count=chunks_count,
                 indexed_chunks_count=len(records_to_upsert),
-                attempts=updated_doc.indexing_attempts,
+                attempts=attempts,
             )
         except Exception as exc:
-            logger.warning(
-                "Recovery attempt failed for document %s: %s", doc.id, exc
-            )
-            # Record durable FAILED state with error message and increment attempt counter
-            updated_doc = persistence.update_document_indexing_status(
-                doc.id,
-                IndexingStatus.FAILED,
-                error=str(exc),
-                attempts_increment=1,
-            )
+            logger.warning("Recovery processing failed for document %s: %s", doc_id, exc)
+            with database_transaction(self._session_factory) as session:
+                persistence = DocumentPersistenceService(session)
+                persistence.finalize_document_indexing(
+                    doc_id,
+                    IndexingStatus.FAILED,
+                    claim_token=claim_token,
+                    error=str(exc),
+                )
+
             return RecoveryItemResult(
-                document_id=doc.id,
-                paper_id=doc.paper_id,
+                document_id=doc_id,
+                paper_id=paper_id,
                 status=IndexingStatus.FAILED,
                 chunks_count=chunks_count,
                 indexed_chunks_count=0,
                 error=str(exc),
-                attempts=updated_doc.indexing_attempts,
+                attempts=attempts,
             )
 
-    def recover_document(self, document_id: UUID) -> RecoveryItemResult:
+    def recover_document(
+        self,
+        document_id: UUID,
+        *,
+        claim_timeout_seconds: float | None = None,
+    ) -> RecoveryItemResult:
         """Recover vector indexing for a specific document by its ID."""
         if not isinstance(document_id, UUID):
             raise TypeError(f"document_id must be a UUID, got {type(document_id).__name__}")
 
+        timeout = (
+            claim_timeout_seconds
+            if claim_timeout_seconds is not None
+            else self._default_claim_timeout
+        )
+        claim_token = str(uuid4())
+
+        # In a short read, find the paper_id for this document
         with database_transaction(self._session_factory) as session:
             persistence = DocumentPersistenceService(session)
             doc = persistence.get_document(document_id)
@@ -191,61 +249,91 @@ class DocumentRecoveryService:
                 raise RecordNotFoundError(f"Document with id {document_id} not found")
             paper_id = doc.paper_id
 
-        # Acquire in-memory paper lock before starting write transaction to prevent lock inversion
+        # Under in-process paper lock, claim and process the document
         with get_paper_ingestion_lock(paper_id):
             with database_transaction(self._session_factory) as session:
                 persistence = DocumentPersistenceService(session)
                 doc = persistence.get_document(document_id)
                 if doc is None:
                     raise RecordNotFoundError(f"Document with id {document_id} not found")
-                return self._recover_single_document(persistence, doc)
+                if doc.indexing_status == IndexingStatus.COMPLETED.value:
+                    chunk_records = list(persistence.list_chunks_for_document(doc.id))
+                    return RecoveryItemResult(
+                        document_id=doc.id,
+                        paper_id=doc.paper_id,
+                        status=IndexingStatus.COMPLETED,
+                        chunks_count=len(chunk_records),
+                        indexed_chunks_count=len(chunk_records),
+                        attempts=doc.indexing_attempts,
+                    )
+
+                claimed = persistence.claim_document_for_recovery(
+                    document_id,
+                    claim_timeout_seconds=timeout,
+                    claim_token=claim_token,
+                )
+                if claimed is None:
+                    # Document is actively claimed by another unexpired worker
+                    return RecoveryItemResult(
+                        document_id=doc.id,
+                        paper_id=doc.paper_id,
+                        status=IndexingStatus(doc.indexing_status),
+                        chunks_count=0,
+                        indexed_chunks_count=0,
+                        error="Document is actively claimed by another worker",
+                        attempts=doc.indexing_attempts,
+                    )
+                attempts = claimed.indexing_attempts
+
+            return self._execute_document_indexing(document_id, paper_id, claim_token, attempts)
 
     def recover_batch(
         self,
         batch_size: int = 10,
         *,
         max_attempts: int | None = None,
+        claim_timeout_seconds: float | None = None,
         include_failed: bool = True,
     ) -> RecoveryBatchResult:
-        """Find and recover unindexed documents in bounded, deterministic batches."""
+        """Find and recover unindexed documents in bounded, deterministic batches.
+
+        Uses PostgreSQL FOR UPDATE SKIP LOCKED to coordinate independent worker processes.
+        """
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
 
-        statuses = [IndexingStatus.PENDING.value]
-        if include_failed:
-            statuses.append(IndexingStatus.FAILED.value)
+        timeout = (
+            claim_timeout_seconds
+            if claim_timeout_seconds is not None
+            else self._default_claim_timeout
+        )
+        claim_token = str(uuid4())
 
-        # 1. Discover target document IDs and paper IDs in a bounded read
+        # 1. Short atomic claim transaction with row locking (SKIP LOCKED)
         with database_transaction(self._session_factory) as session:
             persistence = DocumentPersistenceService(session)
-            unindexed_docs = persistence.list_unindexed_documents(
-                status=statuses,
+            claimed_docs = persistence.claim_unindexed_documents(
                 limit=batch_size,
                 max_attempts=max_attempts,
+                claim_timeout_seconds=timeout,
+                claim_token=claim_token,
             )
-            targets = [(d.id, d.paper_id) for d in unindexed_docs]
+            targets = [(d.id, d.paper_id, d.indexing_attempts) for d in claimed_docs]
 
         scanned_count = len(targets)
         recovered_count = 0
         failed_count = 0
         results: list[RecoveryItemResult] = []
 
-        # 2. Process each document in its own transaction for failure isolation
-        for doc_id, paper_id in targets:
-            # Acquire paper lock FIRST before opening write transaction
+        # 2. Process each claimed document outside the claim transaction under paper lock
+        for doc_id, paper_id, attempts in targets:
             with get_paper_ingestion_lock(paper_id):
-                with database_transaction(self._session_factory) as session:
-                    persistence = DocumentPersistenceService(session)
-                    doc = persistence.get_document(doc_id)
-                    if doc is None or doc.indexing_status == IndexingStatus.COMPLETED.value:
-                        continue
-
-                    item_res = self._recover_single_document(persistence, doc)
-                    results.append(item_res)
-                    if item_res.status == IndexingStatus.COMPLETED:
-                        recovered_count += 1
-                    else:
-                        failed_count += 1
+                item_res = self._execute_document_indexing(doc_id, paper_id, claim_token, attempts)
+            results.append(item_res)
+            if item_res.status == IndexingStatus.COMPLETED:
+                recovered_count += 1
+            else:
+                failed_count += 1
 
         return RecoveryBatchResult(
             scanned_count=scanned_count,

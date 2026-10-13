@@ -298,6 +298,54 @@ class DocumentPersistenceService:
             skip_locked=skip_locked,
         )
 
+    def claim_unindexed_documents(
+        self,
+        limit: int = 100,
+        *,
+        max_attempts: int | None = None,
+        claim_timeout_seconds: float = 300.0,
+        claim_token: str | None = None,
+    ) -> Sequence[Document]:
+        """Atomically claim a bounded batch of unindexed documents with row-level locking."""
+        return self._doc_repo.claim_unindexed(
+            limit=limit,
+            max_attempts=max_attempts,
+            claim_timeout_seconds=claim_timeout_seconds,
+            claim_token=claim_token,
+        )
+
+    def claim_document_for_recovery(
+        self,
+        document_id: UUID,
+        *,
+        claim_timeout_seconds: float = 300.0,
+        claim_token: str | None = None,
+    ) -> Document | None:
+        """Atomically claim a specific document for recovery."""
+        return self._doc_repo.claim_document(
+            document_id,
+            claim_timeout_seconds=claim_timeout_seconds,
+            claim_token=claim_token,
+        )
+
+    def finalize_document_indexing(
+        self,
+        document_id: UUID,
+        status: Any,
+        *,
+        claim_token: str | None = None,
+        error: str | None = None,
+        indexed_at: Any = None,
+    ) -> Document | None:
+        """Finalize indexing outcome for a claimed document."""
+        return self._doc_repo.finalize_indexing(
+            document_id,
+            status,
+            claim_token=claim_token,
+            error=error,
+            indexed_at=indexed_at,
+        )
+
     def count_indexing_status(self) -> dict[str, int]:
         """Return counts of documents grouped by indexing status."""
         return self._doc_repo.count_by_indexing_status()
