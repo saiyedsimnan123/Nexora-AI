@@ -12,10 +12,12 @@ from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
 from nexora.database.repository.paper import PaperRepository
 from nexora.database.repository.author import AuthorRepository
+from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.database.models.user import User
 from nexora.database.models.collection import Collection
 from nexora.database.models.paper import Paper
 from nexora.database.models.author import Author
+from nexora.database.models.paper_author import PaperAuthor
 
 @pytest.fixture
 def engine():
@@ -552,4 +554,210 @@ def test_author_repository_transaction_recovery(session):
 
     assert repo.get_by_id(a1.id) is not None
     assert repo.get_by_id(a2.id) is not None
+
+
+def _make_paper_and_authors(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    author_repo = AuthorRepository(session)
+    paper = paper_repo.create(collection_id=col.id, title="Test Paper for Authors")
+    a1 = author_repo.create(name="Author One")
+    a2 = author_repo.create(name="Author Two")
+    return paper, a1, a2
+
+
+def test_paper_author_repository_create_and_read(session):
+    paper, a1, _ = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    # Create
+    pa = repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+    assert pa.id is not None
+    assert pa.paper_id == paper.id
+    assert pa.author_id == a1.id
+    assert pa.author_order == 1
+    assert pa.created_at is not None
+    assert pa.updated_at is not None
+
+    # Read by ID
+    found = repo.get_by_id(pa.id)
+    assert found is not None
+    assert found.id == pa.id
+    assert found.author_order == 1
+
+    # Missing ID
+    missing_id = uuid4()
+    assert repo.get_by_id(missing_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.get_by_id_or_raise(missing_id)
+
+    assert repo.get_by_id_or_raise(pa.id).id == pa.id
+
+
+def test_paper_author_repository_get_by_paper_and_author(session):
+    paper, a1, a2 = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    pa = repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+
+    found = repo.get_by_paper_and_author(paper.id, a1.id)
+    assert found is not None
+    assert found.id == pa.id
+
+    assert repo.get_by_paper_and_author(paper.id, a2.id) is None
+    assert repo.get_by_paper_and_author(uuid4(), a1.id) is None
+
+
+def test_paper_author_repository_list_by_paper_id(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    author_repo = AuthorRepository(session)
+    paper = paper_repo.create(collection_id=col.id, title="Multi-author Paper")
+    a1 = author_repo.create(name="First")
+    a2 = author_repo.create(name="Second")
+    a3 = author_repo.create(name="Third")
+
+    repo = PaperAuthorRepository(session)
+    # Insert in scrambled order
+    repo.create(paper_id=paper.id, author_id=a3.id, author_order=3)
+    repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+    repo.create(paper_id=paper.id, author_id=a2.id, author_order=2)
+
+    # Must be ordered by author_order
+    authorships = repo.list_by_paper_id(paper.id)
+    assert len(authorships) == 3
+    assert [pa.author_order for pa in authorships] == [1, 2, 3]
+    assert [pa.author_id for pa in authorships] == [a1.id, a2.id, a3.id]
+
+    assert repo.list_by_paper_id(uuid4()) == []
+
+
+def test_paper_author_repository_list_by_author_id(session):
+    col = _make_collection(session)
+    paper_repo = PaperRepository(session)
+    author_repo = AuthorRepository(session)
+    p1 = paper_repo.create(collection_id=col.id, title="Paper 1")
+    p2 = paper_repo.create(collection_id=col.id, title="Paper 2")
+    author = author_repo.create(name="Prolific Author")
+
+    repo = PaperAuthorRepository(session)
+    repo.create(paper_id=p1.id, author_id=author.id, author_order=1)
+    repo.create(paper_id=p2.id, author_id=author.id, author_order=2)
+
+    results = repo.list_by_author_id(author.id)
+    assert len(results) == 2
+
+    page_1 = repo.list_by_author_id(author.id, offset=0, limit=1)
+    assert len(page_1) == 1
+
+    page_2 = repo.list_by_author_id(author.id, offset=1, limit=1)
+    assert len(page_2) == 1
+
+    assert repo.list_by_author_id(uuid4()) == []
+
+
+def test_paper_author_repository_pagination_validation(session):
+    author_repo = AuthorRepository(session)
+    author = author_repo.create(name="Author")
+    repo = PaperAuthorRepository(session)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_author_id(author.id, offset=-1)
+
+    with pytest.raises(ValueError, match="offset must be a non-negative integer"):
+        repo.list_by_author_id(author.id, offset=True)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_author_id(author.id, limit=0)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repo.list_by_author_id(author.id, limit=False)
+
+
+def test_paper_author_repository_update(session):
+    paper, a1, _ = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    pa = repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+
+    # Update order
+    updated = repo.update(pa.id, author_order=2)
+    assert updated.author_order == 2
+    assert repo.get_by_id(pa.id).author_order == 2
+
+    # Update with unset order keeps current
+    updated_same = repo.update(pa.id)
+    assert updated_same.author_order == 2
+
+    # Update non-existent
+    with pytest.raises(RecordNotFoundError):
+        repo.update(uuid4(), author_order=1)
+
+    # Update with invalid order
+    with pytest.raises(ValueError, match="author_order must be >= 1"):
+        repo.update(pa.id, author_order=0)
+
+
+def test_paper_author_repository_delete(session):
+    paper, a1, _ = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    pa = repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+    pa_id = pa.id
+
+    repo.delete(pa_id)
+    assert repo.get_by_id(pa_id) is None
+
+    with pytest.raises(RecordNotFoundError):
+        repo.delete(uuid4())
+
+
+def test_paper_author_repository_uniqueness_and_constraints(session):
+    paper, a1, a2 = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    # Valid creation
+    repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+
+    # Duplicate (paper_id, author_id) violates uniqueness -> DuplicateRecordError
+    with pytest.raises(DuplicateRecordError):
+        repo.create(paper_id=paper.id, author_id=a1.id, author_order=2)
+
+    # Foreign key violations
+    with pytest.raises(ConstraintError):
+        repo.create(paper_id=uuid4(), author_id=a2.id, author_order=1)
+
+    with pytest.raises(ConstraintError):
+        repo.create(paper_id=paper.id, author_id=uuid4(), author_order=1)
+
+    # Validation errors
+    with pytest.raises(ValueError, match="author_order must be >= 1"):
+        repo.create(paper_id=paper.id, author_id=a2.id, author_order=0)
+
+    with pytest.raises(ValueError, match="author_order must be >= 1"):
+        repo.create(paper_id=paper.id, author_id=a2.id, author_order=-1)
+
+    with pytest.raises(TypeError, match="author_order must be an integer, got bool"):
+        repo.create(paper_id=paper.id, author_id=a2.id, author_order=True)
+
+
+def test_paper_author_repository_transaction_recovery(session):
+    paper, a1, a2 = _make_paper_and_authors(session)
+    repo = PaperAuthorRepository(session)
+
+    # First valid
+    pa1 = repo.create(paper_id=paper.id, author_id=a1.id, author_order=1)
+
+    # Duplicate error
+    with pytest.raises(DuplicateRecordError):
+        repo.create(paper_id=paper.id, author_id=a1.id, author_order=2)
+
+    # Outer session remains valid
+    pa2 = repo.create(paper_id=paper.id, author_id=a2.id, author_order=2)
+    session.commit()
+
+    assert repo.get_by_id(pa1.id) is not None
+    assert repo.get_by_id(pa2.id) is not None
+
 

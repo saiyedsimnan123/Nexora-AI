@@ -9,6 +9,7 @@ from nexora.database.repository.base import (
     RepositoryError,
 )
 from nexora.database.repository.paper import PaperRepository
+from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
 
@@ -17,6 +18,7 @@ __all__ = [
     "BaseRepository",
     "ConstraintError",
     "DuplicateRecordError",
+    "PaperAuthorRepository",
     "PaperRepository",
     "RecordNotFoundError",
     "RepositoryError",
