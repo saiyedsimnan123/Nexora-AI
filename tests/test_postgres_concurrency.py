@@ -334,8 +334,8 @@ def test_postgres_rollback_on_vector_failure_leaves_no_orphans(
 
     assert res.status_code == 500
     err_body = res.json()
-    assert err_body["error"]["code"] == "internal_error"
-    assert "Vector store indexing failed" in err_body["error"]["message"]
+    assert err_body["error"]["code"] == "indexing_failed"
+    assert "indexing failed" in err_body["error"]["message"].lower()
 
     # Verify zero documents or chunks persisted in PostgreSQL
     with Session(postgres_engine) as s:

@@ -51,4 +51,4 @@ jobs:
           PYTHONPATH: src
           TEST_POSTGRES_URL: postgresql+psycopg://test_user:test_password@localhost:5432/nexora_test
           NEXORA_DATABASE_URL: postgresql+psycopg://test_user:test_password@localhost:5432/nexora_test
-        run: pytest -q
+        run: pytest -q --tb=short
