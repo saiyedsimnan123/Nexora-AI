@@ -10,14 +10,14 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nexora.api.errors import (
     FileTooLargeError,
     InvalidConfigurationError,
     InvalidRequestError,
 )
-from nexora.api.models import ResearchRequest
+from nexora.api.models import DocumentIngestResponse, ResearchRequest
 from nexora.api.service import ResearchApplicationService
 
 
@@ -45,10 +45,30 @@ class ResearchResponseBody(BaseModel):
 class DocumentIngestResponseBody(BaseModel):
     """Wire format of document ingestion result."""
 
-    document_id: str
-    paper_id: str
-    chunks_count: int
-    indexed_chunks_count: int
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    document_id: str = Field(
+        ...,
+        description="UUID of the persisted document record.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+    )
+    paper_id: str = Field(
+        ...,
+        description="UUID of the owning research paper.",
+        examples=["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"],
+    )
+    chunks_count: int = Field(
+        ...,
+        ge=0,
+        description="Total number of chunks stored in the relational database.",
+        examples=[12],
+    )
+    indexed_chunks_count: int = Field(
+        ...,
+        ge=0,
+        description="Total number of chunks indexed in the vector index.",
+        examples=[12],
+    )
 
 
 def get_research_service(request: Request) -> ResearchApplicationService:
@@ -88,7 +108,30 @@ def research(
     return ResearchResponseBody(**service.ask(request).to_dict())
 
 
-@v1_router.post("/documents/ingest", response_model=DocumentIngestResponseBody)
+@v1_router.post(
+    "/documents/ingest",
+    response_model=DocumentIngestResponseBody,
+    status_code=200,
+    summary="Upload and ingest a research paper PDF",
+    description=(
+        "Uploads a PDF file for a given research paper, extracts and chunks text, "
+        "persists document and chunk records to the database, and indexes "
+        "semantic vectors in the vector index. Enforces transactional rollback "
+        "and duplicate detection."
+    ),
+    responses={
+        200: {
+            "description": "Document successfully parsed, persisted, and indexed.",
+            "model": DocumentIngestResponseBody,
+        },
+        400: {"description": "Malformed request, missing fields, or invalid/unreadable PDF."},
+        404: {"description": "Referenced paper was not found."},
+        409: {"description": "Document with identical checksum already exists for this paper."},
+        413: {"description": "Uploaded file exceeds maximum allowed size."},
+        422: {"description": "Request validation failed."},
+        500: {"description": "Indexing failure or unexpected server error."},
+    },
+)
 async def ingest_document(
     request: Request,
     paper_id: str = Form(...),
@@ -199,12 +242,8 @@ async def ingest_document(
         except ValueError as exc:
             raise InvalidRequestError("The uploaded file is not a valid or readable PDF.") from exc
 
-        return DocumentIngestResponseBody(
-            document_id=str(result.document_id),
-            paper_id=str(result.paper_id),
-            chunks_count=result.chunks_count,
-            indexed_chunks_count=result.indexed_chunks_count,
-        )
+        response_data = DocumentIngestResponse.from_result(result)
+        return DocumentIngestResponseBody(**response_data.to_dict())
     finally:
         if tmp_path.exists():
             try:

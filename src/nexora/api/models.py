@@ -86,6 +86,25 @@ class DocumentIngestResponse:
     chunks_count: int
     indexed_chunks_count: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.document_id, str) or not self.document_id.strip():
+            raise InvalidRequestError("document_id must be a non-empty string")
+        if not isinstance(self.paper_id, str) or not self.paper_id.strip():
+            raise InvalidRequestError("paper_id must be a non-empty string")
+        if isinstance(self.chunks_count, bool) or not isinstance(self.chunks_count, int) or self.chunks_count < 0:
+            raise InvalidRequestError("chunks_count must be a non-negative integer")
+        if isinstance(self.indexed_chunks_count, bool) or not isinstance(self.indexed_chunks_count, int) or self.indexed_chunks_count < 0:
+            raise InvalidRequestError("indexed_chunks_count must be a non-negative integer")
+
+    @classmethod
+    def from_result(cls, result: Any) -> DocumentIngestResponse:
+        return cls(
+            document_id=str(result.document_id),
+            paper_id=str(result.paper_id),
+            chunks_count=int(result.chunks_count),
+            indexed_chunks_count=int(result.indexed_chunks_count),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready representation."""
         return {
