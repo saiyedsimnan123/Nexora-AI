@@ -323,8 +323,9 @@ class ClaimToEvidenceVerifier:
                 unresolved_labels.append(label)
             else:
                 # Check paper-level scoping if expected_paper_id is provided
-                if self._expected_paper_id is not None and item.paper_id is not None:
-                    if str(item.paper_id) != self._expected_paper_id:
+                if self._expected_paper_id is not None:
+                    item_pid = str(item.paper_id).strip() if item.paper_id is not None else ""
+                    if not item_pid or item_pid != str(self._expected_paper_id):
                         mismatched_paper_labels.append(label)
                         unresolved_labels.append(label)
                         continue

@@ -166,12 +166,16 @@ class ResearchGapService:
             return title, items
 
         # 3. Fallback: delegate to analysis service internal loaders if accessible
-        if hasattr(self._paper_analysis_service, "_session_factory") and self._paper_analysis_service._session_factory is not None:
-            title, ctx = self._paper_analysis_service._load_evidence_from_database(paper_uuid)
-            return title, list(ctx.items)
-        if hasattr(self._paper_analysis_service, "_vector_store") and self._paper_analysis_service._vector_store is not None:
-            title, ctx = self._paper_analysis_service._load_evidence_from_store(paper_id_str)
-            return title, list(ctx.items)
+        if hasattr(self._paper_analysis_service, "_load_evidence_from_database"):
+            sf = getattr(self._paper_analysis_service, "_session_factory", True)
+            if sf is not None:
+                title, ctx = self._paper_analysis_service._load_evidence_from_database(paper_uuid)
+                return title, list(ctx.items)
+        if hasattr(self._paper_analysis_service, "_load_evidence_from_store"):
+            vs = getattr(self._paper_analysis_service, "_vector_store", True)
+            if vs is not None:
+                title, ctx = self._paper_analysis_service._load_evidence_from_store(paper_id_str)
+                return title, list(ctx.items)
 
         return None, []
 
@@ -285,8 +289,9 @@ class ResearchGapService:
                 for lbl in field.evidence_labels:
                     resolved_item = paper_ctx.get_by_label(lbl)
                     if resolved_item is not None:
-                        # Paper scoping: source chunk must belong to this paper
-                        if resolved_item.paper_id is not None and str(resolved_item.paper_id) != pid:
+                        # Paper scoping: fail-closed if source paper identity is missing or mismatched
+                        item_pid = str(resolved_item.paper_id).strip() if resolved_item.paper_id is not None else ""
+                        if not item_pid or item_pid != pid:
                             continue
                         canon_lbl = f"[E{resolved_item.position + 1}]"
                         if canon_lbl not in valid_labels:
@@ -295,7 +300,7 @@ class ResearchGapService:
                             "label": canon_lbl,
                             "document_id": resolved_item.document_id,
                             "chunk_id": resolved_item.chunk_id,
-                            "paper_id": pid,
+                            "paper_id": item_pid,
                             "filename": resolved_item.metadata.get("filename"),
                             "score": resolved_item.score,
                             "text": resolved_item.text,
@@ -440,8 +445,9 @@ class ResearchGapService:
                     continue
                 item = combined_context.get_by_label(lbl)
                 if item is not None:
-                    # Provenance check: item must belong to one of the compared papers
-                    if item.paper_id is not None and str(item.paper_id) not in cleaned_ids:
+                    # Provenance check: fail closed if paper identity is missing or not in compared papers
+                    item_pid = str(item.paper_id).strip() if item.paper_id is not None else ""
+                    if not item_pid or item_pid not in cleaned_ids:
                         continue
                     if lbl not in valid_labels:
                         valid_labels.append(lbl)
@@ -449,7 +455,7 @@ class ResearchGapService:
                         "label": lbl,
                         "document_id": item.document_id,
                         "chunk_id": item.chunk_id,
-                        "paper_id": item.paper_id,
+                        "paper_id": item_pid,
                         "filename": item.metadata.get("filename"),
                         "score": item.score,
                         "text": item.text,
@@ -474,13 +480,14 @@ class ResearchGapService:
                     continue
                 item = combined_context.get_by_label(lbl)
                 if item is not None:
-                    if item.paper_id is not None and str(item.paper_id) not in cleaned_ids:
+                    item_pid = str(item.paper_id).strip() if item.paper_id is not None else ""
+                    if not item_pid or item_pid not in cleaned_ids:
                         continue
                     contradicting_sources.append({
                         "label": lbl,
                         "document_id": item.document_id,
                         "chunk_id": item.chunk_id,
-                        "paper_id": item.paper_id,
+                        "paper_id": item_pid,
                         "filename": item.metadata.get("filename"),
                         "score": item.score,
                         "text": item.text,
@@ -552,17 +559,19 @@ class ResearchGapService:
                             for lbl in contra_labels:
                                 if isinstance(lbl, str):
                                     item = combined_context.get_by_label(lbl)
-                                    if item is not None and (item.paper_id is None or str(item.paper_id) in cleaned_ids):
-                                        matching_contra_sources.append({
-                                            "label": lbl,
-                                            "document_id": item.document_id,
-                                            "chunk_id": item.chunk_id,
-                                            "paper_id": item.paper_id,
-                                            "filename": item.metadata.get("filename"),
-                                            "score": item.score,
-                                            "text": item.text,
-                                            "position": item.position,
-                                        })
+                                    if item is not None:
+                                        item_pid = str(item.paper_id).strip() if item.paper_id is not None else ""
+                                        if item_pid and item_pid in cleaned_ids:
+                                            matching_contra_sources.append({
+                                                "label": lbl,
+                                                "document_id": item.document_id,
+                                                "chunk_id": item.chunk_id,
+                                                "paper_id": item_pid,
+                                                "filename": item.metadata.get("filename"),
+                                                "score": item.score,
+                                                "text": item.text,
+                                                "position": item.position,
+                                            })
                         if qual.get("notes"):
                             matching_notes.append(str(qual["notes"]))
 

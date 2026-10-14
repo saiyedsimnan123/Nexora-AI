@@ -1393,3 +1393,307 @@ def test_inferred_candidate_gap_cross_paper_filtering_and_verification(in_memory
     # Contradicting source from verifier must be recorded
     assert inf_gap.has_contradictions is True
 
+
+# ===========================================================================
+# Milestone 12C-28: Fail-Closed Source Identity Validation Tests
+# ===========================================================================
+
+
+def test_fail_closed_citation_filtering_missing_paper_id():
+    """Scenario 1: Source chunk with missing paper_id fails closed during citation filtering."""
+    from nexora.research.analysis_service import _parse_field_dict
+
+    item_missing_pid = EvidenceItem(
+        document_id="doc-1",
+        chunk_id="chk-1",
+        text="A key limitation is memory usage.",
+        score=1.0,
+        metadata={},  # No paper_id
+        position=0,
+    )
+    ctx = EvidenceContext(query="test", items=[item_missing_pid])
+
+    raw_dict = {
+        "summary": "Limitation in attention memory.",
+        "status": "reported",
+        "evidence_labels": ["[E1]"],
+    }
+    field = _parse_field_dict(raw_dict, ctx, filter_citations=True, expected_paper_id="paper-123")
+    assert field.evidence_labels == []
+    assert len(field.sources) == 0
+    assert field.status == "uncertain"
+
+
+def test_fail_closed_citation_filtering_whitespace_paper_id():
+    """Scenario 2: Source chunk with whitespace-only paper_id fails closed."""
+    from nexora.research.analysis_service import _parse_field_dict
+
+    item_blank_pid = EvidenceItem(
+        document_id="doc-1",
+        chunk_id="chk-1",
+        text="A key limitation is memory usage.",
+        score=1.0,
+        metadata={"paper_id": "   "},
+        position=0,
+    )
+    ctx = EvidenceContext(query="test", items=[item_blank_pid])
+
+    raw_dict = {
+        "summary": "Limitation in attention memory.",
+        "status": "reported",
+        "evidence_labels": ["[E1]"],
+    }
+    field = _parse_field_dict(raw_dict, ctx, filter_citations=True, expected_paper_id="paper-123")
+    assert field.evidence_labels == []
+    assert len(field.sources) == 0
+    assert field.status == "uncertain"
+
+
+def test_fail_closed_citation_filtering_matching_paper_id():
+    """Scenario 3: Source chunk with matching paper_id passes and preserves source identity."""
+    from nexora.research.analysis_service import _parse_field_dict
+
+    item_valid = EvidenceItem(
+        document_id="doc-1",
+        chunk_id="chk-1",
+        text="A key limitation is memory usage.",
+        score=1.0,
+        metadata={"paper_id": "paper-123", "filename": "transformer.pdf"},
+        position=0,
+    )
+    ctx = EvidenceContext(query="test", items=[item_valid])
+
+    raw_dict = {
+        "summary": "Limitation in attention memory.",
+        "status": "reported",
+        "evidence_labels": ["[E1]"],
+    }
+    field = _parse_field_dict(raw_dict, ctx, filter_citations=True, expected_paper_id="paper-123")
+    assert field.evidence_labels == ["[E1]"]
+    assert len(field.sources) == 1
+    assert field.sources[0]["paper_id"] == "paper-123"
+    assert field.status == "reported"
+
+
+def test_fail_closed_documented_gap_missing_source_paper_id():
+    """Scenario 4: When evidence source has missing paper_id, ResearchGapService excludes
+    the claim from documented_gaps and does not manufacture paper_id.
+    """
+    pid1 = str(uuid.uuid4())
+    pid2 = str(uuid.uuid4())
+
+    class MockAnalysisService:
+        def analyze_paper(self, paper_id: str, **kwargs):
+            return StructuredPaperAnalysis(
+                paper_id=paper_id,
+                title="Paper Title",
+                problem_and_objectives=AnalysisField.not_reported(),
+                methodology_and_algorithms=AnalysisField.not_reported(),
+                models_and_datasets=AnalysisField.not_reported(),
+                experiments_and_metrics=AnalysisField.not_reported(),
+                results_and_findings=AnalysisField.not_reported(),
+                limitations=AnalysisField(
+                    summary="Memory scaling limitation.",
+                    status="reported",
+                    evidence_labels=["[E1]"],
+                ),
+                future_work=AnalysisField.not_reported(),
+                evidence_count=1,
+                model="mock",
+            )
+
+        def _load_evidence_from_database(self, paper_uuid):
+            item = EvidenceItem(
+                document_id="doc-unverified",
+                chunk_id="chk-unverified",
+                text="Quadratic complexity O(N^2).",
+                score=1.0,
+                metadata={},  # missing paper_id
+                position=0,
+            )
+            return "Paper Title", EvidenceContext(query="test", items=[item])
+
+    gap_synth = json.dumps({"inferred_gaps": [], "summary": "Summary", "limitations": []})
+    mock_llm = ControllableLLMProvider(response_text=gap_synth)
+
+    analysis_service = MockAnalysisService()
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        paper_analysis_service=analysis_service,
+    )
+
+    report = gap_service.discover_gaps_for_papers([pid1, pid2])
+    assert len(report.documented_gaps) == 0
+    assert any("citations did not resolve to valid source chunks for this paper" in lim for lim in report.limitations)
+
+
+def test_fail_closed_documented_gap_matching_source_paper_id():
+    """Scenario 5: When evidence source has matching verified paper_id, it is accepted
+    and the verified paper_id is preserved from repository data.
+    """
+    pid1 = str(uuid.uuid4())
+    pid2 = str(uuid.uuid4())
+
+    class MockAnalysisService:
+        def analyze_paper(self, paper_id: str, **kwargs):
+            return StructuredPaperAnalysis(
+                paper_id=paper_id,
+                title="Paper Title",
+                problem_and_objectives=AnalysisField.not_reported(),
+                methodology_and_algorithms=AnalysisField.not_reported(),
+                models_and_datasets=AnalysisField.not_reported(),
+                experiments_and_metrics=AnalysisField.not_reported(),
+                results_and_findings=AnalysisField.not_reported(),
+                limitations=AnalysisField(
+                    summary="Memory scaling limitation.",
+                    status="reported",
+                    evidence_labels=["[E1]"],
+                ),
+                future_work=AnalysisField.not_reported(),
+                evidence_count=1,
+                model="mock",
+            )
+
+        def _load_evidence_from_database(self, paper_uuid):
+            item = EvidenceItem(
+                document_id="doc-verified",
+                chunk_id="chk-verified",
+                text="Quadratic complexity O(N^2).",
+                score=1.0,
+                metadata={"paper_id": str(paper_uuid)},  # matching trusted paper_id
+                position=0,
+            )
+            return "Paper Title", EvidenceContext(query="test", items=[item])
+
+    gap_synth = json.dumps({"inferred_gaps": [], "summary": "Summary", "limitations": []})
+    mock_llm = ControllableLLMProvider(response_text=gap_synth)
+
+    analysis_service = MockAnalysisService()
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        paper_analysis_service=analysis_service,
+    )
+
+    report = gap_service.discover_gaps_for_papers([pid1, pid2])
+    assert len(report.documented_gaps) == 2
+    for doc_gap in report.documented_gaps:
+        assert doc_gap.confidence == 1.0
+        assert len(doc_gap.supporting_sources) == 1
+        assert doc_gap.supporting_sources[0]["paper_id"] in (pid1, pid2)
+
+
+def test_fail_closed_inferred_gap_missing_source_paper_id():
+    """Scenario 6: Inferred candidate gaps reject chunks with missing paper_id."""
+    pid1 = str(uuid.uuid4())
+    pid2 = str(uuid.uuid4())
+
+    class MockAnalysisService:
+        def analyze_paper(self, paper_id: str, **kwargs):
+            return StructuredPaperAnalysis.empty(paper_id=paper_id)
+
+        def _load_evidence_from_database(self, paper_uuid):
+            item = EvidenceItem(
+                document_id="doc-1",
+                chunk_id="chk-1",
+                text="Some unverified statement.",
+                score=1.0,
+                metadata={},  # missing paper_id
+                position=0,
+            )
+            return "Paper Title", EvidenceContext(query="test", items=[item])
+
+    gap_synth = json.dumps({
+        "inferred_gaps": [{
+            "title": "Candidate Scaling Gap",
+            "description": "Hypothesis based on unverified source.",
+            "reasoning": "Reasoning",
+            "source_paper_ids": [pid1, pid2],
+            "evidence_labels": ["[E1]"],
+            "confidence": 0.75,
+            "limitations": [],
+        }],
+        "summary": "Summary",
+        "limitations": [],
+    })
+    mock_llm = ControllableLLMProvider(response_text=gap_synth)
+
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        paper_analysis_service=MockAnalysisService(),
+    )
+
+    report = gap_service.discover_gaps_for_papers([pid1, pid2])
+    assert len(report.inferred_gaps) == 0
+    assert any("Candidate gap 'Candidate Scaling Gap' was excluded" in lim for lim in report.limitations)
+
+
+def test_verifier_fail_closed_on_missing_paper_id():
+    """Scenario 7: ClaimToEvidenceVerifier fails closed when expected_paper_id is set but chunk lacks paper_id."""
+    item = EvidenceItem(
+        document_id="doc-1",
+        chunk_id="chk-1",
+        text="Hardware scaling is bottlenecked.",
+        score=1.0,
+        metadata={},  # missing paper_id
+        position=0,
+    )
+    context = EvidenceContext(query="test", items=[item])
+    verifier = ClaimToEvidenceVerifier(expected_paper_id="paper-expected")
+
+    claim = RawClaim(
+        claim_text="Hardware scaling is bottlenecked [E1].",
+        cited_labels=["[E1]"],
+    )
+    result = verifier.verify_claim(claim, context)
+    assert result.status == ClaimVerificationStatus.UNRESOLVED.value
+    assert result.is_unresolved is True
+    assert "[E1]" in result.unresolved_labels
+
+
+def test_research_gap_model_validates_paper_id_integrity():
+    """Scenario 8: ResearchGap raises ValueError on empty paper_id or mismatched paper_id in documented gap."""
+    # 1. Blank paper_id string in source record
+    with pytest.raises(ValueError, match="must not be empty or whitespace"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{
+                "label": "[E1]",
+                "document_id": "doc-1",
+                "chunk_id": "chk-1",
+                "text": "text",
+                "paper_id": "   ",
+            }],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+    # 2. Mismatched paper_id in documented gap supporting sources
+    with pytest.raises(ValueError, match="does not match gap source_paper_ids"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{
+                "label": "[E1]",
+                "document_id": "doc-1",
+                "chunk_id": "chk-1",
+                "text": "text",
+                "paper_id": "p2",  # Mismatched
+            }],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+

@@ -47,8 +47,11 @@ def _validate_source_record(source: Any, field_name: str, index: int) -> dict[st
                 raise ValueError(f"{field_name}[{index}][{key!r}] must be a non-empty string")
 
     paper_id = source.get("paper_id")
-    if paper_id is not None and not isinstance(paper_id, str):
-        raise TypeError(f"{field_name}[{index}]['paper_id'] must be a string or None")
+    if paper_id is not None:
+        if not isinstance(paper_id, str):
+            raise TypeError(f"{field_name}[{index}]['paper_id'] must be a string or None")
+        if not paper_id.strip():
+            raise ValueError(f"{field_name}[{index}]['paper_id'] must not be empty or whitespace")
 
     return dict(source)
 
@@ -121,6 +124,12 @@ class ResearchGap:
                 raise ValueError(
                     "Documented gap with confidence 1.0 must have at least one supporting source chunk."
                 )
+            for idx, s in enumerate(validated_supporting):
+                src_pid = s.get("paper_id")
+                if src_pid is not None and str(src_pid) not in source_paper_ids:
+                    raise ValueError(
+                        f"supporting_sources[{idx}] paper_id {src_pid!r} does not match gap source_paper_ids {source_paper_ids}"
+                    )
 
         # Provenance safety rule: Inferred candidate gaps are hypotheses and cannot have confidence 1.0
         if category == GapCategory.INFERRED.value:

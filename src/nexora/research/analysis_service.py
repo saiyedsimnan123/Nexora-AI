@@ -74,9 +74,10 @@ def _parse_field_dict(
     for lbl in valid_labels:
         item = context.get_by_label(lbl)
         if item is not None:
-            # Paper scoping provenance check: ensure chunk belongs to expected paper
-            if expected_paper_id is not None and item.paper_id is not None:
-                if str(item.paper_id) != str(expected_paper_id):
+            # Paper scoping provenance check: fail closed if expected_paper_id is provided
+            if expected_paper_id is not None:
+                item_pid = str(item.paper_id).strip() if item.paper_id is not None else ""
+                if not item_pid or item_pid != str(expected_paper_id):
                     continue
             strictly_valid_labels.append(lbl)
             sources.append({
