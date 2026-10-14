@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -268,3 +269,68 @@ class PaperComparisonResponse:
             "model": self.model,
             "usage": None if self.usage is None else dict(self.usage),
         }
+
+
+@dataclass(frozen=True)
+class ResearchVerifyRequest:
+    """A research question to answer and verify, or an answer to verify against retrieved evidence."""
+
+    query: str
+    text: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    expected_paper_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.query, str):
+            raise InvalidRequestError("query must be a string")
+        if not self.query.strip():
+            raise InvalidRequestError("query must not be empty or whitespace-only")
+        if self.text is not None:
+            if not isinstance(self.text, str):
+                raise InvalidRequestError("text must be a string or None")
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise InvalidRequestError("model must be a string")
+            if not self.model.strip():
+                raise InvalidRequestError("model must not be empty")
+        if self.expected_paper_id is not None:
+            if not isinstance(self.expected_paper_id, str):
+                raise InvalidRequestError("expected_paper_id must be a string")
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class ResearchVerifyResponse:
+    """Public view of a research answer with its claim-to-evidence verification result."""
+
+    text: str
+    query: str
+    model: str
+    usage: dict[str, int] | None
+    evidence_count: int
+    verification: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.usage is not None:
+            object.__setattr__(self, "usage", dict(self.usage))
+        if not isinstance(self.verification, dict):
+            raise TypeError("verification must be a dict")
+        object.__setattr__(self, "verification", copy.deepcopy(self.verification))
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "text": self.text,
+            "query": self.query,
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+            "evidence_count": self.evidence_count,
+            "verification": copy.deepcopy(self.verification),
+        }
+

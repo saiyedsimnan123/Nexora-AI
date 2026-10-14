@@ -46,3 +46,36 @@ class ResearchQueryService:
             temperature=temperature,
             max_output_tokens=max_output_tokens,
         )
+
+    def ask_with_context(
+        self,
+        query: str,
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> tuple[ResearchAnswer, Any]:
+        """Execute research query and return both the ResearchAnswer and the EvidenceContext."""
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if not query.strip():
+            raise ValueError("query must not be empty or whitespace-only")
+
+        context = self._evidence_builder.build(query)
+        answer = self._answer_service.answer(
+            query,
+            context,
+            model=model,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        return answer, context
+
+    def get_evidence_context(self, query: str) -> Any:
+        """Build and return the EvidenceContext for a query."""
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if not query.strip():
+            raise ValueError("query must not be empty or whitespace-only")
+        return self._evidence_builder.build(query)
+

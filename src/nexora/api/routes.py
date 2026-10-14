@@ -24,6 +24,8 @@ from nexora.api.models import (
     PaperComparisonRequest,
     PaperComparisonResponse,
     ResearchRequest,
+    ResearchVerifyRequest,
+    ResearchVerifyResponse,
 )
 from nexora.api.service import ResearchApplicationService
 
@@ -47,6 +49,32 @@ class ResearchResponseBody(BaseModel):
     model: str
     usage: dict[str, int] | None = None
     evidence_count: int
+
+
+class ResearchVerifyRequestBody(BaseModel):
+    """Wire format of research verification request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    query: str
+    text: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    expected_paper_id: str | None = None
+
+
+class ResearchVerifyResponseBody(BaseModel):
+    """Wire format of research verification response."""
+
+    model_config = ConfigDict(strict=False)
+
+    text: str
+    query: str
+    model: str
+    usage: dict[str, int] | None = None
+    evidence_count: int
+    verification: dict[str, Any]
 
 
 class DocumentIngestResponseBody(BaseModel):
@@ -185,6 +213,29 @@ def research(
         max_output_tokens=body.max_output_tokens,
     )
     return ResearchResponseBody(**service.ask(request).to_dict())
+
+
+@v1_router.post(
+    "/research/verify",
+    response_model=ResearchVerifyResponseBody,
+    status_code=200,
+    summary="Verify research answer claims against cited evidence",
+    description="Verifies claims in a generated or supplied research answer against retrieved evidence context.",
+)
+def research_verify_endpoint(
+    body: ResearchVerifyRequestBody,
+    service: ResearchApplicationService = Depends(get_research_service),
+) -> ResearchVerifyResponseBody:
+    req = ResearchVerifyRequest(
+        query=body.query,
+        text=body.text,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+        expected_paper_id=body.expected_paper_id,
+    )
+    result = service.verify(req)
+    return ResearchVerifyResponseBody(**result.to_dict())
 
 
 @v1_router.post(

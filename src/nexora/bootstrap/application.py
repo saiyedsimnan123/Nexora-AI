@@ -57,6 +57,7 @@ def build_research_application(
     vector_store: VectorStore | None = None,
     llm_provider: Any = None,
     qdrant_client: Any = None,
+    verifier: Any = None,
 ) -> ResearchApplicationService:
     """Assemble the full research pipeline from settings and injected pieces.
 
@@ -87,7 +88,35 @@ def build_research_application(
     )
     answers = ResearchAnswerService(llm_service)
     query_service = ResearchQueryService(evidence, answers)
-    return ResearchApplicationService(query_service)
+
+    verifier_inst = verifier
+    if verifier_inst is None:
+        from nexora.research.verification import ClaimToEvidenceVerifier
+        verifier_inst = ClaimToEvidenceVerifier(llm_service)
+
+    return ResearchApplicationService(query_service, verifier=verifier_inst)
+
+
+def build_verification_service(
+    settings: AppSettings,
+    *,
+    llm_provider: Any = None,
+    expected_paper_id: str | None = None,
+) -> Any:
+    """Assemble ClaimToEvidenceVerifier using settings and injected dependencies."""
+    from nexora.research.verification import ClaimToEvidenceVerifier
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_provider is None:
+        llm_provider = create_llm_provider(settings.llm)
+    llm_service = LLMService(llm_provider)
+
+    return ClaimToEvidenceVerifier(
+        llm_service,
+        expected_paper_id=expected_paper_id,
+    )
 
 
 def build_ingestion_service(
@@ -239,13 +268,16 @@ def build_http_app(
         raise ConfigurationError("vector_store must implement the VectorStore protocol")
     _check_dimension("vector_store", vector_store, settings.embedding_dimension)
 
+    verifier = dependencies.get("verifier") or dependencies.get("verification_service")
     research_service = build_research_application(
         settings,
         embedding_service=embedding_service,
         vector_store=vector_store,
         llm_provider=llm_provider,
         qdrant_client=qdrant_client,
+        verifier=verifier,
     )
+
 
     if ingestion_service is None:
         session = dependencies.get("session")

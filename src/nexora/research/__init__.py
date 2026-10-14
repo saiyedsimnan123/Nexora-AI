@@ -17,18 +17,35 @@ from nexora.research.prompt import (
 )
 from nexora.research.query import ResearchQueryService
 from nexora.research.service import ResearchAnswerService
+from nexora.research.verification import (
+    AnswerVerificationResult,
+    ClaimToEvidenceVerifier,
+    ClaimVerification,
+    ClaimVerificationPromptBuilder,
+    ClaimVerificationStatus,
+    RawClaim,
+    extract_claims_from_text,
+)
 
 __all__ = [
     "ANALYSIS_DIMENSIONS",
     "AnalysisField",
+    "AnswerVerificationResult",
+    "ClaimToEvidenceVerifier",
+    "ClaimVerification",
+    "ClaimVerificationPromptBuilder",
+    "ClaimVerificationStatus",
     "FieldComparison",
     "PaperAnalysisPromptBuilder",
     "PaperAnalysisService",
     "PaperComparisonPromptBuilder",
     "PaperComparisonService",
     "PaperComparison",
+    "RawClaim",
     "ResearchAnswer",
     "ResearchAnswerService",
     "ResearchQueryService",
     "StructuredPaperAnalysis",
+    "extract_claims_from_text",
 ]
+

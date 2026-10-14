@@ -318,3 +318,194 @@ def evaluate_citations(
         evidence_coverage_rate=round(cov_rate, 4),
         grounded_answers_rate=round(grounded_rate, 4),
     )
+
+
+@dataclass(frozen=True)
+class AnswerGroundingEvaluationMetrics:
+    """Quantitative metrics for research-answer grounding over an evaluation benchmark.
+
+    SEPARATION OF EVALUATION CONCEPTS:
+    1. Retrieval Relevance: MRR, Recall@K, Precision@K evaluate finding relevant chunks.
+    2. Citation Reference Integrity: Syntactic resolution of citation labels to evidence.
+    3. Claim-to-Evidence Grounding: Entailment, contradiction, and sufficiency of factual statements.
+
+    NOTE ON SCIENTIFIC TRUTH:
+    These metrics assess agreement between generated text claims and cited context chunks.
+    They do NOT guarantee absolute real-world factual correctness or eliminate all model error.
+    """
+
+    total_answers: int
+    total_claims: int
+    total_citations: int
+    valid_citations_count: int
+    invalid_citations_count: int
+    supported_claims_count: int
+    contradicted_claims_count: int
+    insufficient_claims_count: int
+    unresolved_claims_count: int
+    citation_validity_rate: float
+    claim_coverage_rate: float
+    supported_claim_rate: float
+    contradicted_claim_rate: float
+    insufficient_claim_rate: float
+    unresolved_claim_rate: float
+    fully_grounded_answer_rate: float
+    zero_evidence_handled_rate: float
+    empty_claims_answers_count: int
+
+
+def evaluate_answer_grounding(
+    benchmark_cases: Sequence[dict[str, Any]],
+    verifier: Any = None,
+) -> AnswerGroundingEvaluationMetrics:
+    """Evaluate claim-level answer grounding over a suite of answer-context pairs.
+
+    Each case in benchmark_cases must be a dict with:
+        - "context": EvidenceContext
+        - "text": str OR "answer": ResearchAnswer (or object with .text)
+        - optional "query": str
+        - optional "expected_paper_id": str
+
+    verifier: An instance providing verify_answer(text, context, query),
+              defaulting to ClaimToEvidenceVerifier().
+    """
+    if benchmark_cases is None or isinstance(benchmark_cases, (str, bytes)) or not hasattr(benchmark_cases, "__iter__"):
+        raise TypeError("benchmark_cases must be a sequence of dictionaries")
+
+    cases_list = list(benchmark_cases)
+    if not cases_list:
+        return AnswerGroundingEvaluationMetrics(
+            total_answers=0,
+            total_claims=0,
+            total_citations=0,
+            valid_citations_count=0,
+            invalid_citations_count=0,
+            supported_claims_count=0,
+            contradicted_claims_count=0,
+            insufficient_claims_count=0,
+            unresolved_claims_count=0,
+            citation_validity_rate=1.0,
+            claim_coverage_rate=0.0,
+            supported_claim_rate=0.0,
+            contradicted_claim_rate=0.0,
+            insufficient_claim_rate=0.0,
+            unresolved_claim_rate=0.0,
+            fully_grounded_answer_rate=1.0,
+            zero_evidence_handled_rate=1.0,
+            empty_claims_answers_count=0,
+        )
+
+    if verifier is None:
+        from nexora.research.verification import ClaimToEvidenceVerifier
+        verifier = ClaimToEvidenceVerifier()
+
+    total_claims = 0
+    total_citations = 0
+    total_valid_citations = 0
+    total_invalid_citations = 0
+    total_supported = 0
+    total_contradicted = 0
+    total_insufficient = 0
+    total_unresolved = 0
+
+    covered_claims_count = 0
+    fully_grounded_answers = 0
+    empty_claims_answers = 0
+
+    zero_ev_total = 0
+    zero_ev_handled = 0
+    total_evidence_across_all = 0
+
+    for i, case in enumerate(cases_list):
+        if not isinstance(case, dict):
+            raise TypeError(f"benchmark_cases[{i}] must be a dict, got {type(case).__name__}")
+        if "context" not in case:
+            raise KeyError(f"benchmark_cases[{i}] missing required 'context' key")
+        context = case["context"]
+        if not isinstance(context, EvidenceContext):
+            raise TypeError(
+                f"benchmark_cases[{i}]['context'] must be an EvidenceContext, got {type(context).__name__}"
+            )
+
+        if "answer" in case:
+            answer_obj = case["answer"]
+            text = getattr(answer_obj, "text", None)
+            if not isinstance(text, str):
+                raise TypeError(f"benchmark_cases[{i}]['answer'].text must be a string")
+            query = getattr(answer_obj, "query", "") or case.get("query", "")
+        elif "text" in case:
+            text = case["text"]
+            if not isinstance(text, str):
+                raise TypeError(f"benchmark_cases[{i}]['text'] must be a string")
+            query = case.get("query", "")
+        else:
+            raise KeyError(f"benchmark_cases[{i}] must contain 'text' or 'answer'")
+
+        num_ev = len(context.items)
+        total_evidence_across_all += num_ev
+
+        result = verifier.verify_answer(text, context, query=query)
+
+        n_claims = result.total_claims
+        total_claims += n_claims
+
+        if n_claims == 0:
+            empty_claims_answers += 1
+
+        if num_ev == 0:
+            zero_ev_total += 1
+            if result.is_grounded:
+                zero_ev_handled += 1
+
+        total_supported += result.supported_claims_count
+        total_contradicted += result.contradicted_claims_count
+        total_insufficient += result.insufficient_claims_count
+        total_unresolved += result.unresolved_claims_count
+
+        for c in result.claims:
+            total_citations += len(c.cited_labels)
+            total_valid_citations += (len(c.cited_labels) - len(c.unresolved_labels))
+            total_invalid_citations += len(c.unresolved_labels)
+            if len(c.sources) > 0:
+                covered_claims_count += 1
+
+        if result.is_grounded:
+            fully_grounded_answers += 1
+
+    num_answers = len(cases_list)
+
+    if total_citations > 0:
+        val_rate = total_valid_citations / total_citations
+    else:
+        val_rate = 1.0 if total_evidence_across_all == 0 else 0.0
+
+    cov_rate = (covered_claims_count / total_claims) if total_claims > 0 else 0.0
+    supp_rate = (total_supported / total_claims) if total_claims > 0 else 0.0
+    contra_rate = (total_contradicted / total_claims) if total_claims > 0 else 0.0
+    insuff_rate = (total_insufficient / total_claims) if total_claims > 0 else 0.0
+    unres_rate = (total_unresolved / total_claims) if total_claims > 0 else 0.0
+
+    grounded_rate = (fully_grounded_answers / num_answers) if num_answers > 0 else 1.0
+    zero_ev_rate = (zero_ev_handled / zero_ev_total) if zero_ev_total > 0 else 1.0
+
+    return AnswerGroundingEvaluationMetrics(
+        total_answers=num_answers,
+        total_claims=total_claims,
+        total_citations=total_citations,
+        valid_citations_count=total_valid_citations,
+        invalid_citations_count=total_invalid_citations,
+        supported_claims_count=total_supported,
+        contradicted_claims_count=total_contradicted,
+        insufficient_claims_count=total_insufficient,
+        unresolved_claims_count=total_unresolved,
+        citation_validity_rate=round(val_rate, 4),
+        claim_coverage_rate=round(cov_rate, 4),
+        supported_claim_rate=round(supp_rate, 4),
+        contradicted_claim_rate=round(contra_rate, 4),
+        insufficient_claim_rate=round(insuff_rate, 4),
+        unresolved_claim_rate=round(unres_rate, 4),
+        fully_grounded_answer_rate=round(grounded_rate, 4),
+        zero_evidence_handled_rate=round(zero_ev_rate, 4),
+        empty_claims_answers_count=empty_claims_answers,
+    )
+

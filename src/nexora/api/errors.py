@@ -33,3 +33,8 @@ class AnalysisServiceError(RuntimeError):
 
 class ComparisonServiceError(RuntimeError):
     """Multi-paper comparison failed; the original error is chained as __cause__."""
+
+
+class VerificationServiceError(RuntimeError):
+    """Answer grounding verification failed; the original error is chained as __cause__."""
+

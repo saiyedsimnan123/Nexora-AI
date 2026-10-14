@@ -60,3 +60,11 @@ class ResearchAnswer:
         """Verify citations in this answer against the supplied EvidenceContext."""
         from nexora.retrieval.evidence import verify_citations
         return verify_citations(self.text, context)
+
+    def verify_grounding(self, context: Any, verifier: Any = None) -> Any:
+        """Verify claim-to-evidence grounding of this answer against an EvidenceContext."""
+        from nexora.research.verification import ClaimToEvidenceVerifier
+        if verifier is None:
+            verifier = ClaimToEvidenceVerifier()
+        return verifier.verify_answer(self.text, context, query=self.query)
+

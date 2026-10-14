@@ -17,6 +17,7 @@ from nexora.api.errors import (
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
+    VerificationServiceError,
 )
 from nexora.api.routes import health_router, v1_router
 from nexora.database.repository.base import (
@@ -65,6 +66,11 @@ async def _analysis_failed(request: Request, exc: Exception) -> JSONResponse:
 
 async def _comparison_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "comparison_failed", "The paper comparison could not be completed.")
+
+
+async def _verification_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "verification_failed", "The research verification could not be completed.")
+
 
 
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
@@ -132,6 +138,7 @@ def create_app(
     app.add_exception_handler(ResearchServiceError, _research_failed)
     app.add_exception_handler(AnalysisServiceError, _analysis_failed)
     app.add_exception_handler(ComparisonServiceError, _comparison_failed)
+    app.add_exception_handler(VerificationServiceError, _verification_failed)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(StarletteHTTPException, _http_error)

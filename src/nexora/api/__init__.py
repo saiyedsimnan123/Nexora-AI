@@ -9,6 +9,7 @@ from nexora.api.errors import (
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
+    VerificationServiceError,
 )
 from nexora.api.models import (
     DocumentIngestResponse,
@@ -18,6 +19,8 @@ from nexora.api.models import (
     PaperComparisonResponse,
     ResearchRequest,
     ResearchResponse,
+    ResearchVerifyRequest,
+    ResearchVerifyResponse,
 )
 from nexora.api.service import ResearchApplicationService
 
@@ -38,4 +41,8 @@ __all__ = [
     "ResearchRequest",
     "ResearchResponse",
     "ResearchServiceError",
+    "ResearchVerifyRequest",
+    "ResearchVerifyResponse",
+    "VerificationServiceError",
 ]
+
