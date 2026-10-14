@@ -113,13 +113,12 @@ class RetrievalService:
         if self._cache_queries and query in self._query_cache:
             vector = list(self._query_cache[query])
         else:
-            raw_vector = self._embedding_service.embed_text(query)
-            self._validate_vector(raw_vector)
+            vector = self._embedding_service.embed_text(query)
+            self._validate_vector(vector)
             if self._cache_queries:
                 if len(self._query_cache) >= self._max_cache_entries:
                     self._evict_oldest()
-                self._query_cache[query] = list(raw_vector)
-            vector = list(raw_vector)
+                self._query_cache[query] = list(vector)
 
         raw_result = self._vector_store.search(vector, limit=limit)
         if not isinstance(raw_result, SearchResult):
