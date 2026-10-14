@@ -146,3 +146,47 @@ def test_retrieval_errors_propagate_unchanged():
     with pytest.raises(RuntimeError) as info:
         service.retrieve("q")
     assert info.value is err
+
+
+def test_allowed_paper_ids_validation_and_filtering():
+    """Verify allowed_paper_ids validation and strict paper-scoping filtering."""
+    # Invalid types
+    with pytest.raises(TypeError, match="allowed_paper_ids must be a sequence of strings"):
+        RetrievalQualityPolicy(allowed_paper_ids="not-a-sequence")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must be a string"):
+        RetrievalQualityPolicy(allowed_paper_ids=["valid-p1", 123])  # type: ignore[list-item]
+
+    with pytest.raises(ValueError, match="must not be empty or whitespace-only"):
+        RetrievalQualityPolicy(allowed_paper_ids=["valid-p1", "   "])
+
+    # Normalization to tuple
+    p = RetrievalQualityPolicy(allowed_paper_ids=[" p1 ", "p2"])
+    assert p.allowed_paper_ids == ("p1", "p2")
+
+    # Filtering in RetrievalQualityService
+    c1 = RetrievedChunk("d1", "c1", "t1", 0.9, {"paper_id": "p1"})
+    c2 = RetrievedChunk("d2", "c2", "t2", 0.8, {"paper_id": "p2"})
+    c3 = RetrievedChunk("d3", "c3", "t3", 0.7, {"paper_id": "p3"})
+    c_no_paper = RetrievedChunk("d4", "c4", "t4", 0.6, {})
+
+    chunks = [c1, c2, c3, c_no_paper]
+    res_p1, _ = run(chunks, allowed_paper_ids=("p1",))
+    assert [c.chunk_id for c in res_p1.results] == ["c1"]
+
+    res_p1_p2, _ = run(chunks, allowed_paper_ids=("p1", "p2"))
+    assert [c.chunk_id for c in res_p1_p2.results] == ["c1", "c2"]
+
+    res_none_match, _ = run(chunks, allowed_paper_ids=("p99",))
+    assert res_none_match.results == []
+
+
+def test_max_results_per_paper():
+    """Verify max_results_per_paper limits chunks per paper."""
+    c1 = RetrievedChunk("d1", "c1", "t1", 0.9, {"paper_id": "p1"})
+    c2 = RetrievedChunk("d1", "c2", "t2", 0.85, {"paper_id": "p1"})
+    c3 = RetrievedChunk("d1", "c3", "t3", 0.80, {"paper_id": "p1"})
+    c4 = RetrievedChunk("d2", "c4", "t4", 0.75, {"paper_id": "p2"})
+
+    res, _ = run([c1, c2, c3, c4], max_results=4, max_results_per_paper=2)
+    assert [c.chunk_id for c in res.results] == ["c1", "c2", "c4"]

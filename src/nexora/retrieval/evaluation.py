@@ -31,6 +31,10 @@ class RetrievalEvaluationMetrics:
     recall_at_k: dict[int, float]
     precision_at_k: dict[int, float]
     empty_retrievals: int
+    unanswerable_queries: int = 0
+    unanswerable_rejections: int = 0
+    unanswerable_rejection_rate: float = 1.0
+    category_metrics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +64,12 @@ class CitationEvaluationMetrics:
 def compute_reciprocal_rank(
     retrieved_ids: Sequence[str], relevant_ids: set[str]
 ) -> float:
-    """Compute Reciprocal Rank: 1 / (rank of first relevant chunk), or 0.0."""
+    """Compute Reciprocal Rank: 1 / (rank of first relevant chunk), or 0.0.
+
+    Behavior for empty or unanswerable cases:
+    - If relevant_ids is empty (unanswerable query), returns 0.0 (no relevant target).
+    - If retrieved_ids is empty, returns 0.0 (no hits).
+    """
     for rank, item_id in enumerate(retrieved_ids, start=1):
         if item_id in relevant_ids:
             return 1.0 / rank
@@ -70,13 +79,27 @@ def compute_reciprocal_rank(
 def compute_precision_recall_at_k(
     retrieved_ids: Sequence[str], relevant_ids: set[str], k: int
 ) -> tuple[float, float]:
-    """Compute (Precision@K, Recall@K)."""
+    """Compute (Precision@K, Recall@K).
+
+    Behavior for empty or unanswerable cases:
+    - If k <= 0, raises ValueError.
+    - If relevant_ids is empty:
+      - If retrieved_ids is empty (clean rejection), returns (1.0, 1.0) because 0 false positives were retrieved
+        and 100% of the 0 relevant items were omitted.
+      - If retrieved_ids has elements (false alarms), returns (0.0, 0.0) as all retrieved items are irrelevant.
+    - If relevant_ids is non-empty but retrieved_ids is empty: returns (0.0, 0.0).
+    - Otherwise returns standard hits / k and hits / len(relevant_ids).
+    """
     if k <= 0:
         raise ValueError("k must be positive")
     top_k = set(retrieved_ids[:k])
     hits = len(top_k & relevant_ids)
+    if not relevant_ids:
+        if not top_k:
+            return 1.0, 1.0
+        return 0.0, 0.0
     precision = hits / k
-    recall = (hits / len(relevant_ids)) if relevant_ids else 0.0
+    recall = hits / len(relevant_ids)
     return precision, recall
 
 
@@ -197,10 +220,14 @@ def evaluate_retrieval(
     p_at_k_sums: dict[int, float] = {k: 0.0 for k in valid_k_values}
     r_at_k_sums: dict[int, float] = {k: 0.0 for k in valid_k_values}
     empty_count = 0
+    unanswerable_count = 0
+    unanswerable_rejections = 0
+    category_buckets: dict[str, list[tuple[float, dict[int, float], dict[int, float]]]] = {}
 
     for case in valid_cases:
         query = case["query"]
         relevant_ids = set(case["expected_chunk_ids"])
+        category = str(case.get("category", "")).strip()
 
         result = caller(query, max_k)
         if not isinstance(result, SearchResult):
@@ -212,18 +239,46 @@ def evaluate_retrieval(
         if not retrieved_chunk_ids:
             empty_count += 1
 
+        if not relevant_ids:
+            unanswerable_count += 1
+            if not retrieved_chunk_ids:
+                unanswerable_rejections += 1
+
         rr = compute_reciprocal_rank(retrieved_chunk_ids, relevant_ids)
         reciprocal_ranks.append(rr)
 
+        case_p: dict[int, float] = {}
+        case_r: dict[int, float] = {}
         for k in valid_k_values:
             prec, rec = compute_precision_recall_at_k(retrieved_chunk_ids, relevant_ids, k)
             p_at_k_sums[k] += prec
             r_at_k_sums[k] += rec
+            case_p[k] = prec
+            case_r[k] = rec
+
+        if category:
+            if category not in category_buckets:
+                category_buckets[category] = []
+            category_buckets[category].append((rr, case_p, case_r))
 
     num_cases = len(valid_cases)
     mrr = sum(reciprocal_ranks) / num_cases
     p_at_k = {k: p_at_k_sums[k] / num_cases for k in valid_k_values}
     r_at_k = {k: r_at_k_sums[k] / num_cases for k in valid_k_values}
+    unans_rate = (unanswerable_rejections / unanswerable_count) if unanswerable_count > 0 else 1.0
+
+    cat_metrics: dict[str, Any] = {}
+    for cat_name, entries in category_buckets.items():
+        n_cat = len(entries)
+        cat_mrr = sum(e[0] for e in entries) / n_cat
+        cat_p = {k: sum(e[1][k] for e in entries) / n_cat for k in valid_k_values}
+        cat_r = {k: sum(e[2][k] for e in entries) / n_cat for k in valid_k_values}
+        cat_metrics[cat_name] = {
+            "count": n_cat,
+            "mean_reciprocal_rank": round(cat_mrr, 4),
+            "precision_at_k": {k: round(v, 4) for k, v in cat_p.items()},
+            "recall_at_k": {k: round(v, 4) for k, v in cat_r.items()},
+        }
 
     return RetrievalEvaluationMetrics(
         total_queries=num_cases,
@@ -231,6 +286,10 @@ def evaluate_retrieval(
         recall_at_k={k: round(v, 4) for k, v in r_at_k.items()},
         precision_at_k={k: round(v, 4) for k, v in p_at_k.items()},
         empty_retrievals=empty_count,
+        unanswerable_queries=unanswerable_count,
+        unanswerable_rejections=unanswerable_rejections,
+        unanswerable_rejection_rate=round(unans_rate, 4),
+        category_metrics=cat_metrics if cat_metrics else None,
     )
 
 

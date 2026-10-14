@@ -28,6 +28,8 @@ class RetrievalQualityPolicy:
     max_results: int = 10
     max_results_per_document: int | None = None
     candidate_limit: int | None = None
+    allowed_paper_ids: tuple[str, ...] | None = None
+    max_results_per_paper: int | None = None
 
     def __post_init__(self) -> None:
         if self.min_score is not None:
@@ -40,6 +42,19 @@ class RetrievalQualityPolicy:
         _positive_int("max_results", self.max_results)
         if self.max_results_per_document is not None:
             _positive_int("max_results_per_document", self.max_results_per_document)
+        if self.max_results_per_paper is not None:
+            _positive_int("max_results_per_paper", self.max_results_per_paper)
+        if self.allowed_paper_ids is not None:
+            if isinstance(self.allowed_paper_ids, (str, bytes)) or not hasattr(self.allowed_paper_ids, "__iter__"):
+                raise TypeError("allowed_paper_ids must be a sequence of strings")
+            ids_tuple: list[str] = []
+            for idx, pid in enumerate(self.allowed_paper_ids):
+                if not isinstance(pid, str):
+                    raise TypeError(f"allowed_paper_ids[{idx}] must be a string, got {type(pid).__name__}")
+                if not pid.strip():
+                    raise ValueError(f"allowed_paper_ids[{idx}] must not be empty or whitespace-only")
+                ids_tuple.append(pid.strip())
+            object.__setattr__(self, "allowed_paper_ids", tuple(ids_tuple))
         if self.candidate_limit is None:
             object.__setattr__(self, "candidate_limit", self.max_results * 3)
         else:
@@ -70,6 +85,7 @@ class RetrievalQualityService:
         policy = self._policy
         seen_chunks: set[str] = set()
         per_document: dict[str, int] = {}
+        per_paper: dict[str, int] = {}
         selected: list[RetrievedChunk] = []
         for chunk in candidates:
             if len(selected) >= policy.max_results:
@@ -78,10 +94,26 @@ class RetrievalQualityService:
                 continue
             if chunk.chunk_id in seen_chunks:
                 continue
+
+            # Paper scoping / cross-paper contamination filter
+            paper_id_raw = chunk.metadata.get("paper_id") if isinstance(chunk.metadata, dict) else None
+            paper_id_str = str(paper_id_raw).strip() if paper_id_raw is not None and str(paper_id_raw).strip() else None
+
+            if policy.allowed_paper_ids is not None:
+                if paper_id_str is None or paper_id_str not in policy.allowed_paper_ids:
+                    continue
+
+            # Diversity filters
             if policy.max_results_per_document is not None:
                 if per_document.get(chunk.document_id, 0) >= policy.max_results_per_document:
                     continue
+            if policy.max_results_per_paper is not None and paper_id_str is not None:
+                if per_paper.get(paper_id_str, 0) >= policy.max_results_per_paper:
+                    continue
+
             seen_chunks.add(chunk.chunk_id)
             per_document[chunk.document_id] = per_document.get(chunk.document_id, 0) + 1
+            if paper_id_str is not None:
+                per_paper[paper_id_str] = per_paper.get(paper_id_str, 0) + 1
             selected.append(chunk)
         return selected
