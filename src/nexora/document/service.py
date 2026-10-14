@@ -298,6 +298,20 @@ class DocumentPersistenceService:
             skip_locked=skip_locked,
         )
 
+    def fail_exhausted_document_claims(
+        self,
+        *,
+        max_attempts: int,
+        claim_timeout_seconds: float = 300.0,
+        limit: int | None = None,
+    ) -> Sequence[Document]:
+        """Transition stale processing documents that reached max_attempts to failed."""
+        return self._doc_repo.fail_exhausted_claims(
+            max_attempts=max_attempts,
+            claim_timeout_seconds=claim_timeout_seconds,
+            limit=limit,
+        )
+
     def claim_unindexed_documents(
         self,
         limit: int = 100,
@@ -305,6 +319,7 @@ class DocumentPersistenceService:
         max_attempts: int | None = None,
         claim_timeout_seconds: float = 300.0,
         claim_token: str | None = None,
+        include_failed: bool = True,
     ) -> Sequence[Document]:
         """Atomically claim a bounded batch of unindexed documents with row-level locking."""
         return self._doc_repo.claim_unindexed(
@@ -312,18 +327,21 @@ class DocumentPersistenceService:
             max_attempts=max_attempts,
             claim_timeout_seconds=claim_timeout_seconds,
             claim_token=claim_token,
+            include_failed=include_failed,
         )
 
     def claim_document_for_recovery(
         self,
         document_id: UUID,
         *,
+        max_attempts: int | None = None,
         claim_timeout_seconds: float = 300.0,
         claim_token: str | None = None,
     ) -> Document | None:
         """Atomically claim a specific document for recovery."""
         return self._doc_repo.claim_document(
             document_id,
+            max_attempts=max_attempts,
             claim_timeout_seconds=claim_timeout_seconds,
             claim_token=claim_token,
         )

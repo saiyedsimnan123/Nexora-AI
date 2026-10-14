@@ -48,6 +48,7 @@ from nexora.document.recovery import (
     RecoveryBatchResult,
     RecoveryItemResult,
 )
+from nexora.document.service import DocumentPersistenceService
 from nexora.retrieval.in_memory import InMemoryVectorStore
 from nexora.retrieval.models import VectorRecord
 
@@ -927,3 +928,477 @@ def test_postgresql_independent_workers_contention_and_recovery():
             assert len(chunks) == 2
 
     assert vector_store.count() == 10
+
+
+# ---------------------------------------------------------------------------
+# 11. Recovery safety hardening: Token fencing & retry exhaustion regression
+# ---------------------------------------------------------------------------
+def test_old_worker_finalize_rejected_when_newer_worker_owns_processing_claim(session_factory, seed_paper):
+    """An old worker attempting to finalize while a newer worker owns a processing claim is rejected."""
+    with session_factory() as session:
+        doc = Document(
+            paper_id=seed_paper,
+            filename="fencing_test.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="11" * 32,
+            storage_key="keys/fencing_test.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=1,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="old_token_1",
+        )
+        session.add(doc)
+        session.flush()
+        session.add(
+            DocumentChunkRecord(
+                document_id=doc.id,
+                chunk_index=0,
+                text="Chunk text for fencing test",
+            )
+        )
+        session.commit()
+        doc_id = doc.id
+
+    # Newer worker claims it
+    with session_factory() as session:
+        persistence = DocumentPersistenceService(session)
+        claimed_doc = persistence.claim_document_for_recovery(
+            doc_id,
+            claim_timeout_seconds=300.0,
+            claim_token="newer_token_2",
+        )
+        assert claimed_doc is not None
+        assert claimed_doc.claimed_by == "newer_token_2"
+        assert claimed_doc.indexing_attempts == 2
+        session.commit()
+
+    # Old worker attempts to finalize with old_token_1
+    with session_factory() as session:
+        persistence = DocumentPersistenceService(session)
+        res = persistence.finalize_document_indexing(
+            doc_id,
+            IndexingStatus.COMPLETED,
+            claim_token="old_token_1",
+            error=None,
+        )
+        assert res is None
+        session.commit()
+
+    # Verify newer worker's claim is completely intact
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.PROCESSING.value
+        assert doc.claimed_by == "newer_token_2"
+        assert doc.indexing_attempts == 2
+        assert doc.indexed_at is None
+        assert doc.indexing_error is None
+
+    # Verify old worker's DocumentRecoveryService recognises lost claim
+    recovery_service = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=InMemoryVectorStore(),
+        embedding_service=DummyEmbeddingService(),
+    )
+    item_res = recovery_service._execute_document_indexing(
+        doc_id=doc_id,
+        paper_id=seed_paper,
+        claim_token="old_token_1",
+        attempts=1,
+    )
+    assert item_res.status == IndexingStatus.FAILED
+    assert "Recovery claim lost or superseded" in (item_res.error or "")
+    assert item_res.indexed_chunks_count == 0
+
+
+def test_old_worker_finalize_rejected_after_newer_worker_failed_document(session_factory, seed_paper):
+    """An old worker attempting to finalize after a newer worker has marked document failed is rejected."""
+    with session_factory() as session:
+        doc = Document(
+            paper_id=seed_paper,
+            filename="failed_fencing_test.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="22" * 32,
+            storage_key="keys/failed_fencing_test.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=1,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="old_token_1",
+        )
+        session.add(doc)
+        session.flush()
+        session.add(
+            DocumentChunkRecord(
+                document_id=doc.id,
+                chunk_index=0,
+                text="Chunk text for failed fencing test",
+            )
+        )
+        session.commit()
+        doc_id = doc.id
+
+    # Newer worker claims and marks it failed
+    with session_factory() as session:
+        persistence = DocumentPersistenceService(session)
+        claimed = persistence.claim_document_for_recovery(
+            doc_id,
+            claim_timeout_seconds=300.0,
+            claim_token="newer_token_2",
+        )
+        assert claimed is not None
+        persistence.finalize_document_indexing(
+            doc_id,
+            IndexingStatus.FAILED,
+            claim_token="newer_token_2",
+            error="Upstream network partition",
+        )
+        session.commit()
+
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.FAILED.value
+        assert doc.indexing_error == "Upstream network partition"
+        assert doc.claimed_by is None
+
+    # Stale worker attempts to finalize to COMPLETED with old token
+    with session_factory() as session:
+        persistence = DocumentPersistenceService(session)
+        res = persistence.finalize_document_indexing(
+            doc_id,
+            IndexingStatus.COMPLETED,
+            claim_token="old_token_1",
+        )
+        assert res is None
+        session.commit()
+
+    # DB state remains unchanged (still FAILED, still original error)
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.FAILED.value
+        assert doc.indexing_error == "Upstream network partition"
+        assert doc.indexed_at is None
+        assert doc.claimed_by is None
+
+
+def test_mismatched_token_cannot_clear_or_replace_newer_claim(session_factory, seed_paper):
+    """A mismatched token cannot clear or replace a newer claim."""
+    with session_factory() as session:
+        doc = Document(
+            paper_id=seed_paper,
+            filename="mismatch_test.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="33" * 32,
+            storage_key="keys/mismatch_test.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=1,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc),
+            claimed_by="active_claim_owner",
+        )
+        session.add(doc)
+        session.commit()
+        doc_id = doc.id
+
+    with session_factory() as session:
+        persistence = DocumentPersistenceService(session)
+        # Attempt completion with bogus token
+        assert persistence.finalize_document_indexing(
+            doc_id,
+            IndexingStatus.COMPLETED,
+            claim_token="bogus_token",
+        ) is None
+
+        # Attempt failure with bogus token
+        assert persistence.finalize_document_indexing(
+            doc_id,
+            IndexingStatus.FAILED,
+            claim_token="bogus_token",
+            error="Bogus failure attempt",
+        ) is None
+        session.commit()
+
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.PROCESSING.value
+        assert doc.claimed_by == "active_claim_owner"
+        assert doc.claimed_at is not None
+        assert doc.indexing_error is None
+
+
+def test_stale_processing_claim_at_retry_limit_transitions_to_failed(session_factory, seed_paper):
+    """A stale processing claim whose retry count has reached max_attempts transitions to failed."""
+    with session_factory() as session:
+        doc = Document(
+            paper_id=seed_paper,
+            filename="exhausted_stale.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="44" * 32,
+            storage_key="keys/exhausted_stale.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=3,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="crashed_token_3",
+        )
+        session.add(doc)
+        session.flush()
+        session.add(
+            DocumentChunkRecord(
+                document_id=doc.id,
+                chunk_index=0,
+                text="Exhausted chunk text",
+            )
+        )
+        session.commit()
+        doc_id = doc.id
+
+    recovery_service = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=InMemoryVectorStore(),
+        embedding_service=DummyEmbeddingService(),
+        default_claim_timeout_seconds=300.0,
+    )
+
+    batch = recovery_service.recover_batch(batch_size=10, max_attempts=3)
+    assert batch.scanned_count == 0
+    assert batch.recovered_count == 0
+    assert batch.failed_count == 0
+
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.FAILED.value
+        assert doc.claimed_at is None
+        assert doc.claimed_by is None
+        assert doc.indexing_attempts == 3
+        assert "Recovery indexing attempts exhausted" in (doc.indexing_error or "")
+        assert "3" in (doc.indexing_error or "")
+
+
+def test_claim_below_retry_limit_can_still_be_recovered(session_factory, seed_paper):
+    """A stale processing claim below max_attempts is successfully claimed and recovered."""
+    with session_factory() as session:
+        doc = Document(
+            paper_id=seed_paper,
+            filename="below_limit.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="55" * 32,
+            storage_key="keys/below_limit.pdf",
+            indexing_status=IndexingStatus.PROCESSING.value,
+            indexing_attempts=2,
+            claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+            claimed_by="crashed_token_2",
+        )
+        session.add(doc)
+        session.flush()
+        session.add(
+            DocumentChunkRecord(
+                document_id=doc.id,
+                chunk_index=0,
+                text="Below limit chunk text",
+            )
+        )
+        session.commit()
+        doc_id = doc.id
+
+    vstore = InMemoryVectorStore()
+    recovery_service = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=vstore,
+        embedding_service=DummyEmbeddingService(),
+        default_claim_timeout_seconds=300.0,
+    )
+
+    batch = recovery_service.recover_batch(batch_size=10, max_attempts=3)
+    assert batch.scanned_count == 1
+    assert batch.recovered_count == 1
+    assert batch.failed_count == 0
+
+    with session_factory() as session:
+        doc = session.query(Document).filter_by(id=doc_id).one()
+        assert doc.indexing_status == IndexingStatus.COMPLETED.value
+        assert doc.claimed_at is None
+        assert doc.claimed_by is None
+        assert doc.indexing_attempts == 3
+        assert doc.indexed_at is not None
+        assert doc.indexing_error is None
+
+    assert vstore.count() == 1
+
+
+def test_postgresql_concurrent_workers_claim_distinct_documents_and_exhaust_safely():
+    """Verify concurrent workers on live PostgreSQL coordinate via FOR UPDATE SKIP LOCKED,
+
+    recovering eligible documents and transitioning exhausted claims without collision.
+    """
+    url = _get_postgres_test_url()
+    if not url:
+        pytest.skip(
+            "Live PostgreSQL database URL not configured. Set TEST_POSTGRES_URL or NEXORA_DATABASE_URL "
+            "to run live PostgreSQL concurrency tests."
+        )
+
+    try:
+        engine = create_engine(url, pool_size=10, max_overflow=10, pool_timeout=10)
+        with engine.connect() as conn:
+            conn.execute(select(1))
+    except Exception as exc:
+        pytest.fail(f"PostgreSQL server configured at {url} is not accessible: {exc}")
+
+    Base.metadata.create_all(engine)
+    pg_session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with pg_session_factory() as session:
+        user = User(email=f"pg_worker_exhaust_{uuid4()}@example.com")
+        session.add(user)
+        session.flush()
+        workspace = Workspace(name="PG Exhaust WS", user_id=user.id)
+        session.add(workspace)
+        session.flush()
+        col = Collection(name="PG Exhaust Col", workspace_id=workspace.id)
+        session.add(col)
+        session.flush()
+        paper = Paper(collection=col, title="PG Exhaust Paper")
+        session.add(paper)
+        session.commit()
+        paper_id = paper.id
+
+    vector_store = InMemoryVectorStore()
+    embedder = DummyEmbeddingService()
+
+    eligible_doc_ids = []
+    exhausted_doc_ids = []
+
+    # 1. Seed 2 pending documents (attempts = 0)
+    with pg_session_factory() as session:
+        for i in range(2):
+            doc = Document(
+                paper_id=paper_id,
+                filename=f"pending_{i}.pdf",
+                mime_type="application/pdf",
+                file_size=1024,
+                checksum=f"0a{i:02x}" * 16,
+                storage_key=f"keys/pending_{i}.pdf",
+                indexing_status=IndexingStatus.PENDING.value,
+                indexing_attempts=0,
+            )
+            session.add(doc)
+            session.flush()
+            session.add(DocumentChunkRecord(document_id=doc.id, chunk_index=0, text=f"Pending {i}"))
+            eligible_doc_ids.append(doc.id)
+        session.commit()
+
+    # 2. Seed 2 failed documents (attempts = 1)
+    with pg_session_factory() as session:
+        for i in range(2):
+            doc = Document(
+                paper_id=paper_id,
+                filename=f"failed_{i}.pdf",
+                mime_type="application/pdf",
+                file_size=1024,
+                checksum=f"0b{i:02x}" * 16,
+                storage_key=f"keys/failed_{i}.pdf",
+                indexing_status=IndexingStatus.FAILED.value,
+                indexing_attempts=1,
+                indexing_error="Previous network hiccup",
+            )
+            session.add(doc)
+            session.flush()
+            session.add(DocumentChunkRecord(document_id=doc.id, chunk_index=0, text=f"Failed {i}"))
+            eligible_doc_ids.append(doc.id)
+        session.commit()
+
+    # 3. Seed 2 stale processing documents below retry limit (attempts = 2 < 3)
+    with pg_session_factory() as session:
+        for i in range(2):
+            doc = Document(
+                paper_id=paper_id,
+                filename=f"stale_below_{i}.pdf",
+                mime_type="application/pdf",
+                file_size=1024,
+                checksum=f"0c{i:02x}" * 16,
+                storage_key=f"keys/stale_below_{i}.pdf",
+                indexing_status=IndexingStatus.PROCESSING.value,
+                indexing_attempts=2,
+                claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+                claimed_by=f"stale_worker_{i}",
+            )
+            session.add(doc)
+            session.flush()
+            session.add(DocumentChunkRecord(document_id=doc.id, chunk_index=0, text=f"Stale below {i}"))
+            eligible_doc_ids.append(doc.id)
+        session.commit()
+
+    # 4. Seed 2 stale processing documents AT retry limit (attempts = 3 >= 3)
+    with pg_session_factory() as session:
+        for i in range(2):
+            doc = Document(
+                paper_id=paper_id,
+                filename=f"stale_exhaust_{i}.pdf",
+                mime_type="application/pdf",
+                file_size=1024,
+                checksum=f"0d{i:02x}" * 16,
+                storage_key=f"keys/stale_exhaust_{i}.pdf",
+                indexing_status=IndexingStatus.PROCESSING.value,
+                indexing_attempts=3,
+                claimed_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=600),
+                claimed_by=f"dead_worker_{i}",
+            )
+            session.add(doc)
+            session.flush()
+            session.add(DocumentChunkRecord(document_id=doc.id, chunk_index=0, text=f"Stale exhaust {i}"))
+            exhausted_doc_ids.append(doc.id)
+        session.commit()
+
+    worker_1 = DocumentRecoveryService(
+        session_factory=pg_session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+    worker_2 = DocumentRecoveryService(
+        session_factory=pg_session_factory,
+        vector_store=vector_store,
+        embedding_service=embedder,
+        default_claim_timeout_seconds=300.0,
+    )
+
+    def _run_worker(w):
+        return w.recover_batch(batch_size=3, max_attempts=3)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(_run_worker, worker_1)
+        f2 = executor.submit(_run_worker, worker_2)
+        res1 = f1.result()
+        res2 = f2.result()
+
+    total_recovered = res1.recovered_count + res2.recovered_count
+    if total_recovered < 6:
+        pass2 = worker_1.recover_batch(batch_size=6, max_attempts=3)
+        total_recovered += pass2.recovered_count
+
+    assert total_recovered == 6
+    assert res1.failed_count == 0
+    assert res2.failed_count == 0
+
+    with pg_session_factory() as session:
+        for did in eligible_doc_ids:
+            doc = session.query(Document).filter_by(id=did).one()
+            assert doc.indexing_status == IndexingStatus.COMPLETED.value
+            assert doc.indexed_at is not None
+            assert doc.indexing_error is None
+            assert doc.claimed_at is None
+            assert doc.claimed_by is None
+            assert doc.indexing_attempts <= 3
+
+        for did in exhausted_doc_ids:
+            doc = session.query(Document).filter_by(id=did).one()
+            assert doc.indexing_status == IndexingStatus.FAILED.value
+            assert doc.claimed_at is None
+            assert doc.claimed_by is None
+            assert doc.indexing_attempts == 3
+            assert "Recovery indexing attempts exhausted" in (doc.indexing_error or "")
+
+    assert vector_store.count() == 6
+

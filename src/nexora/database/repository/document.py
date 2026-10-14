@@ -158,6 +158,55 @@ class DocumentRepository(BaseRepository[Document]):
 
         return self._session.scalars(stmt).all()
 
+    def fail_exhausted_claims(
+        self,
+        *,
+        max_attempts: int,
+        claim_timeout_seconds: float = 300.0,
+        limit: int | None = None,
+    ) -> Sequence[Document]:
+        """Transition stale processing documents that reached max_attempts to failed.
+
+        Clears claim fields and records a durable error without incrementing attempts.
+        Uses FOR UPDATE SKIP LOCKED on PostgreSQL so concurrent workers coordinate race-safely.
+        """
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be a positive integer")
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stale_cutoff = now - datetime.timedelta(seconds=claim_timeout_seconds)
+
+        stmt = (
+            select(Document)
+            .where(
+                Document.indexing_status == IndexingStatus.PROCESSING.value,
+                or_(
+                    Document.claimed_at.is_(None),
+                    Document.claimed_at <= stale_cutoff,
+                ),
+                Document.indexing_attempts >= max_attempts,
+            )
+            .order_by(Document.created_at, Document.id)
+            .with_for_update(skip_locked=True)
+        )
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError("limit must be a positive integer")
+            stmt = stmt.limit(limit)
+
+        exhausted_docs = list(self._session.scalars(stmt).all())
+        for doc in exhausted_docs:
+            doc.indexing_status = IndexingStatus.FAILED.value
+            doc.indexing_error = (
+                f"Recovery indexing attempts exhausted (max {max_attempts} attempts reached)"
+            )
+            doc.claimed_at = None
+            doc.claimed_by = None
+
+        if exhausted_docs:
+            self._session.flush()
+        return exhausted_docs
+
     def claim_unindexed(
         self,
         limit: int,
@@ -165,12 +214,14 @@ class DocumentRepository(BaseRepository[Document]):
         max_attempts: int | None = None,
         claim_timeout_seconds: float = 300.0,
         claim_token: str | None = None,
+        include_failed: bool = True,
     ) -> Sequence[Document]:
         """Claim a batch of unindexed documents with row-level locking (SKIP LOCKED).
 
-        Atomically selects unindexed or expired processing documents, marks them as
+        Atomically transitions exhausted stale processing documents to failed, then
+        selects unindexed or expired processing documents under max_attempts, marks them as
         'processing', sets claimed_at and claimed_by, and increments indexing_attempts.
-        Uses FOR UPDATE SKIP LOCKED on PostgreSQL so independent workers never collide.
+        Uses FOR UPDATE SKIP LOCKED on PostgreSQL so independent workers coordinate safely.
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
@@ -178,11 +229,19 @@ class DocumentRepository(BaseRepository[Document]):
         now = datetime.datetime.now(datetime.timezone.utc)
         stale_cutoff = now - datetime.timedelta(seconds=claim_timeout_seconds)
 
+        if max_attempts is not None:
+            self.fail_exhausted_claims(
+                max_attempts=max_attempts,
+                claim_timeout_seconds=claim_timeout_seconds,
+                limit=limit,
+            )
+
+        status_list = [IndexingStatus.PENDING.value]
+        if include_failed:
+            status_list.append(IndexingStatus.FAILED.value)
+
         status_filter = or_(
-            Document.indexing_status.in_([
-                IndexingStatus.PENDING.value,
-                IndexingStatus.FAILED.value,
-            ]),
+            Document.indexing_status.in_(status_list),
             and_(
                 Document.indexing_status == IndexingStatus.PROCESSING.value,
                 or_(
@@ -216,13 +275,14 @@ class DocumentRepository(BaseRepository[Document]):
         self,
         id: UUID,
         *,
+        max_attempts: int | None = None,
         claim_timeout_seconds: float = 300.0,
         claim_token: str | None = None,
     ) -> Document | None:
         """Atomically claim a single document for recovery.
 
         Returns None if not found, already completed, or currently claimed by an
-        active unexpired worker.
+        active unexpired worker, or if max_attempts has been reached.
         """
         now = datetime.datetime.now(datetime.timezone.utc)
         stale_cutoff = now - datetime.timedelta(seconds=claim_timeout_seconds)
@@ -242,6 +302,17 @@ class DocumentRepository(BaseRepository[Document]):
                 if claimed_at > stale_cutoff:
                     return None
 
+        if max_attempts is not None and doc.indexing_attempts >= max_attempts:
+            if doc.indexing_status == IndexingStatus.PROCESSING.value:
+                doc.indexing_status = IndexingStatus.FAILED.value
+                doc.indexing_error = (
+                    f"Recovery indexing attempts exhausted (max {max_attempts} attempts reached)"
+                )
+                doc.claimed_at = None
+                doc.claimed_by = None
+                self._session.flush()
+            return None
+
         doc.indexing_status = IndexingStatus.PROCESSING.value
         doc.claimed_at = now
         doc.claimed_by = claim_token
@@ -260,21 +331,22 @@ class DocumentRepository(BaseRepository[Document]):
     ) -> Document | None:
         """Finalize indexing outcome, clearing the claim.
 
-        Guards against zombie workers overwriting state if another worker completed it.
+        When claim_token is supplied, finalization is strictly guarded: only allowed if
+        claim_token matches the document's active claim (doc.claimed_by == claim_token and
+        doc.indexing_status == 'processing').
+        Returns None if the claim was lost or superseded by another worker.
         """
         stmt = select(Document).where(Document.id == id).with_for_update()
         doc = self._session.scalars(stmt).one_or_none()
         if doc is None:
             return None
 
-        # If claim_token is set and doesn't match and doc is already COMPLETED, don't overwrite
-        if (
-            claim_token is not None
-            and doc.claimed_by is not None
-            and doc.claimed_by != claim_token
-            and doc.indexing_status == IndexingStatus.COMPLETED.value
-        ):
-            return doc
+        if claim_token is not None:
+            if (
+                doc.claimed_by != claim_token
+                or doc.indexing_status != IndexingStatus.PROCESSING.value
+            ):
+                return None
 
         status_val = status.value if isinstance(status, IndexingStatus) else status
         doc.indexing_status = status_val

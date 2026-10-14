@@ -145,12 +145,27 @@ class DocumentRecoveryService:
         if chunks_count == 0:
             with database_transaction(self._session_factory) as session:
                 persistence = DocumentPersistenceService(session)
-                persistence.finalize_document_indexing(
+                finalized = persistence.finalize_document_indexing(
                     doc_id,
                     IndexingStatus.COMPLETED,
                     claim_token=claim_token,
                     error=None,
                     indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+            if finalized is None:
+                logger.warning(
+                    "Finalization rejected for document %s: claim token %s lost or superseded",
+                    doc_id,
+                    claim_token,
+                )
+                return RecoveryItemResult(
+                    document_id=doc_id,
+                    paper_id=paper_id,
+                    status=IndexingStatus.FAILED,
+                    chunks_count=0,
+                    indexed_chunks_count=0,
+                    error="Recovery claim lost or superseded by another worker",
+                    attempts=attempts,
                 )
             return RecoveryItemResult(
                 document_id=doc_id,
@@ -187,12 +202,28 @@ class DocumentRecoveryService:
             # 3. Finalize in short write transaction
             with database_transaction(self._session_factory) as session:
                 persistence = DocumentPersistenceService(session)
-                persistence.finalize_document_indexing(
+                finalized = persistence.finalize_document_indexing(
                     doc_id,
                     IndexingStatus.COMPLETED,
                     claim_token=claim_token,
                     error=None,
                     indexed_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+
+            if finalized is None:
+                logger.warning(
+                    "Finalization rejected for document %s: claim token %s lost or superseded",
+                    doc_id,
+                    claim_token,
+                )
+                return RecoveryItemResult(
+                    document_id=doc_id,
+                    paper_id=paper_id,
+                    status=IndexingStatus.FAILED,
+                    chunks_count=chunks_count,
+                    indexed_chunks_count=0,
+                    error="Recovery claim lost or superseded by another worker",
+                    attempts=attempts,
                 )
 
             return RecoveryItemResult(
@@ -228,6 +259,7 @@ class DocumentRecoveryService:
         self,
         document_id: UUID,
         *,
+        max_attempts: int | None = None,
         claim_timeout_seconds: float | None = None,
     ) -> RecoveryItemResult:
         """Recover vector indexing for a specific document by its ID."""
@@ -269,19 +301,31 @@ class DocumentRecoveryService:
 
                 claimed = persistence.claim_document_for_recovery(
                     document_id,
+                    max_attempts=max_attempts,
                     claim_timeout_seconds=timeout,
                     claim_token=claim_token,
                 )
                 if claimed is None:
-                    # Document is actively claimed by another unexpired worker
+                    refreshed = persistence.get_document(document_id)
+                    curr_status = (
+                        IndexingStatus(refreshed.indexing_status)
+                        if refreshed
+                        else IndexingStatus.FAILED
+                    )
+                    error_msg = (
+                        refreshed.indexing_error
+                        if refreshed and refreshed.indexing_error
+                        else "Document is actively claimed by another worker"
+                    )
+                    curr_attempts = refreshed.indexing_attempts if refreshed else doc.indexing_attempts
                     return RecoveryItemResult(
                         document_id=doc.id,
                         paper_id=doc.paper_id,
-                        status=IndexingStatus(doc.indexing_status),
+                        status=curr_status,
                         chunks_count=0,
                         indexed_chunks_count=0,
-                        error="Document is actively claimed by another worker",
-                        attempts=doc.indexing_attempts,
+                        error=error_msg,
+                        attempts=curr_attempts,
                     )
                 attempts = claimed.indexing_attempts
 
@@ -317,6 +361,7 @@ class DocumentRecoveryService:
                 max_attempts=max_attempts,
                 claim_timeout_seconds=timeout,
                 claim_token=claim_token,
+                include_failed=include_failed,
             )
             targets = [(d.id, d.paper_id, d.indexing_attempts) for d in claimed_docs]
 
