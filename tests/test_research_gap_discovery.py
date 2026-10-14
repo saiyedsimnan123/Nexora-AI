@@ -69,6 +69,12 @@ from nexora.research.analysis_service import PaperAnalysisService
 from nexora.research.gap import GapCategory, ResearchGap, ResearchGapReport
 from nexora.research.gap_prompt import ResearchGapPromptBuilder
 from nexora.research.gap_service import ResearchGapService
+from nexora.research.verification import (
+    ClaimToEvidenceVerifier,
+    ClaimVerification,
+    ClaimVerificationStatus,
+    RawClaim,
+)
 from nexora.retrieval.evidence import EvidenceContext, EvidenceItem
 from nexora.retrieval.in_memory import InMemoryVectorStore
 from nexora.retrieval.models import VectorRecord
@@ -749,3 +755,641 @@ def test_backward_compatibility(in_memory_db):
     resp_verify = client.post("/api/v1/research/verify", json={"query": "test query"})
     assert resp_verify.status_code == 200
     assert resp_verify.json()["verification"]["overall_verdict"] == "supported"
+
+
+# ===========================================================================
+# Milestone 12C-27: Evidence Provenance & Verification Hardening Tests
+# ===========================================================================
+
+
+def test_provenance_reported_status_without_evidence_labels_downgraded_and_excluded(in_memory_db):
+    """Scenario 1: A 'reported' limitation with no citation labels is downgraded to uncertain
+    and excluded from verified documented gaps with an explicit limitation note.
+    """
+    p1 = in_memory_db["paper1_id"]
+    p2 = in_memory_db["paper2_id"]
+
+    analysis_no_citations = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Attention quadratic scaling without any cited proof.", "status": "reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported in the provided evidence.", "status": "not_reported", "evidence_labels": []},
+    })
+    analysis_p2 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Not reported in the provided evidence.", "status": "not_reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported in the provided evidence.", "status": "not_reported", "evidence_labels": []},
+    })
+    gap_synth = json.dumps({
+        "inferred_gaps": [],
+        "summary": "Synthesis summary",
+        "limitations": [],
+    })
+
+    mock_llm = ControllableLLMProvider(responses=[analysis_no_citations, analysis_p2, gap_synth])
+    gap_service = ResearchGapService(LLMService(mock_llm), session_factory=in_memory_db["session_factory"])
+
+    report = gap_service.discover_gaps_for_papers([p1, p2])
+    # The limitation from p1 had no citation labels -> must NOT be in documented_gaps
+    assert len(report.documented_gaps) == 0
+    # Provenance note must be recorded in limitations
+    assert any("uncertain/unverified" in lim or "without citation labels" in lim for lim in report.limitations)
+
+
+def test_provenance_unsupplied_citation_labels_downgraded_and_excluded(in_memory_db):
+    """Scenario 2: Citations pointing to unsupplied labels (e.g. [E99]) are filtered out,
+    downgrading the field to uncertain and excluding it from documented gaps.
+    """
+    p1 = in_memory_db["paper1_id"]
+    p2 = in_memory_db["paper2_id"]
+
+    analysis_fake_citation = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Attention scaling bottleneck.", "status": "reported", "evidence_labels": ["[E99]"]},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    analysis_p2 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    gap_synth = json.dumps({"inferred_gaps": [], "summary": "Synthesis", "limitations": []})
+
+    mock_llm = ControllableLLMProvider(responses=[analysis_fake_citation, analysis_p2, gap_synth])
+    gap_service = ResearchGapService(LLMService(mock_llm), session_factory=in_memory_db["session_factory"])
+
+    report = gap_service.discover_gaps_for_papers([p1, p2])
+    assert len(report.documented_gaps) == 0
+    assert any("uncertain" in lim or "did not resolve" in lim for lim in report.limitations)
+
+
+def test_provenance_cross_paper_citation_rejected():
+    """Scenario 3: A citation resolving to an evidence chunk belonging to a different paper
+    is rejected under paper scoping.
+    """
+    from nexora.research.analysis_service import _parse_field_dict
+
+    item_b = EvidenceItem(
+        document_id="doc-b",
+        chunk_id="chk-b",
+        text="Evidence from paper B.",
+        score=1.0,
+        metadata={"paper_id": "paper-B"},
+        position=0,
+    )
+    ctx = EvidenceContext(query="test", items=[item_b])
+
+    raw_dict = {
+        "summary": "Limitation in paper A",
+        "status": "reported",
+        "evidence_labels": ["[E1]"],
+    }
+    # Expected paper is 'paper-A', but [E1] belongs to 'paper-B'
+    field = _parse_field_dict(raw_dict, ctx, filter_citations=True, expected_paper_id="paper-A")
+    assert field.evidence_labels == []
+    assert len(field.sources) == 0
+    assert field.status == "uncertain"
+
+
+def test_semantic_verification_failure_excludes_documented_gap(in_memory_db):
+    """Scenario 4: When verifier reports a claim is insufficient or contradicted,
+    the documented gap is excluded with an explicit provenance exclusion note.
+    """
+    p1 = in_memory_db["paper1_id"]
+    p2 = in_memory_db["paper2_id"]
+
+    analysis_p1 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Extrapolated claim not supported by text.", "status": "reported", "evidence_labels": ["[E1]"]},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    analysis_p2 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    gap_synth = json.dumps({"inferred_gaps": [], "summary": "Synthesis", "limitations": []})
+
+    class FakeRefutingVerifier:
+        def verify_claim(self, claim: RawClaim, context: EvidenceContext) -> ClaimVerification:
+            return ClaimVerification(
+                claim_text=claim.claim_text,
+                status=ClaimVerificationStatus.CONTRADICTED.value,
+                reasoning="The cited text explicitly states the opposite of the claim.",
+                cited_labels=claim.cited_labels,
+                sources=[],
+                unresolved_labels=[],
+            )
+
+    mock_llm = ControllableLLMProvider(responses=[analysis_p1, analysis_p2, gap_synth])
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        session_factory=in_memory_db["session_factory"],
+        verifier=FakeRefutingVerifier(),
+    )
+
+    report = gap_service.discover_gaps_for_papers([p1, p2])
+    assert len(report.documented_gaps) == 0
+    assert any("contradicted" in lim for lim in report.limitations)
+
+
+def test_semantic_verification_success_accepts_documented_gap_confidence_1(in_memory_db):
+    """Scenario 5: Genuine author-documented gap with valid source chunks and verified
+    entailment is accepted with confidence 1.0.
+    """
+    p1 = in_memory_db["paper1_id"]
+    p2 = in_memory_db["paper2_id"]
+
+    analysis_p1 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "A key limitation is the quadratic memory complexity.", "status": "reported", "evidence_labels": ["[E1]"]},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    analysis_p2 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    gap_synth = json.dumps({"inferred_gaps": [], "summary": "Synthesis", "limitations": []})
+
+    class FakeSupportingVerifier:
+        def verify_claim(self, claim: RawClaim, context: EvidenceContext) -> ClaimVerification:
+            return ClaimVerification(
+                claim_text=claim.claim_text,
+                status=ClaimVerificationStatus.SUPPORTED.value,
+                reasoning="Cited chunk explicitly mentions quadratic memory complexity.",
+                cited_labels=claim.cited_labels,
+                sources=[],
+                unresolved_labels=[],
+            )
+
+    mock_llm = ControllableLLMProvider(responses=[analysis_p1, analysis_p2, gap_synth])
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        session_factory=in_memory_db["session_factory"],
+        verifier=FakeSupportingVerifier(),
+    )
+
+    report = gap_service.discover_gaps_for_papers([p1, p2])
+    assert len(report.documented_gaps) == 1
+    doc_gap = report.documented_gaps[0]
+    assert doc_gap.confidence == 1.0
+    assert doc_gap.is_documented is True
+    assert len(doc_gap.supporting_sources) >= 1
+    assert doc_gap.supporting_sources[0]["label"] == "[E1]"
+
+
+def test_inferred_candidate_gap_confidence_bounds():
+    """Scenario 6: Inferred candidate gaps must have confidence strictly < 1.0."""
+    valid_source = {
+        "label": "[E1]",
+        "document_id": "doc-1",
+        "chunk_id": "chk-1",
+        "text": "Evidence snippet.",
+    }
+
+    with pytest.raises(ValueError, match="Inferred candidate gaps cannot have confidence 1.0"):
+        ResearchGap(
+            gap_id="gap-inf-1",
+            category=GapCategory.INFERRED.value,
+            title="Candidate Gap",
+            description="Hypothesized gap across papers.",
+            reasoning="Comparative reasoning.",
+            source_paper_ids=["p1", "p2"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[valid_source],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=["Hypothesis requires testing."],
+        )
+
+    with pytest.raises(ValueError, match="confidence must be a finite number between 0.0 and 1.0"):
+        ResearchGap(
+            gap_id="gap-inf-1",
+            category=GapCategory.INFERRED.value,
+            title="Candidate Gap",
+            description="Hypothesized gap across papers.",
+            reasoning="Comparative reasoning.",
+            source_paper_ids=["p1", "p2"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[valid_source],
+            contradicting_sources=[],
+            confidence=1.2,
+            limitations=["Hypothesis requires testing."],
+        )
+
+    gap = ResearchGap(
+        gap_id="gap-inf-1",
+        category=GapCategory.INFERRED.value,
+        title="Candidate Gap",
+        description="Hypothesized gap across papers.",
+        reasoning="Comparative reasoning.",
+        source_paper_ids=["p1", "p2"],
+        evidence_labels=["[E1]"],
+        supporting_sources=[valid_source],
+        contradicting_sources=[],
+        confidence=0.85,
+        limitations=["Hypothesis requires testing."],
+    )
+    assert gap.confidence == 0.85
+
+
+def test_documented_gap_without_sources_cannot_have_confidence_1():
+    """Scenario 7: Documented gap with confidence 1.0 requires verified supporting sources."""
+    with pytest.raises(ValueError, match="Documented gap with confidence 1.0 must have at least one supporting source chunk"):
+        ResearchGap(
+            gap_id="gap-doc-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Documented Gap",
+            description="Author limitation.",
+            reasoning="Direct statement.",
+            source_paper_ids=["p1"],
+            evidence_labels=[],
+            supporting_sources=[],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+
+def test_research_gap_immutability_attribute_mutation():
+    """Scenario 8: ResearchGap and ResearchGapReport raise AttributeError on attribute mutation or deletion."""
+    valid_source = {
+        "label": "[E1]",
+        "document_id": "doc-1",
+        "chunk_id": "chk-1",
+        "text": "Evidence text",
+    }
+    gap = ResearchGap(
+        gap_id="gap-1",
+        category=GapCategory.DOCUMENTED.value,
+        title="Original Title",
+        description="Original Description",
+        reasoning="Original Reasoning",
+        source_paper_ids=["p1"],
+        evidence_labels=["[E1]"],
+        supporting_sources=[valid_source],
+        contradicting_sources=[],
+        confidence=1.0,
+        limitations=["Author-reported."],
+    )
+
+    with pytest.raises(AttributeError, match="Cannot modify immutable ResearchGap"):
+        gap.title = "Hacked Title"
+
+    with pytest.raises(AttributeError, match="Cannot modify immutable ResearchGap"):
+        gap.confidence = 0.5
+
+    with pytest.raises(AttributeError, match="Cannot delete attribute 'title'"):
+        del gap.title
+
+    report = ResearchGapReport(
+        paper_ids=["p1"],
+        collection_id=None,
+        documented_gaps=[gap],
+        inferred_gaps=[],
+        total_gaps_count=1,
+        summary="Summary",
+        limitations=[],
+        model="mock-model",
+    )
+
+    with pytest.raises(AttributeError, match="Cannot modify immutable ResearchGapReport"):
+        report.summary = "Hacked Summary"
+
+    with pytest.raises(AttributeError, match="Cannot delete attribute 'summary'"):
+        del report.summary
+
+
+def test_research_gap_immutability_shared_reference_defense():
+    """Scenario 9: Mutating shared references before or after instantiation does NOT affect ResearchGap or ResearchGapReport."""
+    src_list = [{
+        "label": "[E1]",
+        "document_id": "doc-1",
+        "chunk_id": "chk-1",
+        "text": "Original text",
+    }]
+    pids = ["p1"]
+    labels = ["[E1]"]
+    lims = ["Limitation 1"]
+
+    gap = ResearchGap(
+        gap_id="gap-1",
+        category=GapCategory.DOCUMENTED.value,
+        title="Title",
+        description="Description",
+        reasoning="Reasoning",
+        source_paper_ids=pids,
+        evidence_labels=labels,
+        supporting_sources=src_list,
+        contradicting_sources=[],
+        confidence=1.0,
+        limitations=lims,
+    )
+
+    # 1. Mutate input lists/dicts after passing
+    pids.append("p2")
+    labels.append("[E2]")
+    src_list[0]["text"] = "HACKED"
+    src_list.append({"label": "[E2]", "document_id": "d2", "chunk_id": "c2", "text": "extra"})
+    lims.append("Limitation 2")
+
+    assert gap.source_paper_ids == ["p1"]
+    assert gap.evidence_labels == ["[E1]"]
+    assert gap.supporting_sources[0]["text"] == "Original text"
+    assert len(gap.supporting_sources) == 1
+    assert gap.limitations == ["Limitation 1"]
+
+    # 2. Mutate returned property lists/dicts
+    ret_sources = gap.supporting_sources
+    ret_sources[0]["text"] = "MUTATED AFTER GETTER"
+    ret_sources.append({"label": "[E99]", "document_id": "d99", "chunk_id": "c99", "text": "injected"})
+
+    assert gap.supporting_sources[0]["text"] == "Original text"
+    assert len(gap.supporting_sources) == 1
+
+    ret_pids = gap.source_paper_ids
+    ret_pids.append("p99")
+    assert gap.source_paper_ids == ["p1"]
+
+    # 3. Report defensive copies
+    gaps_list = [gap]
+    report = ResearchGapReport(
+        paper_ids=["p1"],
+        collection_id=None,
+        documented_gaps=gaps_list,
+        inferred_gaps=[],
+        total_gaps_count=1,
+        summary="Summary",
+        limitations=["Lim 1"],
+        model="mock",
+        usage={"total_tokens": 100},
+        raw={"finish_reason": "stop"},
+    )
+    gaps_list.clear()
+    assert len(report.documented_gaps) == 1
+
+    report_pids = report.paper_ids
+    report_pids.append("p_injected")
+    assert report.paper_ids == ["p1"]
+
+    report_usage = report.usage
+    report_usage["total_tokens"] = 99999
+    assert report.usage["total_tokens"] == 100
+
+    report_raw = report.raw
+    report_raw["finish_reason"] = "corrupted"
+    assert report.raw["finish_reason"] == "stop"
+
+
+def test_source_record_metadata_validation():
+    """Scenario 10: Validates required metadata fields in evidence sources."""
+    # Missing 'label'
+    with pytest.raises(ValueError, match="is missing required key 'label'"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{"document_id": "d1", "chunk_id": "c1", "text": "text"}],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+    # Empty string 'chunk_id'
+    with pytest.raises(ValueError, match=r"\['chunk_id'\] must be a non-empty string"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{"label": "[E1]", "document_id": "d1", "chunk_id": "   ", "text": "text"}],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+    # Non-string 'text'
+    with pytest.raises(TypeError, match=r"\['text'\] must be a string"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{"label": "[E1]", "document_id": "d1", "chunk_id": "c1", "text": 12345}],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+    # Non-dict item
+    with pytest.raises(TypeError, match="must be a dict"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=["not a dict"],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+
+def test_secret_keys_detection_in_sources_raw_and_usage():
+    """Scenario 11: Credential-like keys inside source records, raw, or usage raise ValueError."""
+    # Secret in supporting sources
+    with pytest.raises(ValueError, match="raw must not contain credential-like keys"):
+        ResearchGap(
+            gap_id="gap-1",
+            category=GapCategory.DOCUMENTED.value,
+            title="Title",
+            description="Desc",
+            reasoning="Reasoning",
+            source_paper_ids=["p1"],
+            evidence_labels=["[E1]"],
+            supporting_sources=[{
+                "label": "[E1]",
+                "document_id": "d1",
+                "chunk_id": "c1",
+                "text": "text",
+                "api_key": "sk-12345",
+            }],
+            contradicting_sources=[],
+            confidence=1.0,
+            limitations=[],
+        )
+
+    valid_gap = ResearchGap(
+        gap_id="gap-1",
+        category=GapCategory.DOCUMENTED.value,
+        title="Title",
+        description="Desc",
+        reasoning="Reasoning",
+        source_paper_ids=["p1"],
+        evidence_labels=["[E1]"],
+        supporting_sources=[{
+            "label": "[E1]",
+            "document_id": "d1",
+            "chunk_id": "c1",
+            "text": "text",
+        }],
+        contradicting_sources=[],
+        confidence=1.0,
+        limitations=[],
+    )
+
+    # Secret in report.raw
+    with pytest.raises(ValueError, match="raw must not contain credential-like keys"):
+        ResearchGapReport(
+            paper_ids=["p1"],
+            collection_id=None,
+            documented_gaps=[valid_gap],
+            inferred_gaps=[],
+            total_gaps_count=1,
+            summary="Summary",
+            limitations=[],
+            model="mock",
+            raw={"secret_token": "shhh"},
+        )
+
+    # Secret in report.usage
+    with pytest.raises(ValueError, match="raw must not contain credential-like keys"):
+        ResearchGapReport(
+            paper_ids=["p1"],
+            collection_id=None,
+            documented_gaps=[valid_gap],
+            inferred_gaps=[],
+            total_gaps_count=1,
+            summary="Summary",
+            limitations=[],
+            model="mock",
+            usage={"password": 123},
+        )
+
+
+def test_inferred_candidate_gap_cross_paper_filtering_and_verification(in_memory_db):
+    """Scenario 12: Inferred candidate gaps strip foreign paper citations and handle verifier feedback."""
+    p1 = in_memory_db["paper1_id"]
+    p2 = in_memory_db["paper2_id"]
+
+    analysis_p1 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Limitation in attention.", "status": "reported", "evidence_labels": ["[E1]"]},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+    analysis_p2 = json.dumps({
+        "problem_and_objectives": {"summary": "Objective", "status": "reported", "evidence_labels": ["[E1]"]},
+        "methodology_and_algorithms": {"summary": "Algorithm", "status": "reported", "evidence_labels": ["[E1]"]},
+        "models_and_datasets": {"summary": "Dataset", "status": "reported", "evidence_labels": ["[E1]"]},
+        "experiments_and_metrics": {"summary": "Metrics", "status": "reported", "evidence_labels": ["[E1]"]},
+        "results_and_findings": {"summary": "Findings", "status": "reported", "evidence_labels": ["[E1]"]},
+        "limitations": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+        "future_work": {"summary": "Not reported.", "status": "not_reported", "evidence_labels": []},
+    })
+
+    gap_synth = json.dumps({
+        "inferred_gaps": [{
+            "title": "Cross-paper scaling gap",
+            "description": "Quadratic memory bottleneck across distributed architectures.",
+            "reasoning": "Synthesized from attention analysis.",
+            "source_paper_ids": [p1, p2, "00000000-0000-0000-0000-000000000099"],
+            "evidence_labels": ["[E1]"],
+            "contradicting_evidence_labels": ["[E3]"],
+            "confidence": 1.0,
+            "limitations": [],
+        }],
+        "summary": "Synthesis summary",
+        "limitations": [],
+    })
+
+    class ContradictionVerifier:
+        def verify_claim(self, claim: RawClaim, context: EvidenceContext) -> ClaimVerification:
+            if "Cross-paper" in claim.claim_text:
+                return ClaimVerification(
+                    claim_text=claim.claim_text,
+                    status=ClaimVerificationStatus.CONTRADICTED.value,
+                    reasoning="FlashAttention resolves this quadratic memory limitation.",
+                    cited_labels=claim.cited_labels,
+                    sources=[{
+                        "label": "[E3]",
+                        "document_id": "doc-flash",
+                        "chunk_id": "chk-flash",
+                        "text": "FlashAttention uses tiling to prevent quadratic HBM bottleneck.",
+                    }],
+                    unresolved_labels=[],
+                )
+            return ClaimVerification(
+                claim_text=claim.claim_text,
+                status=ClaimVerificationStatus.SUPPORTED.value,
+                reasoning="Supported.",
+                cited_labels=claim.cited_labels,
+                sources=[],
+                unresolved_labels=[],
+            )
+
+    mock_llm = ControllableLLMProvider(responses=[analysis_p1, analysis_p2, gap_synth])
+    gap_service = ResearchGapService(
+        LLMService(mock_llm),
+        session_factory=in_memory_db["session_factory"],
+        verifier=ContradictionVerifier(),
+    )
+
+    report = gap_service.discover_gaps_for_papers([p1, p2])
+    assert len(report.inferred_gaps) == 1
+    inf_gap = report.inferred_gaps[0]
+    # Confidence must be bounded strictly < 1.0
+    assert inf_gap.confidence < 1.0
+    # Source paper IDs must have stripped unknown foreign paper ID
+    assert "00000000-0000-0000-0000-000000000099" not in inf_gap.source_paper_ids
+    # Contradicting source from verifier must be recorded
+    assert inf_gap.has_contradictions is True
+

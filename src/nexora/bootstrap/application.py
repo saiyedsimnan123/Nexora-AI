@@ -249,6 +249,7 @@ def build_gap_service(
     vector_store: VectorStore | None = None,
     prompt_builder: Any = None,
     max_evidence_characters: int | None = None,
+    verifier: Any = None,
 ) -> Any:
     """Assemble ResearchGapService using settings and injected dependencies."""
     from nexora.research.gap_service import ResearchGapService
@@ -281,6 +282,7 @@ def build_gap_service(
         vector_store=vector_store,
         prompt_builder=prompt_builder,
         max_evidence_characters=max_chars,
+        verifier=verifier,
     )
 
 
@@ -362,6 +364,7 @@ def build_http_app(
                 llm_provider=llm_provider,
                 session_factory=session_factory,
                 vector_store=vector_store,
+                verifier=verifier,
             )
 
     return create_app(

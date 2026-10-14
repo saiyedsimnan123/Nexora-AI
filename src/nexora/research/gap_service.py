@@ -1,10 +1,13 @@
-"""Evidence-backed research gap discovery service (Milestone 12C-26).
+"""Evidence-backed research gap discovery service (Milestone 12C-26 & 12C-27).
 
-Coordinates:
+Hardened provenance and verification:
 - Structured analysis of individual papers to extract author-documented limitations and future work.
-- Cross-paper LLM synthesis to infer candidate hypotheses across contrasting methodologies and unexamined trade-offs.
-- Traceable citation linking to concrete evidence chunks.
-- Contradiction / qualification detection when one paper resolves another paper's limitation.
+- Strict provenance checks: 'reported' status alone does not qualify without valid source chunks.
+- Validates citation labels against actual supplied chunks from the expected paper.
+- Semantic proof verification: checks whether cited evidence genuinely supports the claim.
+- Conflicting and qualifying evidence detection and preservation.
+- Inferred candidate gap synthesis bounded strictly < 1.0 confidence with comparative reasoning.
+- Safe rejection / exclusion of cross-paper, unsupplied, or malformed citations.
 - Strict zero-hallucination guarantees and empty evidence short-circuits.
 """
 
@@ -26,6 +29,7 @@ from nexora.research.analysis import StructuredPaperAnalysis
 from nexora.research.analysis_service import PaperAnalysisService, _clean_json_text
 from nexora.research.gap import GapCategory, ResearchGap, ResearchGapReport
 from nexora.research.gap_prompt import ResearchGapPromptBuilder
+from nexora.research.verification import RawClaim
 from nexora.retrieval.evidence import EvidenceContext, EvidenceItem
 
 
@@ -49,6 +53,7 @@ class ResearchGapService:
         llm_service: Any,
         *,
         paper_analysis_service: PaperAnalysisService | None = None,
+        verifier: Any = None,
         session_factory: Any = None,
         vector_store: Any = None,
         prompt_builder: ResearchGapPromptBuilder | None = None,
@@ -58,6 +63,7 @@ class ResearchGapService:
         if not callable(getattr(llm_service, "generate", None)):
             raise TypeError("llm_service must provide generate(messages, ...)")
         self._llm = llm_service
+        self._verifier = verifier
         self._session_factory = session_factory
         self._vector_store = vector_store
         self._prompt_builder = prompt_builder or ResearchGapPromptBuilder()
@@ -228,8 +234,9 @@ class ResearchGapService:
         all_raw_items: list[EvidenceItem] = []
         analyses: list[StructuredPaperAnalysis] = []
         documented_gaps: list[ResearchGap] = []
+        exclusion_notes: list[str] = []
 
-        # 1. Analyze each paper and extract documented limitations / future work
+        # 1. Analyze each paper and extract author-documented limitations / future work
         for pid in cleaned_ids:
             analysis = self._paper_analysis_service.analyze_paper(
                 pid,
@@ -243,35 +250,90 @@ class ResearchGapService:
             paper_titles[pid] = paper_title
             all_raw_items.extend(items)
 
-            if analysis.limitations.is_reported and analysis.limitations.summary:
-                doc_gap = ResearchGap(
-                    gap_id=f"gap-doc-{uuid.uuid4().hex[:8]}",
-                    category=GapCategory.DOCUMENTED.value,
-                    title=_extract_title("Documented Limitation", analysis.limitations.summary, paper_title),
-                    description=analysis.limitations.summary,
-                    reasoning=f"Explicitly documented as an open limitation or constraint by the authors of {paper_title}.",
-                    source_paper_ids=[pid],
-                    evidence_labels=list(analysis.limitations.evidence_labels),
-                    supporting_sources=copy.deepcopy(analysis.limitations.sources),
-                    contradicting_sources=[],
-                    confidence=1.0,
-                    limitations=["Author-reported limitation; scope restricted to published experiments in this paper."],
-                )
-                documented_gaps.append(doc_gap)
+            # Evidence context for this paper
+            paper_ctx = EvidenceContext(query=f"Paper {pid}", items=items)
 
-            if analysis.future_work.is_reported and analysis.future_work.summary:
+            # Provenance hardening: evaluate limitations and future work
+            candidate_fields = [
+                ("limitations", analysis.limitations, "Documented Limitation"),
+                ("future_work", analysis.future_work, "Documented Future Work"),
+            ]
+
+            for field_name, field, default_prefix in candidate_fields:
+                if field.is_missing or not field.summary.strip():
+                    continue
+
+                # Rule 1: A status of 'uncertain' excludes the claim from documented gaps
+                if field.status == "uncertain":
+                    exclusion_notes.append(
+                        f"Author {field_name} for paper {pid} ('{field.summary[:50]}...') "
+                        "was classified as uncertain/unverified and excluded from verified documented gaps."
+                    )
+                    continue
+
+                # Rule 2: A 'reported' status alone must not qualify without valid source chunks
+                if not field.evidence_labels:
+                    exclusion_notes.append(
+                        f"Author {field_name} for paper {pid} ('{field.summary[:50]}...') "
+                        "was reported without citation labels; excluded from verified documented gaps."
+                    )
+                    continue
+
+                # Rule 3: Validate that labels resolve to actual supplied source chunks from this paper
+                valid_sources: list[dict[str, Any]] = []
+                valid_labels: list[str] = []
+                for lbl in field.evidence_labels:
+                    resolved_item = paper_ctx.get_by_label(lbl)
+                    if resolved_item is not None:
+                        # Paper scoping: source chunk must belong to this paper
+                        if resolved_item.paper_id is not None and str(resolved_item.paper_id) != pid:
+                            continue
+                        canon_lbl = f"[E{resolved_item.position + 1}]"
+                        if canon_lbl not in valid_labels:
+                            valid_labels.append(canon_lbl)
+                        valid_sources.append({
+                            "label": canon_lbl,
+                            "document_id": resolved_item.document_id,
+                            "chunk_id": resolved_item.chunk_id,
+                            "paper_id": pid,
+                            "filename": resolved_item.metadata.get("filename"),
+                            "score": resolved_item.score,
+                            "text": resolved_item.text,
+                            "position": resolved_item.position,
+                        })
+
+                if not valid_sources:
+                    exclusion_notes.append(
+                        f"Author {field_name} for paper {pid} ('{field.summary[:50]}...') "
+                        "citations did not resolve to valid source chunks for this paper; excluded from documented gaps."
+                    )
+                    continue
+
+                # Rule 4: Semantic verification if a verifier is configured
+                if self._verifier is not None:
+                    paper_ctx = EvidenceContext(query=field.summary, items=items)
+                    claim_obj = RawClaim(claim_text=field.summary, cited_labels=valid_labels)
+                    v_res = self._verifier.verify_claim(claim_obj, paper_ctx)
+                    if not v_res.is_supported:
+                        exclusion_notes.append(
+                            f"Author {field_name} for paper {pid} ('{field.summary[:50]}...') "
+                            f"was evaluated as {v_res.status} ({v_res.reasoning}) and excluded from verified documented gaps."
+                        )
+                        continue
+
+                # Genuine, evidence-verified documented gap
                 doc_gap = ResearchGap(
                     gap_id=f"gap-doc-{uuid.uuid4().hex[:8]}",
                     category=GapCategory.DOCUMENTED.value,
-                    title=_extract_title("Documented Future Work", analysis.future_work.summary, paper_title),
-                    description=analysis.future_work.summary,
-                    reasoning=f"Explicitly identified as open future research by the authors of {paper_title}.",
+                    title=_extract_title(default_prefix, field.summary, paper_title),
+                    description=field.summary,
+                    reasoning=f"Explicitly documented as an open {field_name} by the authors of {paper_title} and verified against source evidence.",
                     source_paper_ids=[pid],
-                    evidence_labels=list(analysis.future_work.evidence_labels),
-                    supporting_sources=copy.deepcopy(analysis.future_work.sources),
+                    evidence_labels=valid_labels,
+                    supporting_sources=valid_sources,
                     contradicting_sources=[],
                     confidence=1.0,
-                    limitations=["Author-reported future work; feasibility or subsequent solutions not assessed within this paper."],
+                    limitations=["Author-reported statement; verified against published experiments in this paper."],
                 )
                 documented_gaps.append(doc_gap)
 
@@ -335,7 +397,7 @@ class ResearchGapService:
                 "Malformed model response; root element must be a JSON object"
             )
 
-        # 5. Parse inferred candidate gaps
+        # 5. Parse and harden inferred candidate gaps
         raw_inferred = parsed.get("inferred_gaps", [])
         if not isinstance(raw_inferred, list):
             raw_inferred = []
@@ -357,6 +419,7 @@ class ResearchGapService:
             if not isinstance(reasoning, str) or not reasoning.strip():
                 reasoning = "Inferred across contrasting paper methodologies and evidence."
 
+            # Paper scoping: ensure source paper IDs only contain valid compared papers
             raw_src_pids = raw_gap.get("source_paper_ids", [])
             if isinstance(raw_src_pids, list):
                 src_pids = [str(p) for p in raw_src_pids if str(p) in cleaned_ids]
@@ -365,6 +428,7 @@ class ResearchGapService:
             if not src_pids:
                 src_pids = list(cleaned_ids)
 
+            # Resolve supporting evidence labels against supplied context
             raw_labels = raw_gap.get("evidence_labels", [])
             if not isinstance(raw_labels, list):
                 raw_labels = []
@@ -376,7 +440,11 @@ class ResearchGapService:
                     continue
                 item = combined_context.get_by_label(lbl)
                 if item is not None:
-                    valid_labels.append(lbl)
+                    # Provenance check: item must belong to one of the compared papers
+                    if item.paper_id is not None and str(item.paper_id) not in cleaned_ids:
+                        continue
+                    if lbl not in valid_labels:
+                        valid_labels.append(lbl)
                     supporting_sources.append({
                         "label": lbl,
                         "document_id": item.document_id,
@@ -388,9 +456,14 @@ class ResearchGapService:
                         "position": item.position,
                     })
 
+            # Provenance hardening: Candidate gap must have valid supporting sources
             if self._filter_citations and len(supporting_sources) == 0:
+                exclusion_notes.append(
+                    f"Candidate gap '{title}' was excluded because it lacked valid supporting source chunks in the supplied literature."
+                )
                 continue
 
+            # Resolve contradicting evidence labels against supplied context
             raw_contra_labels = raw_gap.get("contradicting_evidence_labels", [])
             if not isinstance(raw_contra_labels, list):
                 raw_contra_labels = []
@@ -401,6 +474,8 @@ class ResearchGapService:
                     continue
                 item = combined_context.get_by_label(lbl)
                 if item is not None:
+                    if item.paper_id is not None and str(item.paper_id) not in cleaned_ids:
+                        continue
                     contradicting_sources.append({
                         "label": lbl,
                         "document_id": item.document_id,
@@ -412,11 +487,14 @@ class ResearchGapService:
                         "position": item.position,
                     })
 
+            # Bounded confidence: Inferred gaps are hypotheses and must be strictly < 1.0
             raw_conf = raw_gap.get("confidence", 0.70)
             if isinstance(raw_conf, bool) or not isinstance(raw_conf, (int, float)):
                 conf = 0.70
             else:
-                conf = max(0.0, min(1.0, float(raw_conf)))
+                conf = max(0.10, min(0.95, float(raw_conf)))
+                if conf >= 1.0:
+                    conf = 0.85
 
             raw_lims = raw_gap.get("limitations", [])
             if isinstance(raw_lims, list):
@@ -428,6 +506,19 @@ class ResearchGapService:
                     f"Candidate gap inferred across {len(cleaned_ids)} papers; requires empirical verification.",
                     "External literature beyond the provided papers was not evaluated.",
                 ]
+
+            # Semantic proof check via verifier if available
+            if self._verifier is not None and valid_labels:
+                claim_obj = RawClaim(claim_text=f"{title}. {description}", cited_labels=valid_labels)
+                v_res = self._verifier.verify_claim(claim_obj, combined_context)
+                if v_res.is_contradicted:
+                    # Cited evidence refutes the proposed gap; retain as contradicting source
+                    for src in v_res.sources:
+                        if src not in contradicting_sources:
+                            contradicting_sources.append(src)
+                elif v_res.is_insufficient:
+                    conf = min(conf, 0.45)
+                    lims.append(f"Semantic verification found insufficient detail: {v_res.reasoning}")
 
             inferred_gap = ResearchGap(
                 gap_id=f"gap-inf-{uuid.uuid4().hex[:8]}",
@@ -461,7 +552,7 @@ class ResearchGapService:
                             for lbl in contra_labels:
                                 if isinstance(lbl, str):
                                     item = combined_context.get_by_label(lbl)
-                                    if item is not None:
+                                    if item is not None and (item.paper_id is None or str(item.paper_id) in cleaned_ids):
                                         matching_contra_sources.append({
                                             "label": lbl,
                                             "document_id": item.document_id,
@@ -512,6 +603,11 @@ class ResearchGapService:
                 f"Discovery bounded to the {len(cleaned_ids)} specified papers.",
                 "Candidate gaps require domain experimental validation.",
             ]
+
+        # Append provenance exclusion notes
+        for note in exclusion_notes:
+            if note not in overall_lims:
+                overall_lims.append(note)
 
         return ResearchGapReport(
             paper_ids=cleaned_ids,

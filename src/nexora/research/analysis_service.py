@@ -47,6 +47,7 @@ def _parse_field_dict(
     raw_dict: Any,
     context: EvidenceContext,
     filter_citations: bool = True,
+    expected_paper_id: str | None = None,
 ) -> AnalysisField:
     """Parse and validate an individual AnalysisField dictionary from model output."""
     if not isinstance(raw_dict, dict):
@@ -55,10 +56,6 @@ def _parse_field_dict(
     summary = raw_dict.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         summary = "Not reported in the provided evidence."
-
-    status = raw_dict.get("status")
-    if status not in ("reported", "not_reported", "uncertain"):
-        status = "reported" if summary != "Not reported in the provided evidence." else "not_reported"
 
     raw_labels = raw_dict.get("evidence_labels", [])
     if not isinstance(raw_labels, list):
@@ -73,9 +70,15 @@ def _parse_field_dict(
         valid_labels = [str(l) for l in raw_labels if isinstance(l, str)]
 
     sources: list[dict[str, Any]] = []
+    strictly_valid_labels: list[str] = []
     for lbl in valid_labels:
         item = context.get_by_label(lbl)
         if item is not None:
+            # Paper scoping provenance check: ensure chunk belongs to expected paper
+            if expected_paper_id is not None and item.paper_id is not None:
+                if str(item.paper_id) != str(expected_paper_id):
+                    continue
+            strictly_valid_labels.append(lbl)
             sources.append({
                 "label": lbl,
                 "document_id": item.document_id,
@@ -87,6 +90,17 @@ def _parse_field_dict(
                 "position": item.position,
             })
 
+    status = raw_dict.get("status")
+    if status not in ("reported", "not_reported", "uncertain"):
+        status = "reported" if summary != "Not reported in the provided evidence." else "not_reported"
+
+    # Provenance hardening: A 'reported' status alone must not qualify without valid source chunks.
+    if status == "reported":
+        if summary == "Not reported in the provided evidence.":
+            status = "not_reported"
+        elif len(sources) == 0:
+            status = "uncertain"
+
     details = raw_dict.get("details", {})
     if not isinstance(details, dict):
         details = {}
@@ -94,10 +108,11 @@ def _parse_field_dict(
     return AnalysisField(
         summary=summary,
         status=status,
-        evidence_labels=valid_labels,
+        evidence_labels=strictly_valid_labels,
         sources=sources,
         details=details,
     )
+
 
 
 class PaperAnalysisService:
@@ -267,7 +282,14 @@ class PaperAnalysisService:
         fields: dict[str, AnalysisField] = {}
         for dim in ANALYSIS_DIMENSIONS:
             raw_field = parsed.get(dim)
-            fields[dim] = _parse_field_dict(raw_field, context, self._filter_citations)
+            fields[dim] = _parse_field_dict(
+                raw_field,
+                context,
+                self._filter_citations,
+                expected_paper_id=paper_id_str,
+            )
+
+
 
         return StructuredPaperAnalysis(
             paper_id=paper_id_str,
