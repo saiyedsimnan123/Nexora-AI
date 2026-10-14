@@ -10,6 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexora import __version__
 from nexora.api.errors import (
+    AnalysisServiceError,
+    ComparisonServiceError,
     DocumentNotFoundError,
     FileTooLargeError,
     InvalidConfigurationError,
@@ -57,6 +59,14 @@ async def _research_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "research_failed", "The research request could not be completed.")
 
 
+async def _analysis_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "analysis_failed", "The paper analysis could not be completed.")
+
+
+async def _comparison_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "comparison_failed", "The paper comparison could not be completed.")
+
+
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "server_misconfigured", "The service is not configured correctly.")
 
@@ -87,11 +97,13 @@ def create_app(
     research_service: Any,
     *,
     ingestion_service: Any = None,
+    analysis_service: Any = None,
+    comparison_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
 ) -> FastAPI:
-    """Build the app around injected research and ingestion services."""
+    """Build the app around injected research, ingestion, analysis, and comparison services."""
     if not callable(getattr(research_service, "ask", None)):
         raise InvalidConfigurationError("research_service must provide ask(request)")
 
@@ -102,6 +114,8 @@ def create_app(
     )
     app.state.research_service = research_service
     app.state.ingestion_service = ingestion_service
+    app.state.analysis_service = analysis_service
+    app.state.comparison_service = comparison_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
     app.state.max_upload_size_bytes = max_upload_size_bytes
@@ -116,6 +130,8 @@ def create_app(
     app.add_exception_handler(VectorIndexingError, _indexing_failed)
     app.add_exception_handler(InvalidRequestError, _invalid_request)
     app.add_exception_handler(ResearchServiceError, _research_failed)
+    app.add_exception_handler(AnalysisServiceError, _analysis_failed)
+    app.add_exception_handler(ComparisonServiceError, _comparison_failed)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(StarletteHTTPException, _http_error)

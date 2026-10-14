@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from nexora.database.models.base import Base
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from nexora.database.repository.base import BaseRepository, RecordNotFoundError, DuplicateRecordError, ConstraintError
 from nexora.database.repository.user import UserRepository
@@ -479,6 +479,8 @@ def test_author_repository_list_all(session):
 
     a1 = repo.create(name="Author 1")
     a2 = repo.create(name="Author 2")
+    a1.created_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    session.flush()
 
     all_authors = repo.list_all()
     assert len(all_authors) == 2

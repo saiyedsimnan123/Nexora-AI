@@ -574,11 +574,11 @@ Stage 2 — RAG Engine
 
 Stage 3 — Research Intelligence
 
-- [ ] Structured paper analysis
-- [ ] Multi-paper comparison
+- [x] Structured paper analysis
+- [x] Multi-paper comparison
 - [ ] Research summaries
-- [ ] Limitation extraction
-- [ ] Future-work extraction
+- [x] Limitation extraction
+- [x] Future-work extraction
 - [ ] Research trend analysis
 - [ ] Documented research-gap analysis
 
@@ -633,6 +633,189 @@ Stage 7 — Production Platform
 - [ ] GitHub Actions
 - [ ] Cloud deployment
 - [ ] Monitoring
+
+---
+
+## 📡 Research Intelligence API Specification (Milestone 12C-24)
+
+Nexora AI provides a robust, evidence-grounded research intelligence engine for single-paper deep analysis and multi-paper comparative synthesis. All extraction operations preserve strict citation traceability back to ingested paper chunks and prevent AI hallucinations when evidence is absent.
+
+### Standardized Research Dimensions
+Both analysis and multi-paper comparisons align across 7 standardized research dimensions:
+1. `problem_and_objectives`: Core research question, problem statement, and primary objectives.
+2. `methodology_and_algorithms`: Theoretical approach, algorithmic foundations, and system architecture.
+3. `models_and_datasets`: Neural architectures, model parameters, pretraining/finetuning datasets, and splits.
+4. `experiments_and_metrics`: Experimental design, baseline comparisons, evaluation benchmarks, and quantitative metrics.
+5. `results_and_findings`: Key empirical results, performance gains, efficiency tradeoffs, and discoveries.
+6. `limitations`: Explicitly acknowledged assumptions, hardware dependencies, and boundary conditions.
+7. `future_work`: Documented next steps, open questions, and recommended directions.
+
+### Citation & Evidence Traceability
+- **Direct Reporting**: Each dimension contains an explicit `status` (`"reported"`, `"not_reported"`, or `"uncertain"`).
+- **Zero Hallucination Guarantee**: When evidence is missing or a paper contains no chunks, the dimension reports `status: "not_reported"` and an empty citation list without fabricating claims.
+- **Traceable Attribution**: Each reported claim includes `evidence_labels` (e.g., `["[E1]", "[E2]"]`) and a `sources` array linking directly to chunk IDs, filenames, page numbers, and paper IDs.
+- **Comparative Segregation**: When comparing multiple papers, each paper's individual extracted facts and citations are preserved under `per_paper[paper_id]`, strictly segregating original paper claims from the model's cross-paper synthesis (`comparison_summary`, `key_differences`, `key_similarities`).
+
+---
+
+### Endpoints
+
+#### 1. Structured Paper Analysis — `POST /api/v1/papers/analyze`
+Analyze a paper by specifying its ID in the JSON body.
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/papers/analyze" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paper_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "options": {
+      "model": "gpt-4o",
+      "temperature": 0.0
+    }
+  }'
+```
+
+**Response (`200 OK`):**
+```json
+{
+  "paper_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "title": "Mamba: Linear-Time Sequence Modeling with Selective State Spaces",
+  "dimensions": {
+    "problem_and_objectives": {
+      "summary": "Scaling sequence models efficiently to long contexts without quadratic attention costs.",
+      "status": "reported",
+      "evidence_labels": ["[E1]"],
+      "sources": [
+        {
+          "chunk_id": "chunk-uuid-1",
+          "paper_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "filename": "mamba.pdf",
+          "text": "Selective state spaces achieve linear-time computation for sequence modeling."
+        }
+      ],
+      "details": {
+        "computational_complexity": "O(N)"
+      }
+    },
+    "methodology_and_algorithms": {
+      "summary": "State space duality and selective scan mechanisms.",
+      "status": "reported",
+      "evidence_labels": ["[E1]"],
+      "sources": [],
+      "details": {}
+    },
+    "models_and_datasets": { "..." },
+    "experiments_and_metrics": { "..." },
+    "results_and_findings": { "..." },
+    "limitations": { "..." },
+    "future_work": {
+      "summary": "Not reported in the provided evidence.",
+      "status": "not_reported",
+      "evidence_labels": [],
+      "sources": [],
+      "details": {}
+    }
+  },
+  "evidence_count": 8,
+  "model": "gpt-4o",
+  "usage": {
+    "input_tokens": 1240,
+    "output_tokens": 380,
+    "total_tokens": 1620
+  }
+}
+```
+
+#### 2. Structured Paper Analysis by Path — `POST /api/v1/papers/{paper_id}/analyze`
+Convenience endpoint accepting `paper_id` in the URL path.
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/papers/3fa85f64-5717-4562-b3fc-2c963f66afa6/analyze" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+#### 3. Multi-Paper Comparison — `POST /api/v1/papers/compare`
+Perform cross-paper analysis comparing 2 to 5 papers across all standardized dimensions.
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/papers/compare" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paper_ids": [
+      "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "8ba62f12-2281-4231-90be-8d951e73bfa9"
+    ],
+    "options": {
+      "model": "gpt-4o",
+      "temperature": 0.0
+    }
+  }'
+```
+
+**Response (`200 OK`):**
+```json
+{
+  "paper_ids": [
+    "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "8ba62f12-2281-4231-90be-8d951e73bfa9"
+  ],
+  "dimensions": {
+    "methodology_and_algorithms": {
+      "dimension": "methodology_and_algorithms",
+      "comparison_summary": "Paper 1 utilizes selective state space models (SSMs) whereas Paper 2 optimizes exact attention via GPU memory hierarchy tiling.",
+      "key_differences": [
+        "Paper 1 replaces attention with a linear recurrent mechanism.",
+        "Paper 2 preserves standard softmax attention while avoiding HBM roundtrips."
+      ],
+      "key_similarities": [
+        "Both target sub-quadratic scaling or significant throughput acceleration on long sequences."
+      ],
+      "per_paper": {
+        "3fa85f64-5717-4562-b3fc-2c963f66afa6": {
+          "summary": "Selective scan algorithm operating in linear time.",
+          "status": "reported",
+          "evidence_labels": ["[E1]"],
+          "sources": [],
+          "details": {}
+        },
+        "8ba62f12-2281-4231-90be-8d951e73bfa9": {
+          "summary": "Tiled exact attention executed in SRAM blocks.",
+          "status": "reported",
+          "evidence_labels": ["[E2]"],
+          "sources": [],
+          "details": {}
+        }
+      }
+    },
+    "problem_and_objectives": { "..." },
+    "models_and_datasets": { "..." },
+    "experiments_and_metrics": { "..." },
+    "results_and_findings": { "..." },
+    "limitations": { "..." },
+    "future_work": { "..." }
+  },
+  "overall_summary": "Both architectures advance efficient long-context sequence modeling from complementary angles: algorithmic recurrence (Mamba) versus hardware-aware kernel execution (FlashAttention).",
+  "model": "gpt-4o",
+  "usage": {
+    "input_tokens": 2850,
+    "output_tokens": 720,
+    "total_tokens": 3570
+  }
+}
+```
+
+---
+
+### Error Handling & Safeguards
+- **`400 Bad Request`**: Returned for invalid UUIDs, less than 2 papers or duplicate paper IDs in comparison requests, or bounds violations (`code: "invalid_request"`).
+- **`404 Not Found`**: Returned if a requested paper UUID does not exist in relational persistence (`code: "not_found"`).
+- **`422 Unprocessable Entity`**: Returned by FastAPI validation for malformed JSON bodies or unsupported parameter types.
+- **`500 Internal Server Error`**: Wrapped application error envelopes (`analysis_failed`, `comparison_failed`) returned when an LLM provider fails, without exposing credentials, tracebacks, or private internal state.
+- **Prompt Injection Containment**: Ingested document chunks are framed inside demarcated untrusted data blocks within the prompt to prevent instructions in scientific texts from hijacking the LLM extraction logic.
 
 ---
 

@@ -145,6 +145,72 @@ def build_ingestion_service(
     )
 
 
+def build_analysis_service(
+    settings: AppSettings,
+    *,
+    llm_provider: Any = None,
+    session_factory: Any = None,
+    vector_store: VectorStore | None = None,
+    max_evidence_characters: int | None = None,
+) -> Any:
+    """Assemble PaperAnalysisService using settings and injected dependencies."""
+    from nexora.research.analysis_service import PaperAnalysisService
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_provider is None:
+        llm_provider = create_llm_provider(settings.llm)
+    llm_service = LLMService(llm_provider)
+
+    max_chars = (
+        max_evidence_characters
+        if max_evidence_characters is not None
+        else settings.max_evidence_characters
+    )
+
+    return PaperAnalysisService(
+        llm_service,
+        session_factory=session_factory,
+        vector_store=vector_store,
+        max_evidence_characters=max_chars,
+    )
+
+
+def build_comparison_service(
+    settings: AppSettings,
+    *,
+    analysis_service: Any = None,
+    llm_provider: Any = None,
+    session_factory: Any = None,
+    vector_store: VectorStore | None = None,
+    max_papers: int = 5,
+) -> Any:
+    """Assemble PaperComparisonService using settings and injected dependencies."""
+    from nexora.research.analysis_service import PaperComparisonService
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_provider is None:
+        llm_provider = create_llm_provider(settings.llm)
+    llm_service = LLMService(llm_provider)
+
+    if analysis_service is None:
+        analysis_service = build_analysis_service(
+            settings,
+            llm_provider=llm_provider,
+            session_factory=session_factory,
+            vector_store=vector_store,
+        )
+
+    return PaperComparisonService(
+        analysis_service,
+        llm_service,
+        max_papers=max_papers,
+    )
+
+
 def build_http_app(
     settings: AppSettings,
     *,
@@ -155,6 +221,8 @@ def build_http_app(
     session_factory: Any = None,
     persistence_service: Any = None,
     ingestion_service: Any = None,
+    analysis_service: Any = None,
+    comparison_service: Any = None,
     document_pipeline: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
     **dependencies: Any,
@@ -192,9 +260,28 @@ def build_http_app(
                 qdrant_client=qdrant_client,
             )
 
+    if analysis_service is None:
+        analysis_service = build_analysis_service(
+            settings,
+            llm_provider=llm_provider,
+            session_factory=session_factory,
+            vector_store=vector_store,
+        )
+
+    if comparison_service is None:
+        comparison_service = build_comparison_service(
+            settings,
+            analysis_service=analysis_service,
+            llm_provider=llm_provider,
+            session_factory=session_factory,
+            vector_store=vector_store,
+        )
+
     return create_app(
         research_service,
         ingestion_service=ingestion_service,
+        analysis_service=analysis_service,
+        comparison_service=comparison_service,
         document_pipeline=document_pipeline,
         session_factory=session_factory,
         max_upload_size_bytes=max_upload_size_bytes,

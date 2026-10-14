@@ -25,3 +25,11 @@ class DocumentNotFoundError(LookupError):
 
 class DocumentIngestionApiError(RuntimeError):
     """Document ingestion failed; the original error is chained as __cause__."""
+
+
+class AnalysisServiceError(RuntimeError):
+    """Structured paper analysis failed; the original error is chained as __cause__."""
+
+
+class ComparisonServiceError(RuntimeError):
+    """Multi-paper comparison failed; the original error is chained as __cause__."""

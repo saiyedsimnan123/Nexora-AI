@@ -113,3 +113,158 @@ class DocumentIngestResponse:
             "chunks_count": self.chunks_count,
             "indexed_chunks_count": self.indexed_chunks_count,
         }
+
+
+@dataclass(frozen=True)
+class PaperAnalysisRequest:
+    """Request to perform structured analysis on an individual research paper."""
+
+    paper_id: str
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.paper_id, str):
+            raise InvalidRequestError("paper_id must be a string")
+        if not self.paper_id.strip():
+            raise InvalidRequestError("paper_id must not be empty or whitespace-only")
+        from uuid import UUID
+        try:
+            UUID(self.paper_id.strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError("Invalid paper_id: must be a valid UUID.")
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise InvalidRequestError("model must be a string")
+            if not self.model.strip():
+                raise InvalidRequestError("model must not be empty")
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class PaperAnalysisResponse:
+    """Public view of StructuredPaperAnalysis (provider raw data deliberately omitted)."""
+
+    paper_id: str
+    title: str | None
+    problem_and_objectives: dict[str, Any]
+    methodology_and_algorithms: dict[str, Any]
+    models_and_datasets: dict[str, Any]
+    experiments_and_metrics: dict[str, Any]
+    results_and_findings: dict[str, Any]
+    limitations: dict[str, Any]
+    future_work: dict[str, Any]
+    evidence_count: int
+    model: str
+    usage: dict[str, int] | None
+
+    @classmethod
+    def from_analysis(cls, analysis: Any) -> PaperAnalysisResponse:
+        d = analysis.to_dict()
+        return cls(
+            paper_id=d["paper_id"],
+            title=d["title"],
+            problem_and_objectives=d["problem_and_objectives"],
+            methodology_and_algorithms=d["methodology_and_algorithms"],
+            models_and_datasets=d["models_and_datasets"],
+            experiments_and_metrics=d["experiments_and_metrics"],
+            results_and_findings=d["results_and_findings"],
+            limitations=d["limitations"],
+            future_work=d["future_work"],
+            evidence_count=d["evidence_count"],
+            model=d["model"],
+            usage=d["usage"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "paper_id": self.paper_id,
+            "title": self.title,
+            "problem_and_objectives": dict(self.problem_and_objectives),
+            "methodology_and_algorithms": dict(self.methodology_and_algorithms),
+            "models_and_datasets": dict(self.models_and_datasets),
+            "experiments_and_metrics": dict(self.experiments_and_metrics),
+            "results_and_findings": dict(self.results_and_findings),
+            "limitations": dict(self.limitations),
+            "future_work": dict(self.future_work),
+            "evidence_count": self.evidence_count,
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }
+
+
+@dataclass(frozen=True)
+class PaperComparisonRequest:
+    """Request to compare two or more research papers across aligned dimensions."""
+
+    paper_ids: list[str]
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.paper_ids, (list, tuple)):
+            raise InvalidRequestError("paper_ids must be a list of strings")
+        if len(self.paper_ids) < 2:
+            raise InvalidRequestError("At least 2 paper IDs are required for comparison.")
+        from uuid import UUID
+        cleaned: list[str] = []
+        for idx, pid in enumerate(self.paper_ids):
+            if not isinstance(pid, str) or not pid.strip():
+                raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+            try:
+                UUID(pid.strip())
+            except (ValueError, AttributeError):
+                raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
+            cleaned.append(str(UUID(pid.strip())))
+        if len(set(cleaned)) != len(cleaned):
+            raise InvalidRequestError("paper_ids must be unique with no duplicates.")
+        object.__setattr__(self, "paper_ids", cleaned)
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise InvalidRequestError("model must be a string")
+            if not self.model.strip():
+                raise InvalidRequestError("model must not be empty")
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class PaperComparisonResponse:
+    """Public view of PaperComparison (provider raw data deliberately omitted)."""
+
+    paper_ids: list[str]
+    dimensions: dict[str, Any]
+    overall_summary: str
+    model: str
+    usage: dict[str, int] | None
+
+    @classmethod
+    def from_comparison(cls, comparison: Any) -> PaperComparisonResponse:
+        d = comparison.to_dict()
+        return cls(
+            paper_ids=d["paper_ids"],
+            dimensions=d["dimensions"],
+            overall_summary=d["overall_summary"],
+            model=d["model"],
+            usage=d["usage"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "paper_ids": list(self.paper_ids),
+            "dimensions": dict(self.dimensions),
+            "overall_summary": self.overall_summary,
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }

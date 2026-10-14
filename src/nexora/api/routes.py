@@ -17,7 +17,14 @@ from nexora.api.errors import (
     InvalidConfigurationError,
     InvalidRequestError,
 )
-from nexora.api.models import DocumentIngestResponse, ResearchRequest
+from nexora.api.models import (
+    DocumentIngestResponse,
+    PaperAnalysisRequest,
+    PaperAnalysisResponse,
+    PaperComparisonRequest,
+    PaperComparisonResponse,
+    ResearchRequest,
+)
 from nexora.api.service import ResearchApplicationService
 
 
@@ -71,6 +78,59 @@ class DocumentIngestResponseBody(BaseModel):
     )
 
 
+class PaperAnalysisRequestBody(BaseModel):
+    """Wire format of structured paper analysis request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    paper_id: str = Field(..., description="UUID of the research paper to analyze.")
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class PaperAnalysisResponseBody(BaseModel):
+    """Wire format of structured paper analysis response."""
+
+    model_config = ConfigDict(strict=False)
+
+    paper_id: str
+    title: str | None = None
+    problem_and_objectives: dict[str, Any]
+    methodology_and_algorithms: dict[str, Any]
+    models_and_datasets: dict[str, Any]
+    experiments_and_metrics: dict[str, Any]
+    results_and_findings: dict[str, Any]
+    limitations: dict[str, Any]
+    future_work: dict[str, Any]
+    evidence_count: int
+    model: str
+    usage: dict[str, int] | None = None
+
+
+class PaperComparisonRequestBody(BaseModel):
+    """Wire format of multi-paper comparison request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    paper_ids: list[str] = Field(..., min_length=2, description="UUIDs of the papers to compare.")
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class PaperComparisonResponseBody(BaseModel):
+    """Wire format of multi-paper comparison response."""
+
+    model_config = ConfigDict(strict=False)
+
+    paper_ids: list[str]
+    dimensions: dict[str, Any]
+    overall_summary: str
+    model: str
+    usage: dict[str, int] | None = None
+
+
 def get_research_service(request: Request) -> ResearchApplicationService:
     """Dependency: the research service injected into the app by create_app()."""
     return request.app.state.research_service
@@ -81,6 +141,25 @@ def get_ingestion_service(request: Request) -> Any:
     service = getattr(request.app.state, "ingestion_service", None)
     if service is None:
         raise InvalidConfigurationError("ingestion_service is not configured")
+    return service
+
+
+def get_analysis_service(request: Request) -> Any:
+    """Dependency: the structured paper analysis service injected into the app."""
+    service = getattr(request.app.state, "analysis_service", None)
+    if service is None:
+        raise InvalidConfigurationError("analysis_service is not configured")
+    return service
+
+
+def get_comparison_service(request: Request) -> Any:
+    """Dependency: the multi-paper comparison service injected into the app."""
+    service = getattr(request.app.state, "comparison_service", None)
+    if service is None:
+        analysis = getattr(request.app.state, "analysis_service", None)
+        if analysis is not None and hasattr(analysis, "compare_papers"):
+            return analysis
+        raise InvalidConfigurationError("comparison_service is not configured")
     return service
 
 
@@ -106,6 +185,77 @@ def research(
         max_output_tokens=body.max_output_tokens,
     )
     return ResearchResponseBody(**service.ask(request).to_dict())
+
+
+@v1_router.post(
+    "/papers/analyze",
+    response_model=PaperAnalysisResponseBody,
+    status_code=200,
+    summary="Perform structured analysis on a research paper",
+    description="Extracts 7 standardized research dimensions from an ingested paper with evidence citations.",
+)
+def analyze_paper_endpoint(
+    body: PaperAnalysisRequestBody,
+    service: Any = Depends(get_analysis_service),
+) -> PaperAnalysisResponseBody:
+    req = PaperAnalysisRequest(
+        paper_id=body.paper_id,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    result = service.analyze_paper(
+        req.paper_id,
+        model=req.model,
+        temperature=req.temperature,
+        max_output_tokens=req.max_output_tokens,
+    )
+    resp = PaperAnalysisResponse.from_analysis(result)
+    return PaperAnalysisResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/papers/{paper_id}/analyze",
+    response_model=PaperAnalysisResponseBody,
+    status_code=200,
+    summary="Perform structured analysis on a research paper by ID",
+    description="Extracts 7 standardized research dimensions from an ingested paper with evidence citations.",
+)
+def analyze_paper_by_id_endpoint(
+    paper_id: str,
+    service: Any = Depends(get_analysis_service),
+) -> PaperAnalysisResponseBody:
+    req = PaperAnalysisRequest(paper_id=paper_id)
+    result = service.analyze_paper(req.paper_id)
+    resp = PaperAnalysisResponse.from_analysis(result)
+    return PaperAnalysisResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/papers/compare",
+    response_model=PaperComparisonResponseBody,
+    status_code=200,
+    summary="Compare multiple research papers across aligned dimensions",
+    description="Compares two or more papers across standardized research dimensions while preserving per-paper evidence claims.",
+)
+def compare_papers_endpoint(
+    body: PaperComparisonRequestBody,
+    service: Any = Depends(get_comparison_service),
+) -> PaperComparisonResponseBody:
+    req = PaperComparisonRequest(
+        paper_ids=body.paper_ids,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    result = service.compare_papers(
+        req.paper_ids,
+        model=req.model,
+        temperature=req.temperature,
+        max_output_tokens=req.max_output_tokens,
+    )
+    resp = PaperComparisonResponse.from_comparison(result)
+    return PaperComparisonResponseBody(**resp.to_dict())
 
 
 @v1_router.post(
