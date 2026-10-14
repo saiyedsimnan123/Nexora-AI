@@ -334,3 +334,121 @@ class ResearchVerifyResponse:
             "verification": copy.deepcopy(self.verification),
         }
 
+
+@dataclass(frozen=True)
+class ResearchGapsRequest:
+    """Request for research gap discovery across specific papers or a collection."""
+
+    paper_ids: list[str] | None = None
+    collection_id: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.paper_ids is None and self.collection_id is None:
+            raise InvalidRequestError("Either 'paper_ids' or 'collection_id' must be provided.")
+        if self.paper_ids is not None and self.collection_id is not None:
+            raise InvalidRequestError("Provide either 'paper_ids' or 'collection_id', not both.")
+
+        if self.paper_ids is not None:
+            if not isinstance(self.paper_ids, (list, tuple)):
+                raise InvalidRequestError("paper_ids must be a list of strings")
+            if len(self.paper_ids) == 0:
+                raise InvalidRequestError("paper_ids must not be empty")
+            if len(self.paper_ids) > 5:
+                raise InvalidRequestError("paper_ids must contain at most 5 papers")
+
+            from uuid import UUID
+
+            cleaned: list[str] = []
+            for idx, pid in enumerate(self.paper_ids):
+                if not isinstance(pid, str) or not pid.strip():
+                    raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+                try:
+                    UUID(pid.strip())
+                except (ValueError, AttributeError):
+                    raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
+                cleaned.append(str(UUID(pid.strip())))
+            if len(set(cleaned)) != len(cleaned):
+                raise InvalidRequestError("paper_ids must be unique with no duplicates.")
+            object.__setattr__(self, "paper_ids", cleaned)
+
+        if self.collection_id is not None:
+            if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+                raise InvalidRequestError("collection_id must be a non-empty string")
+            from uuid import UUID
+
+            try:
+                col_uuid = UUID(self.collection_id.strip())
+            except (ValueError, AttributeError):
+                raise InvalidRequestError(
+                    f"Invalid collection_id {self.collection_id!r}: must be a valid UUID."
+                )
+            object.__setattr__(self, "collection_id", str(col_uuid))
+
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise InvalidRequestError("model must be a string")
+            if not self.model.strip():
+                raise InvalidRequestError("model must not be empty")
+
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class ResearchGapsResponse:
+    """Public view of ResearchGapReport (provider raw data deliberately omitted)."""
+
+    paper_ids: list[str]
+    collection_id: str | None
+    documented_gaps: list[dict[str, Any]]
+    inferred_gaps: list[dict[str, Any]]
+    total_gaps_count: int
+    summary: str
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paper_ids", list(self.paper_ids))
+        object.__setattr__(self, "documented_gaps", copy.deepcopy(list(self.documented_gaps)))
+        object.__setattr__(self, "inferred_gaps", copy.deepcopy(list(self.inferred_gaps)))
+        object.__setattr__(self, "limitations", list(self.limitations))
+        if self.usage is not None:
+            object.__setattr__(self, "usage", dict(self.usage))
+
+    @classmethod
+    def from_report(cls, report: Any) -> ResearchGapsResponse:
+        d = report.to_dict()
+        return cls(
+            paper_ids=d["paper_ids"],
+            collection_id=d.get("collection_id"),
+            documented_gaps=d["documented_gaps"],
+            inferred_gaps=d["inferred_gaps"],
+            total_gaps_count=d["total_gaps_count"],
+            summary=d["summary"],
+            limitations=d["limitations"],
+            model=d["model"],
+            usage=d.get("usage"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "paper_ids": list(self.paper_ids),
+            "collection_id": self.collection_id,
+            "documented_gaps": copy.deepcopy(self.documented_gaps),
+            "inferred_gaps": copy.deepcopy(self.inferred_gaps),
+            "total_gaps_count": self.total_gaps_count,
+            "summary": self.summary,
+            "limitations": list(self.limitations),
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }
+
+

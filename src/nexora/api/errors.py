@@ -38,3 +38,7 @@ class ComparisonServiceError(RuntimeError):
 class VerificationServiceError(RuntimeError):
     """Answer grounding verification failed; the original error is chained as __cause__."""
 
+
+class GapDiscoveryServiceError(RuntimeError):
+    """Research gap discovery failed; the original error is chained as __cause__."""
+

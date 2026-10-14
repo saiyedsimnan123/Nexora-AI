@@ -18,6 +18,7 @@ from nexora.api.errors import (
     InvalidRequestError,
     ResearchServiceError,
     VerificationServiceError,
+    GapDiscoveryServiceError,
 )
 from nexora.api.routes import health_router, v1_router
 from nexora.database.repository.base import (
@@ -72,6 +73,9 @@ async def _verification_failed(request: Request, exc: Exception) -> JSONResponse
     return _error_response(500, "verification_failed", "The research verification could not be completed.")
 
 
+async def _gap_discovery_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "gap_discovery_failed", "The research gap discovery could not be completed.")
+
 
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "server_misconfigured", "The service is not configured correctly.")
@@ -105,11 +109,12 @@ def create_app(
     ingestion_service: Any = None,
     analysis_service: Any = None,
     comparison_service: Any = None,
+    gap_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
 ) -> FastAPI:
-    """Build the app around injected research, ingestion, analysis, and comparison services."""
+    """Build the app around injected research, ingestion, analysis, comparison, and gap services."""
     if not callable(getattr(research_service, "ask", None)):
         raise InvalidConfigurationError("research_service must provide ask(request)")
 
@@ -122,6 +127,7 @@ def create_app(
     app.state.ingestion_service = ingestion_service
     app.state.analysis_service = analysis_service
     app.state.comparison_service = comparison_service
+    app.state.gap_service = gap_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
     app.state.max_upload_size_bytes = max_upload_size_bytes
@@ -139,8 +145,10 @@ def create_app(
     app.add_exception_handler(AnalysisServiceError, _analysis_failed)
     app.add_exception_handler(ComparisonServiceError, _comparison_failed)
     app.add_exception_handler(VerificationServiceError, _verification_failed)
+    app.add_exception_handler(GapDiscoveryServiceError, _gap_discovery_failed)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(Exception, _unexpected)
     return app
+

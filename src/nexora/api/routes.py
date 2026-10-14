@@ -23,6 +23,8 @@ from nexora.api.models import (
     PaperAnalysisResponse,
     PaperComparisonRequest,
     PaperComparisonResponse,
+    ResearchGapsRequest,
+    ResearchGapsResponse,
     ResearchRequest,
     ResearchVerifyRequest,
     ResearchVerifyResponse,
@@ -159,6 +161,35 @@ class PaperComparisonResponseBody(BaseModel):
     usage: dict[str, int] | None = None
 
 
+class ResearchGapsRequestBody(BaseModel):
+    """Wire format of research gap discovery request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    paper_ids: list[str] | None = None
+    collection_id: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class ResearchGapsResponseBody(BaseModel):
+    """Wire format of research gap discovery response."""
+
+    model_config = ConfigDict(strict=False)
+
+    paper_ids: list[str]
+    collection_id: str | None = None
+    documented_gaps: list[dict[str, Any]]
+    inferred_gaps: list[dict[str, Any]]
+    total_gaps_count: int
+    summary: str
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None = None
+
+
+
 def get_research_service(request: Request) -> ResearchApplicationService:
     """Dependency: the research service injected into the app by create_app()."""
     return request.app.state.research_service
@@ -189,6 +220,15 @@ def get_comparison_service(request: Request) -> Any:
             return analysis
         raise InvalidConfigurationError("comparison_service is not configured")
     return service
+
+
+def get_gap_service(request: Request) -> Any:
+    """Dependency: the research gap discovery service injected into the app."""
+    service = getattr(request.app.state, "gap_service", None)
+    if service is None:
+        raise InvalidConfigurationError("gap_service is not configured")
+    return service
+
 
 
 health_router = APIRouter()
@@ -307,6 +347,62 @@ def compare_papers_endpoint(
     )
     resp = PaperComparisonResponse.from_comparison(result)
     return PaperComparisonResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/research/gaps",
+    response_model=ResearchGapsResponseBody,
+    status_code=200,
+    summary="Discover evidence-backed research gaps across papers or a collection",
+    description="Discovers author-documented and AI-inferred candidate research gaps across specified papers or a collection with traceable evidence.",
+)
+def discover_research_gaps_endpoint(
+    body: ResearchGapsRequestBody,
+    service: Any = Depends(get_gap_service),
+) -> ResearchGapsResponseBody:
+    req = ResearchGapsRequest(
+        paper_ids=body.paper_ids,
+        collection_id=body.collection_id,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    if req.collection_id is not None:
+        result = service.discover_gaps_for_collection(
+            req.collection_id,
+            model=req.model,
+            temperature=req.temperature,
+            max_output_tokens=req.max_output_tokens,
+        )
+    else:
+        assert req.paper_ids is not None
+        result = service.discover_gaps_for_papers(
+            req.paper_ids,
+            model=req.model,
+            temperature=req.temperature,
+            max_output_tokens=req.max_output_tokens,
+        )
+    resp = ResearchGapsResponse.from_report(result)
+    return ResearchGapsResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/papers/{paper_id}/gaps",
+    response_model=ResearchGapsResponseBody,
+    status_code=200,
+    summary="Discover evidence-backed research gaps for a single research paper",
+    description="Extracts author-documented limitations/future work and candidate gaps for an individual paper.",
+)
+def discover_paper_gaps_by_id_endpoint(
+    paper_id: str,
+    service: Any = Depends(get_gap_service),
+) -> ResearchGapsResponseBody:
+    req = ResearchGapsRequest(paper_ids=[paper_id])
+    assert req.paper_ids is not None
+    result = service.discover_gaps_for_papers(req.paper_ids)
+    resp = ResearchGapsResponse.from_report(result)
+    return ResearchGapsResponseBody(**resp.to_dict())
+
 
 
 @v1_router.post(

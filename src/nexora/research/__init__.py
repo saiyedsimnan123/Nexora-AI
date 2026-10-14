@@ -10,6 +10,13 @@ from nexora.research.analysis_service import (
     PaperComparisonService,
 )
 from nexora.research.comparison import FieldComparison, PaperComparison
+from nexora.research.gap import (
+    GapCategory,
+    ResearchGap,
+    ResearchGapReport,
+)
+from nexora.research.gap_prompt import ResearchGapPromptBuilder
+from nexora.research.gap_service import ResearchGapService
 from nexora.research.models import ResearchAnswer
 from nexora.research.prompt import (
     PaperAnalysisPromptBuilder,
@@ -36,6 +43,7 @@ __all__ = [
     "ClaimVerificationPromptBuilder",
     "ClaimVerificationStatus",
     "FieldComparison",
+    "GapCategory",
     "PaperAnalysisPromptBuilder",
     "PaperAnalysisService",
     "PaperComparisonPromptBuilder",
@@ -44,8 +52,13 @@ __all__ = [
     "RawClaim",
     "ResearchAnswer",
     "ResearchAnswerService",
+    "ResearchGap",
+    "ResearchGapPromptBuilder",
+    "ResearchGapReport",
+    "ResearchGapService",
     "ResearchQueryService",
     "StructuredPaperAnalysis",
     "extract_claims_from_text",
 ]
+
 

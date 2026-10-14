@@ -6,6 +6,7 @@ from nexora.api.errors import (
     DocumentIngestionApiError,
     DocumentNotFoundError,
     FileTooLargeError,
+    GapDiscoveryServiceError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
@@ -17,6 +18,8 @@ from nexora.api.models import (
     PaperAnalysisResponse,
     PaperComparisonRequest,
     PaperComparisonResponse,
+    ResearchGapsRequest,
+    ResearchGapsResponse,
     ResearchRequest,
     ResearchResponse,
     ResearchVerifyRequest,
@@ -31,6 +34,7 @@ __all__ = [
     "DocumentIngestionApiError",
     "DocumentNotFoundError",
     "FileTooLargeError",
+    "GapDiscoveryServiceError",
     "InvalidConfigurationError",
     "InvalidRequestError",
     "PaperAnalysisRequest",
@@ -38,6 +42,8 @@ __all__ = [
     "PaperComparisonRequest",
     "PaperComparisonResponse",
     "ResearchApplicationService",
+    "ResearchGapsRequest",
+    "ResearchGapsResponse",
     "ResearchRequest",
     "ResearchResponse",
     "ResearchServiceError",
@@ -45,4 +51,5 @@ __all__ = [
     "ResearchVerifyResponse",
     "VerificationServiceError",
 ]
+
 
