@@ -441,6 +441,7 @@ Nexora AI is designed with strict reliability, verification, and evaluation mech
 - **Zero-Evidence Safety**: When no relevant documents are retrieved, the prompt explicitly instructs the LLM that no evidence was found, and any hallucinated citations are automatically removed.
 - **Source Traceability**: Every evidence item preserves `document_id`, `chunk_id`, `paper_id`, relevance score, and filename, enabling complete traceability from citations back to underlying PDF chunks.
 - **Untrusted Content Containment**: Retrieved paper text is treated as untrusted data and strictly isolated within the prompt context, preventing prompt injection attacks from hijacking system instructions.
+- **Citation Semantics & Scope**: Citation validity and filtering verify citation-reference integrity (that generated citation labels like `[E1]` syntactically resolve to supplied evidence chunks). They do not constitute semantic natural language inference or prove full factual correctness of generated claims.
 
 ### 3. Quantitative Evaluation Suite (`nexora.retrieval.evaluation`)
 A deterministic benchmark evaluation suite provides reproducible, quantitative metrics:
@@ -448,10 +449,10 @@ A deterministic benchmark evaluation suite provides reproducible, quantitative m
   - **MRR (Mean Reciprocal Rank)**: Measures rank of the first relevant document chunk.
   - **Recall@K & Precision@K**: Evaluates retrieval accuracy across top-$K$ candidates.
   - **Empty Retrievals**: Tracks occurrences of queries yielding no relevant chunks.
-- **Citation Metrics**:
-  - **Citation Validity Rate**: Fraction of cited labels that match valid, supplied evidence items.
+- **Citation Reference Metrics**:
+  - **Citation Validity Rate**: Fraction of cited labels that map to valid, supplied evidence chunks (measures reference resolution integrity; does not prove semantic claim support).
   - **Evidence Coverage Rate**: Fraction of supplied evidence items referenced in the answer.
-  - **Grounded Answers Rate**: Percentage of answers containing zero hallucinated citations.
+  - **Grounded Answers Rate (Reference Grounding)**: Percentage of answers containing zero hallucinated or unsupplied citation labels.
 
 ---
 

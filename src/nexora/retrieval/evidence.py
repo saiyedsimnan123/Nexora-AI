@@ -145,7 +145,15 @@ _CITATION_PATTERN = re.compile(r"\[E(\d+)\]")
 
 @dataclass(frozen=True)
 class CitationVerificationResult:
-    """Quantitative result of verifying citations against supplied evidence."""
+    """Quantitative result of verifying citations against supplied evidence.
+
+    NOTE ON SEMANTICS:
+    Citation validity and reference integrity verify that citation labels (e.g. `[E1]`)
+    syntactically resolve to chunks present in the supplied EvidenceContext.
+    This confirms reference integrity and traceability back to source documents,
+    but does NOT prove semantic claim support, natural language entailment, or the
+    underlying factual truth of generated claims.
+    """
 
     cited_labels: list[str]
     valid_citations: list[str]
@@ -154,6 +162,11 @@ class CitationVerificationResult:
     is_fully_grounded: bool
     citation_precision: float
     sources: list[dict[str, Any]]
+
+    @property
+    def has_valid_references(self) -> bool:
+        """Alias for is_fully_grounded: confirms all cited labels resolve to supplied evidence."""
+        return self.is_fully_grounded
 
 
 def extract_citations(text: str) -> list[str]:
@@ -173,8 +186,13 @@ def extract_citations(text: str) -> list[str]:
 def verify_citations(text: str, context: EvidenceContext) -> CitationVerificationResult:
     """Verify citations in text against the supplied EvidenceContext.
 
+    Checks syntactic reference resolution against supplied evidence items.
     Returns structured metrics and traceable chunk source metadata.
+
+    NOTE: Confirms reference-level validity only; does not perform semantic claim verification.
     """
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
     if not isinstance(context, EvidenceContext):
         raise TypeError("context must be an EvidenceContext")
 

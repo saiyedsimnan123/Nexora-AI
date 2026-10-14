@@ -29,6 +29,13 @@ class RetrievalService:
             raise TypeError("embedding_service must provide embed_text(text)")
         if not isinstance(vector_store, VectorStore):
             raise TypeError("vector_store must implement the VectorStore protocol")
+        if not isinstance(cache_queries, bool):
+            raise TypeError("cache_queries must be a boolean")
+        if isinstance(max_cache_entries, bool) or not isinstance(max_cache_entries, int):
+            raise TypeError("max_cache_entries must be an integer")
+        if max_cache_entries <= 0:
+            raise ValueError("max_cache_entries must be a positive integer")
+
         self._embedding_service = embedding_service
         self._vector_store = vector_store
 
@@ -49,6 +56,33 @@ class RetrievalService:
     @property
     def dimension(self) -> int | None:
         return self._dimension
+
+    @property
+    def max_cache_entries(self) -> int:
+        return self._max_cache_entries
+
+    @property
+    def cache_queries(self) -> bool:
+        return self._cache_queries
+
+    @property
+    def cache_size(self) -> int:
+        """Return the number of entries currently stored in the query cache."""
+        return len(self._query_cache)
+
+    def clear_cache(self) -> None:
+        """Clear all entries currently stored in the query cache."""
+        self._query_cache.clear()
+
+    def _evict_oldest(self) -> None:
+        """Safely evict the oldest entry from the query cache without failing on an empty cache."""
+        if not self._query_cache:
+            return
+        try:
+            first_key = next(iter(self._query_cache))
+            del self._query_cache[first_key]
+        except (StopIteration, KeyError):
+            pass
 
     def _validate_vector(self, vector: Any) -> list[float]:
         if not isinstance(vector, list):
@@ -77,15 +111,15 @@ class RetrievalService:
             raise ValueError("limit must be a positive integer")
 
         if self._cache_queries and query in self._query_cache:
-            vector = self._query_cache[query]
+            vector = list(self._query_cache[query])
         else:
-            vector = self._embedding_service.embed_text(query)
-            self._validate_vector(vector)
+            raw_vector = self._embedding_service.embed_text(query)
+            self._validate_vector(raw_vector)
             if self._cache_queries:
                 if len(self._query_cache) >= self._max_cache_entries:
-                    first_key = next(iter(self._query_cache))
-                    del self._query_cache[first_key]
-                self._query_cache[query] = vector
+                    self._evict_oldest()
+                self._query_cache[query] = list(raw_vector)
+            vector = list(raw_vector)
 
         raw_result = self._vector_store.search(vector, limit=limit)
         if not isinstance(raw_result, SearchResult):

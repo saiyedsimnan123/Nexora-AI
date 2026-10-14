@@ -484,3 +484,277 @@ def test_deterministic_retrieval_and_citation_evaluation():
     assert citation_metrics.invalid_citations_count == 0  # Zero invalid citations remain
     assert citation_metrics.citation_validity_rate == 1.0
     assert citation_metrics.grounded_answers_rate == 1.0
+    assert citation_metrics.reference_grounded_answers_rate == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 10. Retrieval Cache Edge Cases (Validation, Eviction, Mutation Protection)
+# ---------------------------------------------------------------------------
+def test_retrieval_cache_edge_cases_validation_eviction_mutation():
+    """Verify max_cache_entries validation, empty eviction safety, LRU eviction, and mutation safety."""
+    dim = 4
+    store = InMemoryVectorStore(dimension=dim)
+    emb = ControllableEmbeddingService(dimension=dim)
+
+    # 1. Validation of max_cache_entries: zero, negative, invalid types
+    with pytest.raises(ValueError, match="max_cache_entries must be a positive integer"):
+        RetrievalService(emb, store, max_cache_entries=0)
+
+    with pytest.raises(ValueError, match="max_cache_entries must be a positive integer"):
+        RetrievalService(emb, store, max_cache_entries=-5)
+
+    with pytest.raises(TypeError, match="max_cache_entries must be an integer"):
+        RetrievalService(emb, store, max_cache_entries="256")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="max_cache_entries must be an integer"):
+        RetrievalService(emb, store, max_cache_entries=1.5)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="max_cache_entries must be an integer"):
+        RetrievalService(emb, store, max_cache_entries=True)  # type: ignore[arg-type]
+
+    # Validation of cache_queries
+    with pytest.raises(TypeError, match="cache_queries must be a boolean"):
+        RetrievalService(emb, store, cache_queries="true")  # type: ignore[arg-type]
+
+    # 2. Eviction cannot fail on an empty cache
+    retrieval = RetrievalService(emb, store, dimension=dim, max_cache_entries=2)
+    assert retrieval.cache_size == 0
+    # Direct eviction call on empty cache is safe
+    retrieval._evict_oldest()
+    assert retrieval.cache_size == 0
+
+    # Ingest a vector so search doesn't fail
+    store.upsert([
+        VectorRecord(id="c1", vector=[0.1] * dim, payload={"text": "chunk 1", "chunk_id": "c1", "document_id": "d1"})
+    ])
+
+    # 3. Repeated queries use cache
+    retrieval.retrieve("query alpha")
+    assert emb.call_count == 1
+    assert retrieval.cache_size == 1
+
+    retrieval.retrieve("query alpha")
+    assert emb.call_count == 1  # Cache hit, embedding service not called again
+
+    # 4. Eviction when max_cache_entries is reached
+    retrieval.retrieve("query beta")
+    assert emb.call_count == 2
+    assert retrieval.cache_size == 2
+
+    # Inserting 3rd query must evict the oldest ("query alpha")
+    retrieval.retrieve("query gamma")
+    assert emb.call_count == 3
+    assert retrieval.cache_size == 2
+    assert "query alpha" not in retrieval._query_cache
+    assert "query beta" in retrieval._query_cache
+    assert "query gamma" in retrieval._query_cache
+
+    # Querying "query alpha" again now requires a re-embed
+    retrieval.retrieve("query alpha")
+    assert emb.call_count == 4
+    assert retrieval.cache_size == 2
+    assert "query beta" not in retrieval._query_cache  # beta was evicted
+
+    # Clear cache
+    retrieval.clear_cache()
+    assert retrieval.cache_size == 0
+
+    # 5. Cached vectors cannot be corrupted by downstream or upstream mutation
+    retrieval_safe = RetrievalService(emb, store, dimension=dim, max_cache_entries=10)
+    emb.custom_vector = [1.0, 2.0, 3.0, 4.0]
+
+    # First retrieval caches a copy
+    res1 = retrieval_safe.retrieve("mutable query")
+    cached_copy = retrieval_safe._query_cache["mutable query"]
+    assert cached_copy == [1.0, 2.0, 3.0, 4.0]
+
+    # Corrupt the external custom_vector list
+    emb.custom_vector[0] = 999.0
+    # Cache must still contain original 1.0
+    assert retrieval_safe._query_cache["mutable query"][0] == 1.0
+
+    # Corrupt vector passed into vector_store (by subclass or monkeypatch)
+    original_search = store.search
+    def _mutating_search(v, limit=10):
+        v[0] = -777.0  # Attempt to mutate vector in-place
+        return original_search(v, limit=limit)
+    store.search = _mutating_search
+
+    # Retrieve again (from cache)
+    retrieval_safe.retrieve("mutable query")
+    # Verify cached entry was NOT corrupted by the mutating store
+    assert retrieval_safe._query_cache["mutable query"][0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 11. Evaluation Callback Handling and No TypeError Swallowing
+# ---------------------------------------------------------------------------
+def test_evaluation_callback_signature_handling_and_no_type_error_swallowing():
+    """Verify explicit signature support, no swallowed TypeErrors, and single execution."""
+    cases = [{"query": "quantum computing", "expected_chunk_ids": ["c1"]}]
+    dummy_result = SearchResult(
+        query="quantum computing",
+        results=[RetrievedChunk(chunk_id="c1", document_id="d1", text="text", score=0.9, metadata={})],
+    )
+
+    # 1. Callback accepting (query, *, limit=10)
+    kw_calls = []
+    def _kw_fn(query: str, *, limit: int = 10):
+        kw_calls.append((query, limit))
+        return dummy_result
+
+    m1 = evaluate_retrieval(cases, _kw_fn, k_values=(3,))
+    assert m1.total_queries == 1
+    assert kw_calls == [("quantum computing", 3)]
+
+    # 2. Callback accepting (query, limit) positionally
+    pos_calls = []
+    def _pos_fn(query: str, limit: int):
+        pos_calls.append((query, limit))
+        return dummy_result
+
+    m2 = evaluate_retrieval(cases, _pos_fn, k_values=(5,))
+    assert m2.total_queries == 1
+    assert pos_calls == [("quantum computing", 5)]
+
+    # 3. Callback accepting unary (query)
+    unary_calls = []
+    def _unary_fn(query: str):
+        unary_calls.append(query)
+        return dummy_result
+
+    m3 = evaluate_retrieval(cases, _unary_fn, k_values=(1,))
+    assert m3.total_queries == 1
+    assert unary_calls == ["quantum computing"]
+
+    # 4. Callback with variadic (*args, **kwargs)
+    var_calls = []
+    def _var_fn(*args, **kwargs):
+        var_calls.append((args, kwargs))
+        return dummy_result
+
+    m4 = evaluate_retrieval(cases, _var_fn, k_values=(2,))
+    assert m4.total_queries == 1
+    assert var_calls == [(("quantum computing",), {"limit": 2})]
+
+    # 5. Genuine TypeError inside callback is NOT swallowed and NOT retried
+    failing_calls = []
+    def _buggy_callback(query: str, limit: int = 10):
+        failing_calls.append((query, limit))
+        # Genuine internal TypeError (e.g. bug inside retrieval logic)
+        raise TypeError("internal bug: unsupported operand type(s) for +: 'int' and 'str'")
+
+    with pytest.raises(TypeError, match="internal bug: unsupported operand"):
+        evaluate_retrieval(cases, _buggy_callback, k_values=(3,))
+
+    # Crucial: Must be executed exactly ONCE, not retried with different arguments
+    assert len(failing_calls) == 1
+
+    # 6. Callback returning invalid type raises TypeError
+    def _wrong_return_type(query: str, limit: int = 10):
+        return {"not": "a SearchResult"}
+
+    with pytest.raises(TypeError, match="retrieve_fn must return a SearchResult"):
+        evaluate_retrieval(cases, _wrong_return_type, k_values=(1,))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# 12. Input Validation for Evaluation Suite (k_values & benchmark cases)
+# ---------------------------------------------------------------------------
+def test_evaluation_input_validation():
+    """Verify input validation for k_values, benchmark_cases, and citation cases."""
+    dummy_result = SearchResult(query="q", results=[])
+    valid_cases = [{"query": "q", "expected_chunk_ids": ["c1"]}]
+
+    # k_values validation
+    with pytest.raises(ValueError, match="k_values must not be empty"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=())
+
+    with pytest.raises(TypeError, match="k_values must be a sequence"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=123)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=(1, "3"))  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=(True,))  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=(0,))
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        evaluate_retrieval(valid_cases, lambda q, limit=10: dummy_result, k_values=(-2,))
+
+    # Empty benchmark_cases -> returns zeroed metrics
+    empty_m = evaluate_retrieval([], lambda q, limit=10: dummy_result, k_values=(1, 3))
+    assert empty_m.total_queries == 0
+    assert empty_m.mean_reciprocal_rank == 0.0
+
+    # benchmark_cases invalid types
+    with pytest.raises(TypeError, match="benchmark_cases must be a sequence"):
+        evaluate_retrieval(None, lambda q, limit=10: dummy_result)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must be a dict"):
+        evaluate_retrieval(["not-a-dict"], lambda q, limit=10: dummy_result)  # type: ignore[list-item]
+
+    with pytest.raises(KeyError, match="missing required 'query' key"):
+        evaluate_retrieval([{"expected_chunk_ids": ["c1"]}], lambda q, limit=10: dummy_result)
+
+    with pytest.raises(ValueError, match="must not be empty or whitespace-only"):
+        evaluate_retrieval([{"query": "   ", "expected_chunk_ids": ["c1"]}], lambda q, limit=10: dummy_result)
+
+    with pytest.raises(KeyError, match="missing required 'expected_chunk_ids' key"):
+        evaluate_retrieval([{"query": "valid query"}], lambda q, limit=10: dummy_result)
+
+    with pytest.raises(TypeError, match="must be a string"):
+        evaluate_retrieval([{"query": "valid", "expected_chunk_ids": [123]}], lambda q, limit=10: dummy_result)  # type: ignore[list-item]
+
+    # Non-callable retrieve_fn
+    with pytest.raises(TypeError, match="retrieve_fn must be callable"):
+        evaluate_retrieval(valid_cases, "not-callable")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# 13. Honest Citation Metric Semantics and Validation
+# ---------------------------------------------------------------------------
+def test_honest_citation_metric_semantics():
+    """Verify semantic honest properties, type validations, and reference integrity checks."""
+    ctx = EvidenceContext("q", [EvidenceItem("d1", "c1", "text", 0.9, {}, 0)], 1)
+
+    # 1. verify_citations requires string text
+    with pytest.raises(TypeError, match="text must be a string"):
+        verify_citations(12345, ctx)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="context must be an EvidenceContext"):
+        verify_citations("text [E1]", "not-a-context")  # type: ignore[arg-type]
+
+    # 2. CitationVerificationResult properties
+    res = verify_citations("Grounding test [E1]", ctx)
+    assert res.is_fully_grounded is True
+    assert res.has_valid_references is True
+
+    res_invalid = verify_citations("Hallucinated [E99]", ctx)
+    assert res_invalid.is_fully_grounded is False
+    assert res_invalid.has_valid_references is False
+
+    # 3. evaluate_citations validation
+    with pytest.raises(TypeError, match="benchmark_cases must be a sequence"):
+        evaluate_citations("not-a-sequence")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="must be a dict"):
+        evaluate_citations(["not-a-dict"])  # type: ignore[list-item]
+
+    with pytest.raises(KeyError, match="missing required 'context' key"):
+        evaluate_citations([{"text": "some text"}])
+
+    with pytest.raises(TypeError, match="must be an EvidenceContext"):
+        evaluate_citations([{"text": "some text", "context": "wrong"}])
+
+    with pytest.raises(KeyError, match="must contain 'text' or 'answer'"):
+        evaluate_citations([{"context": ctx}])
+
+    # 4. Empty evaluate_citations
+    empty_cit = evaluate_citations([])
+    assert empty_cit.total_answers == 0
+    assert empty_cit.citation_validity_rate == 1.0
+    assert empty_cit.reference_grounded_answers_rate == 1.0
