@@ -88,6 +88,12 @@ class RetrievedChunk:
 
         object.__setattr__(self, "metadata", dict(self.metadata))
 
+    @property
+    def paper_id(self) -> str | None:
+        """Paper ID from metadata, if present."""
+        val = self.metadata.get("paper_id")
+        return str(val) if val is not None else None
+
 
 @dataclass(frozen=True)
 class SearchResult:

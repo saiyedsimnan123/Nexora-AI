@@ -6,7 +6,7 @@ from typing import Any
 
 from nexora.llm.prompt import ResearchPromptBuilder
 from nexora.research.models import ResearchAnswer
-from nexora.retrieval.evidence import EvidenceContext
+from nexora.retrieval.evidence import EvidenceContext, filter_unsupplied_citations
 
 
 class ResearchAnswerService:
@@ -15,6 +15,7 @@ class ResearchAnswerService:
         llm_service: Any,
         *,
         prompt_builder: ResearchPromptBuilder | None = None,
+        filter_invalid_citations: bool = True,
     ) -> None:
         if not callable(getattr(llm_service, "generate", None)):
             raise TypeError("llm_service must provide generate(messages, ...)")
@@ -24,6 +25,7 @@ class ResearchAnswerService:
             raise TypeError("prompt_builder must be a ResearchPromptBuilder")
         self._llm = llm_service
         self._prompt_builder = prompt_builder
+        self._filter_invalid_citations = filter_invalid_citations
 
     def answer(
         self,
@@ -48,8 +50,13 @@ class ResearchAnswerService:
             temperature=temperature,
             max_output_tokens=max_output_tokens,
         )
+
+        text = response.text
+        if self._filter_invalid_citations:
+            text = filter_unsupplied_citations(text, len(context.items))
+
         return ResearchAnswer(
-            text=response.text,
+            text=text,
             query=query,
             model=response.model,
             usage=response.usage,

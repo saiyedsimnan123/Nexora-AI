@@ -49,3 +49,14 @@ class ResearchAnswer:
                 raise TypeError("raw must be a dict or None")
             _check_no_secret_keys(self.raw)
             object.__setattr__(self, "raw", copy.deepcopy(self.raw))
+
+    @property
+    def citations(self) -> list[str]:
+        """Return unique [E#] citation labels cited in text, in order of appearance."""
+        from nexora.retrieval.evidence import extract_citations
+        return extract_citations(self.text)
+
+    def verify_citations(self, context: Any) -> Any:
+        """Verify citations in this answer against the supplied EvidenceContext."""
+        from nexora.retrieval.evidence import verify_citations
+        return verify_citations(self.text, context)

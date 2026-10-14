@@ -428,37 +428,30 @@ The structure will be expanded only when each component becomes necessary.
 
 🧪 Evaluation & Reliability
 
-Nexora AI will not be evaluated only by whether an AI response "sounds good."
+Nexora AI is designed with strict reliability, verification, and evaluation mechanisms across the retrieval-to-answer pipeline:
 
-The project will eventually evaluate:
+### 1. Retrieval Hardening & Query Caching
+- **Vector Validation**: Query vectors are validated for type safety (must be `list[float]`), non-emptiness, and finite numeric values (`math.isfinite`).
+- **Dimension Matching**: Query vector dimensions are strictly checked against the expected vector store / embedding service dimension to fail fast before search operations.
+- **Query Embedding Caching**: In-memory query vector caching in `RetrievalService` avoids redundant embedding API calls for repeated queries.
+- **Failure Isolation**: Infrastructure failures (e.g., vector store unreachable, timeout) propagate cleanly to `ResearchServiceError` and map to safe HTTP 500 responses without exposing tracebacks or internal credentials.
 
-Retrieval
+### 2. Evidence Grounding & Citation Filtering
+- **Strict Citation Grounding**: The LLM is provided with numbered evidence blocks (`[E1]`, `[E2]`, etc.). Post-generation citation filtering (`filter_unsupplied_citations`) automatically strips any hallucinated citation labels outside the supplied range.
+- **Zero-Evidence Safety**: When no relevant documents are retrieved, the prompt explicitly instructs the LLM that no evidence was found, and any hallucinated citations are automatically removed.
+- **Source Traceability**: Every evidence item preserves `document_id`, `chunk_id`, `paper_id`, relevance score, and filename, enabling complete traceability from citations back to underlying PDF chunks.
+- **Untrusted Content Containment**: Retrieved paper text is treated as untrusted data and strictly isolated within the prompt context, preventing prompt injection attacks from hijacking system instructions.
 
-- Precision
-- Recall
-- Relevance
-- Retrieval quality
-
-Generated Answers
-
-- Citation correctness
-- Faithfulness
-- Groundedness
-- Completeness
-
-Research Intelligence
-
-- Information extraction accuracy
-- Comparison consistency
-- Gap identification accuracy
-- Trend analysis quality
-
-System
-
-- Response time
-- API reliability
-- Error handling
-- Test coverage
+### 3. Quantitative Evaluation Suite (`nexora.retrieval.evaluation`)
+A deterministic benchmark evaluation suite provides reproducible, quantitative metrics:
+- **Retrieval Metrics**:
+  - **MRR (Mean Reciprocal Rank)**: Measures rank of the first relevant document chunk.
+  - **Recall@K & Precision@K**: Evaluates retrieval accuracy across top-$K$ candidates.
+  - **Empty Retrievals**: Tracks occurrences of queries yielding no relevant chunks.
+- **Citation Metrics**:
+  - **Citation Validity Rate**: Fraction of cited labels that match valid, supplied evidence items.
+  - **Evidence Coverage Rate**: Fraction of supplied evidence items referenced in the answer.
+  - **Grounded Answers Rate**: Percentage of answers containing zero hallucinated citations.
 
 ---
 

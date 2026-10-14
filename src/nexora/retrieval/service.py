@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from nexora.retrieval.models import SearchResult
+from nexora.retrieval.models import RetrievedChunk, SearchResult
 from nexora.retrieval.store import VectorStore
 
 
@@ -15,13 +16,55 @@ class RetrievalService:
     protocol, so it works with any store implementation.
     """
 
-    def __init__(self, embedding_service: Any, vector_store: VectorStore) -> None:
+    def __init__(
+        self,
+        embedding_service: Any,
+        vector_store: VectorStore,
+        *,
+        dimension: int | None = None,
+        cache_queries: bool = True,
+        max_cache_entries: int = 256,
+    ) -> None:
         if not callable(getattr(embedding_service, "embed_text", None)):
             raise TypeError("embedding_service must provide embed_text(text)")
         if not isinstance(vector_store, VectorStore):
             raise TypeError("vector_store must implement the VectorStore protocol")
         self._embedding_service = embedding_service
         self._vector_store = vector_store
+
+        self._dimension = dimension
+        if self._dimension is None:
+            store_dim = getattr(vector_store, "dimension", None)
+            if isinstance(store_dim, int) and not isinstance(store_dim, bool) and store_dim > 0:
+                self._dimension = store_dim
+            else:
+                emb_dim = getattr(embedding_service, "dimension", None)
+                if isinstance(emb_dim, int) and not isinstance(emb_dim, bool) and emb_dim > 0:
+                    self._dimension = emb_dim
+
+        self._cache_queries = cache_queries
+        self._max_cache_entries = max_cache_entries
+        self._query_cache: dict[str, list[float]] = {}
+
+    @property
+    def dimension(self) -> int | None:
+        return self._dimension
+
+    def _validate_vector(self, vector: Any) -> list[float]:
+        if not isinstance(vector, list):
+            raise TypeError(f"Embedding service must return a list, got {type(vector).__name__}")
+        if not vector:
+            raise ValueError("Embedding service returned an empty vector")
+        for i, val in enumerate(vector):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(f"vector[{i}] must be a number, got {type(val).__name__}")
+            if not math.isfinite(val):
+                raise ValueError(f"vector[{i}] must be finite")
+        if self._dimension is not None and len(vector) != self._dimension:
+            raise ValueError(
+                f"Query vector dimension {len(vector)} does not match expected dimension {self._dimension}"
+            )
+        return vector
 
     def retrieve(self, query: str, *, limit: int = 10) -> SearchResult:
         if not isinstance(query, str):
@@ -33,5 +76,21 @@ class RetrievalService:
         if limit <= 0:
             raise ValueError("limit must be a positive integer")
 
-        vector = self._embedding_service.embed_text(query)
-        return self._vector_store.search(vector, limit=limit)
+        if self._cache_queries and query in self._query_cache:
+            vector = self._query_cache[query]
+        else:
+            vector = self._embedding_service.embed_text(query)
+            self._validate_vector(vector)
+            if self._cache_queries:
+                if len(self._query_cache) >= self._max_cache_entries:
+                    first_key = next(iter(self._query_cache))
+                    del self._query_cache[first_key]
+                self._query_cache[query] = vector
+
+        raw_result = self._vector_store.search(vector, limit=limit)
+        if not isinstance(raw_result, SearchResult):
+            raise TypeError(
+                f"Vector store search must return a SearchResult, got {type(raw_result).__name__}"
+            )
+
+        return raw_result
