@@ -242,6 +242,16 @@ def is_simulated_or_synthetic_provider(provider: Any) -> bool:
             client_cls = type(client).__name__
             if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
                 return True
+
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    if provider_id == "gemini" and not isinstance(provider, GeminiEmbeddingProvider):
+        return True
+    if isinstance(provider, GeminiEmbeddingProvider):
+        client = getattr(provider, "_client", None)
+        if client is not None:
+            client_cls = type(client).__name__
+            if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
+                return True
     return False
 
 
@@ -261,6 +271,25 @@ def is_genuine_live_openai_provider(provider: Any) -> bool:
     return True
 
 
+def is_genuine_live_gemini_provider(provider: Any) -> bool:
+    """Return True if provider is a live, genuine Gemini provider with real client and credentials."""
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    if not isinstance(provider, GeminiEmbeddingProvider):
+        return False
+    if is_simulated_or_synthetic_provider(provider):
+        return False
+    config = getattr(provider, "_config", None)
+    if config is None or not getattr(config, "has_api_key", False):
+        return False
+    client = getattr(provider, "_client", None)
+    if client is None:
+        return False
+    client_cls = type(client).__name__
+    if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
+        return False
+    return True
+
+
 def check_production_credentials(api_key: str | None = None) -> tuple[bool, str | None]:
     """Check if production external model credentials are configured.
 
@@ -271,6 +300,25 @@ def check_production_credentials(api_key: str | None = None) -> tuple[bool, str 
         return False, (
             "External model credentials are unavailable. Set OPENAI_API_KEY or "
             f"{ENV_API_KEY} to exercise the real OpenAI embedding provider."
+        )
+    return True, None
+
+
+def check_gemini_credentials(api_key: str | None = None) -> tuple[bool, str | None]:
+    """Check if Gemini production credentials are configured.
+
+    Returns (is_available, error_message_or_none).
+    """
+    key = (
+        api_key
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("NEXORA_GEMINI_API_KEY")
+        or os.getenv(ENV_API_KEY)
+    )
+    if not key or not str(key).strip():
+        return False, (
+            "External Gemini credentials are unavailable. Set GEMINI_API_KEY or "
+            f"{ENV_API_KEY} to exercise the real Gemini embedding provider."
         )
     return True, None
 
@@ -518,12 +566,13 @@ def evaluate_production_retrieval(
     if cfg.mode == EvaluationMode.PRODUCTION:
         if cfg.embedding_provider is not None:
             provider = cfg.embedding_provider
+            prov_id = str(getattr(provider, "provider", getattr(provider, "name", cfg.provider_name or "openai"))).lower()
             if is_simulated_or_synthetic_provider(provider):
                 # Injected test double or synthetic provider: do not report as genuine production!
                 candidate_provider_live = False
                 is_synthetic = True
                 is_semantic = True
-                base_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
+                base_name = getattr(provider, "name", getattr(provider, "provider", prov_id))
                 provider_name = f"{base_name} (simulated)" if "(simulated)" not in str(base_name) else str(base_name)
                 model_name = getattr(provider, "model", cfg.model_name)
                 dim = getattr(provider, "dimension", cfg.dimension)
@@ -532,89 +581,171 @@ def evaluate_production_retrieval(
                     "not genuine live production API measurements."
                 )
             else:
-                candidate_provider_live = is_genuine_live_openai_provider(provider)
+                if prov_id == "gemini":
+                    candidate_provider_live = is_genuine_live_gemini_provider(provider)
+                else:
+                    candidate_provider_live = is_genuine_live_openai_provider(provider)
                 is_synthetic = False
                 is_semantic = True
-                provider_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
+                provider_name = getattr(provider, "name", getattr(provider, "provider", prov_id))
                 model_name = getattr(provider, "model", cfg.model_name)
                 dim = getattr(provider, "dimension", cfg.dimension)
                 simulated_limitation = None
         else:
-            has_credentials, limitation_msg = check_production_credentials(cfg.api_key)
-            if not has_credentials:
-                # Explicit limitation reporting: DO NOT silently substitute synthetic embedding!
-                return ProductionEvaluationReport(
-                    mode=cfg.mode.value,
-                    status="unavailable",
-                    provider_name="openai",
-                    model_name=cfg.model_name,
-                    dimension=cfg.dimension,
-                    vector_store_type=format_vector_store_label(cfg.vector_store),
-                    is_semantic=True,
-                    is_synthetic=False,
-                    is_live=False,
-                    provider_live=False,
-                    vector_store_live=False,
-                    infrastructure_limitation=limitation_msg,
-                    error=None,
-                    unavailable_dependencies=["openai_credentials"],
-                    corpus_info=corpus_info,
-                    policy_settings=policy_info,
-                    dataset_info=dataset_info,
-                    evaluation_conditions={
-                        "is_live_provider": False,
-                        "is_live_vector_store": False,
-                        "credentials_available": False,
-                    },
-                    metrics=None,
-                    paper_scope_isolation=None,
-                    threshold_calibration=None,
-                )
+            target_prov = (cfg.provider_name or os.getenv("NEXORA_EMBEDDING_PROVIDER") or "openai").strip().lower()
+            if target_prov == "gemini":
+                target_model = cfg.model_name if cfg.model_name != "text-embedding-3-small" else "text-embedding-004"
+                target_dim = cfg.dimension if cfg.dimension != 1536 else 768
+                has_credentials, limitation_msg = check_gemini_credentials(cfg.api_key)
+                if not has_credentials:
+                    return ProductionEvaluationReport(
+                        mode=cfg.mode.value,
+                        status="unavailable",
+                        provider_name="gemini",
+                        model_name=target_model,
+                        dimension=target_dim,
+                        vector_store_type=format_vector_store_label(cfg.vector_store),
+                        is_semantic=True,
+                        is_synthetic=False,
+                        is_live=False,
+                        provider_live=False,
+                        vector_store_live=False,
+                        infrastructure_limitation=limitation_msg,
+                        error=None,
+                        unavailable_dependencies=["gemini_credentials"],
+                        corpus_info=corpus_info,
+                        policy_settings=policy_info,
+                        dataset_info=dataset_info,
+                        evaluation_conditions={
+                            "is_live_provider": False,
+                            "is_live_vector_store": False,
+                            "credentials_available": False,
+                        },
+                        metrics=None,
+                        paper_scope_isolation=None,
+                        threshold_calibration=None,
+                    )
 
-            # Build real production embedding provider
-            try:
-                emb_config = EmbeddingConfig(
-                    provider="openai",
-                    model=cfg.model_name,
-                    api_key=cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY),
-                    base_url=cfg.base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL"),
-                    dimension=cfg.dimension,
-                )
-                provider = create_embedding_provider(emb_config)
-                candidate_provider_live = is_genuine_live_openai_provider(provider)
-                is_synthetic = False
-                is_semantic = True
-                provider_name = "openai"
-                model_name = cfg.model_name
-                dim = cfg.dimension
-                simulated_limitation = None
-            except Exception as exc:
-                return ProductionEvaluationReport(
-                    mode=cfg.mode.value,
-                    status="failed",
-                    provider_name="openai",
-                    model_name=cfg.model_name,
-                    dimension=cfg.dimension,
-                    vector_store_type=format_vector_store_label(cfg.vector_store),
-                    is_semantic=True,
-                    is_synthetic=False,
-                    is_live=False,
-                    provider_live=False,
-                    vector_store_live=False,
-                    infrastructure_limitation=str(exc),
-                    error=f"Failed to initialize OpenAI provider: {exc}",
-                    unavailable_dependencies=["openai_provider"],
-                    corpus_info=corpus_info,
-                    policy_settings=policy_info,
-                    dataset_info=dataset_info,
-                    evaluation_conditions={
-                        "is_live_provider": False,
-                        "is_live_vector_store": False,
-                    },
-                    metrics=None,
-                    paper_scope_isolation=None,
-                    threshold_calibration=None,
-                )
+                # Build real production Gemini embedding provider
+                try:
+                    emb_config = EmbeddingConfig(
+                        provider="gemini",
+                        model=target_model,
+                        api_key=cfg.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("NEXORA_GEMINI_API_KEY") or os.getenv(ENV_API_KEY),
+                        base_url=cfg.base_url or os.getenv("GEMINI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL"),
+                        dimension=target_dim,
+                    )
+                    provider = create_embedding_provider(emb_config)
+                    candidate_provider_live = is_genuine_live_gemini_provider(provider)
+                    is_synthetic = False
+                    is_semantic = True
+                    provider_name = "gemini"
+                    model_name = target_model
+                    dim = target_dim
+                    simulated_limitation = None
+                except Exception as exc:
+                    return ProductionEvaluationReport(
+                        mode=cfg.mode.value,
+                        status="failed",
+                        provider_name="gemini",
+                        model_name=target_model,
+                        dimension=target_dim,
+                        vector_store_type=format_vector_store_label(cfg.vector_store),
+                        is_semantic=True,
+                        is_synthetic=False,
+                        is_live=False,
+                        provider_live=False,
+                        vector_store_live=False,
+                        infrastructure_limitation=str(exc),
+                        error=f"Failed to initialize Gemini provider: {exc}",
+                        unavailable_dependencies=["gemini_provider"],
+                        corpus_info=corpus_info,
+                        policy_settings=policy_info,
+                        dataset_info=dataset_info,
+                        evaluation_conditions={
+                            "is_live_provider": False,
+                            "is_live_vector_store": False,
+                        },
+                        metrics=None,
+                        paper_scope_isolation=None,
+                        threshold_calibration=None,
+                    )
+            else:
+                has_credentials, limitation_msg = check_production_credentials(cfg.api_key)
+                if not has_credentials:
+                    # Explicit limitation reporting: DO NOT silently substitute synthetic embedding!
+                    return ProductionEvaluationReport(
+                        mode=cfg.mode.value,
+                        status="unavailable",
+                        provider_name="openai",
+                        model_name=cfg.model_name,
+                        dimension=cfg.dimension,
+                        vector_store_type=format_vector_store_label(cfg.vector_store),
+                        is_semantic=True,
+                        is_synthetic=False,
+                        is_live=False,
+                        provider_live=False,
+                        vector_store_live=False,
+                        infrastructure_limitation=limitation_msg,
+                        error=None,
+                        unavailable_dependencies=["openai_credentials"],
+                        corpus_info=corpus_info,
+                        policy_settings=policy_info,
+                        dataset_info=dataset_info,
+                        evaluation_conditions={
+                            "is_live_provider": False,
+                            "is_live_vector_store": False,
+                            "credentials_available": False,
+                        },
+                        metrics=None,
+                        paper_scope_isolation=None,
+                        threshold_calibration=None,
+                    )
+
+                # Build real production embedding provider
+                try:
+                    emb_config = EmbeddingConfig(
+                        provider="openai",
+                        model=cfg.model_name,
+                        api_key=cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY),
+                        base_url=cfg.base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL"),
+                        dimension=cfg.dimension,
+                    )
+                    provider = create_embedding_provider(emb_config)
+                    candidate_provider_live = is_genuine_live_openai_provider(provider)
+                    is_synthetic = False
+                    is_semantic = True
+                    provider_name = "openai"
+                    model_name = cfg.model_name
+                    dim = cfg.dimension
+                    simulated_limitation = None
+                except Exception as exc:
+                    return ProductionEvaluationReport(
+                        mode=cfg.mode.value,
+                        status="failed",
+                        provider_name="openai",
+                        model_name=cfg.model_name,
+                        dimension=cfg.dimension,
+                        vector_store_type=format_vector_store_label(cfg.vector_store),
+                        is_semantic=True,
+                        is_synthetic=False,
+                        is_live=False,
+                        provider_live=False,
+                        vector_store_live=False,
+                        infrastructure_limitation=str(exc),
+                        error=f"Failed to initialize OpenAI provider: {exc}",
+                        unavailable_dependencies=["openai_provider"],
+                        corpus_info=corpus_info,
+                        policy_settings=policy_info,
+                        dataset_info=dataset_info,
+                        evaluation_conditions={
+                            "is_live_provider": False,
+                            "is_live_vector_store": False,
+                        },
+                        metrics=None,
+                        paper_scope_isolation=None,
+                        threshold_calibration=None,
+                    )
 
     # -----------------------------------------------------------------------
     # 2. Configured Pipeline Mode: Uses whatever pipeline is currently configured
@@ -636,6 +767,16 @@ def evaluate_production_retrieval(
                     base_url=base_url,
                     dimension=cfg.dimension,
                 )
+            elif prov_name == "gemini":
+                api_key = cfg.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("NEXORA_GEMINI_API_KEY") or os.getenv(ENV_API_KEY)
+                base_url = cfg.base_url or os.getenv("GEMINI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL")
+                emb_config = EmbeddingConfig(
+                    provider="gemini",
+                    model=cfg.model_name if cfg.model_name not in ("hash-sha256", "text-embedding-3-small") else "text-embedding-004",
+                    api_key=api_key,
+                    base_url=base_url,
+                    dimension=cfg.dimension if cfg.dimension not in (64, 1536) else 768,
+                )
             else:
                 emb_config = EmbeddingConfig(
                     provider="hash",
@@ -652,7 +793,7 @@ def evaluate_production_retrieval(
                     model_name=cfg.model_name,
                     dimension=cfg.dimension,
                     vector_store_type=format_vector_store_label(cfg.vector_store),
-                    is_semantic=(prov_name == "openai"),
+                    is_semantic=(prov_name in ("openai", "gemini")),
                     is_synthetic=False,
                     is_live=False,
                     provider_live=False,
@@ -678,9 +819,12 @@ def evaluate_production_retrieval(
         else:
             provider_name = getattr(provider, "provider", getattr(provider, "name", type(provider).__name__))
             model_name = getattr(provider, "model", "default")
-            is_semantic = (str(provider_name).lower() == "openai")
-            if is_semantic and is_genuine_live_openai_provider(provider):
-                candidate_provider_live = True
+            is_semantic = (str(provider_name).lower() in ("openai", "gemini"))
+            if is_semantic:
+                if str(provider_name).lower() == "openai" and is_genuine_live_openai_provider(provider):
+                    candidate_provider_live = True
+                elif str(provider_name).lower() == "gemini" and is_genuine_live_gemini_provider(provider):
+                    candidate_provider_live = True
         dim = getattr(provider, "dimension", None)
         simulated_limitation = None
 

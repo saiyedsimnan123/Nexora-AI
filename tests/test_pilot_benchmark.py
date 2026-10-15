@@ -292,7 +292,12 @@ def test_pilot_benchmark_production_mode_api_failure_handled_cleanly():
 
 def test_pilot_benchmark_simulated_double_demarcation():
     """Simulated test doubles exercise the 1536-d pipeline but are demarcated as non-live measurements."""
-    from tests.test_production_retrieval_evaluation import SimulatedProductionOpenAIProvider
+    try:
+        from tests.test_production_retrieval_evaluation import SimulatedProductionOpenAIProvider
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, ".")
+        from tests.test_production_retrieval_evaluation import SimulatedProductionOpenAIProvider
 
     provider = SimulatedProductionOpenAIProvider(dimension=1536)
     ds = get_pilot_benchmark_dataset()

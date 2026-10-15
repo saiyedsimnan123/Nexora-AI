@@ -22,7 +22,8 @@ from nexora.embedding.openai_provider import OpenAIEmbeddingProvider
 
 PROVIDER_HASH = "hash"
 PROVIDER_OPENAI = "openai"
-SUPPORTED_PROVIDERS = (PROVIDER_HASH, PROVIDER_OPENAI)
+PROVIDER_GEMINI = "gemini"
+SUPPORTED_PROVIDERS = (PROVIDER_HASH, PROVIDER_OPENAI, PROVIDER_GEMINI)
 
 
 def create_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
@@ -57,6 +58,10 @@ def create_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
         return _create_hash_provider(config)
     if normalized == PROVIDER_OPENAI:
         return OpenAIEmbeddingProvider(config)
+    if normalized == PROVIDER_GEMINI:
+        from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+
+        return GeminiEmbeddingProvider(config)
 
     raise ValueError(
         f"Unsupported embedding provider: {provider_name!r}. "

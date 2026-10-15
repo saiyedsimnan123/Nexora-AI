@@ -8,6 +8,7 @@ from nexora.embedding.base import EmbeddingProvider
 from nexora.embedding.cache import EmbeddingCache, InMemoryEmbeddingCache
 from nexora.embedding.config import EmbeddingConfig
 from nexora.embedding.factory import (
+    PROVIDER_GEMINI,
     PROVIDER_HASH,
     PROVIDER_OPENAI,
     SUPPORTED_PROVIDERS,
@@ -26,6 +27,7 @@ __all__ = [
     "EmbeddingService",
     "HashEmbeddingProvider",
     "InMemoryEmbeddingCache",
+    "PROVIDER_GEMINI",
     "PROVIDER_HASH",
     "PROVIDER_OPENAI",
     "SUPPORTED_PROVIDERS",

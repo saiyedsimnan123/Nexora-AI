@@ -86,21 +86,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key",
         type=str,
         default=None,
-        help="API key for live production external provider (or uses OPENAI_API_KEY / NEXORA_EMBEDDING_API_KEY).",
+        help="API key for live production external provider (or uses OPENAI_API_KEY / GEMINI_API_KEY / NEXORA_EMBEDDING_API_KEY).",
     )
 
     parser.add_argument(
         "--base-url",
         type=str,
         default=None,
-        help="Base URL for OpenAI-compatible embedding endpoint (or uses OPENAI_BASE_URL / NEXORA_EMBEDDING_BASE_URL).",
+        help="Base URL for external embedding endpoint (or uses OPENAI_BASE_URL / GEMINI_BASE_URL / NEXORA_EMBEDDING_BASE_URL).",
     )
 
     parser.add_argument(
         "--provider",
         type=str,
         default=None,
-        help="Embedding provider name (e.g. 'openai' or 'hash'). Overrides configured default.",
+        help="Embedding provider name (e.g. 'openai', 'gemini', or 'hash'). Overrides configured default.",
     )
 
     parser.add_argument(
@@ -354,6 +354,14 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
             _handle_output(args.output, json_text, report)
             return 1, report, json_text
 
+    model_name = args.model
+    dimension = args.dimension
+    if args.provider and args.provider.strip().lower() == "gemini":
+        if model_name == "text-embedding-3-small":
+            model_name = "text-embedding-004"
+        if dimension == 1536:
+            dimension = 768
+
     config = ProductionEvaluationConfig(
         mode=mode,
         vector_store=vector_store,
@@ -362,8 +370,8 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
         api_key=args.api_key,
         base_url=args.base_url,
         provider_name=args.provider,
-        model_name=args.model,
-        dimension=args.dimension,
+        model_name=model_name,
+        dimension=dimension,
         dataset=loaded_dataset,
         dataset_path=args.dataset,
     )

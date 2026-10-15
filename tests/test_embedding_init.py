@@ -27,6 +27,7 @@ EXPECTED_EXPORTS = {
     "EmbeddingService",
     "HashEmbeddingProvider",
     "InMemoryEmbeddingCache",
+    "PROVIDER_GEMINI",
     "PROVIDER_HASH",
     "PROVIDER_OPENAI",
     "SUPPORTED_PROVIDERS",
@@ -86,8 +87,9 @@ def test_default_dimension_exported():
 def test_provider_constants_exported():
     assert embedding.PROVIDER_HASH == factory.PROVIDER_HASH == "hash"
     assert embedding.PROVIDER_OPENAI == factory.PROVIDER_OPENAI == "openai"
+    assert embedding.PROVIDER_GEMINI == factory.PROVIDER_GEMINI == "gemini"
     assert embedding.SUPPORTED_PROVIDERS == factory.SUPPORTED_PROVIDERS
-    assert set(embedding.SUPPORTED_PROVIDERS) == {"hash", "openai"}
+    assert set(embedding.SUPPORTED_PROVIDERS) == {"hash", "openai", "gemini"}
 
 
 # Public surface is exactly the intended one

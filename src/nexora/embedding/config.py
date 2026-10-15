@@ -16,6 +16,8 @@ ENV_API_KEY = "NEXORA_EMBEDDING_API_KEY"
 ENV_BASE_URL = "NEXORA_EMBEDDING_BASE_URL"
 ENV_DIMENSION = "NEXORA_EMBEDDING_DIMENSION"
 ENV_BATCH_SIZE = "NEXORA_EMBEDDING_BATCH_SIZE"
+ENV_GEMINI_API_KEY = "GEMINI_API_KEY"
+ENV_NEXORA_GEMINI_API_KEY = "NEXORA_GEMINI_API_KEY"
 
 DEFAULT_PROVIDER = "hash"
 DEFAULT_MODEL = "hash-sha256"
@@ -139,10 +141,15 @@ class EmbeddingConfig:
                 resulting value fails validation.
         """
         env = os.environ if environ is None else environ
+        provider = _env_text(env, ENV_PROVIDER) or DEFAULT_PROVIDER
+        api_key = _env_text(env, ENV_API_KEY)
+        if api_key is None and provider.strip().lower() == "gemini":
+            api_key = _env_text(env, ENV_GEMINI_API_KEY) or _env_text(env, ENV_NEXORA_GEMINI_API_KEY)
+
         return cls(
-            provider=_env_text(env, ENV_PROVIDER) or DEFAULT_PROVIDER,
+            provider=provider,
             model=_env_text(env, ENV_MODEL) or DEFAULT_MODEL,
-            api_key=_env_text(env, ENV_API_KEY),
+            api_key=api_key,
             base_url=_env_text(env, ENV_BASE_URL),
             dimension=_env_int(env, ENV_DIMENSION),
             batch_size=_env_int(env, ENV_BATCH_SIZE),
