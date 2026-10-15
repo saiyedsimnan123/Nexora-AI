@@ -55,6 +55,7 @@ class SimulatedProductionOpenAIProvider(EmbeddingProvider):
         self.model = "text-embedding-3-small"
         self.call_count = 0
         self._synthetic_backend = BenchmarkSemanticEmbeddingService(dimension=64)
+        self.is_simulated = True
 
     @property
     def dimension(self) -> int:
@@ -95,6 +96,8 @@ def test_production_mode_fails_open_when_credentials_unavailable(monkeypatch):
     assert report.is_semantic is True
     # Crucial requirement: DO NOT silently substitute synthetic embedding!
     assert report.is_synthetic is False
+    assert report.is_live is False
+    assert report.vector_store_type == "uninitialized"
     assert report.infrastructure_limitation is not None
     assert "External model credentials are unavailable" in report.infrastructure_limitation
     assert report.metrics is None
@@ -103,10 +106,11 @@ def test_production_mode_fails_open_when_credentials_unavailable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 2. Production Evaluation with Available/Injected Provider
+# 2. Production Evaluation Control-Flow Testing with Mocked Provider
 # ---------------------------------------------------------------------------
 def test_production_mode_executes_with_injected_provider():
-    """When production provider is provided, execute full evaluation and report production metrics."""
+    """When simulated production provider is injected for control-flow testing,
+    verify complete execution pipeline while ensuring metrics are flagged as simulated/synthetic."""
     prod_provider = SimulatedProductionOpenAIProvider()
     quality_policy = RetrievalQualityPolicy(min_score=0.35, max_results=5, max_results_per_paper=2)
 
@@ -120,11 +124,16 @@ def test_production_mode_executes_with_injected_provider():
 
     assert report.status == "completed"
     assert report.mode == "production"
-    assert report.provider_name == "openai"
+    assert report.provider_name == "openai (simulated)"
     assert report.model_name == "text-embedding-3-small"
     assert report.dimension == 1536
     assert report.is_semantic is True
-    assert report.is_synthetic is False
+    # Crucial integrity requirement: simulated provider must NOT claim genuine live production!
+    assert report.is_live is False
+    assert report.is_synthetic is True
+    assert report.vector_store_type == "in_memory (local evaluation)"
+    assert report.infrastructure_limitation is not None
+    assert "Simulated test double" in report.infrastructure_limitation
     assert report.metrics is not None
     assert report.metrics.total_queries == 13
     assert report.metrics.unanswerable_rejection_rate == 1.0
@@ -132,6 +141,72 @@ def test_production_mode_executes_with_injected_provider():
     assert report.paper_scope_isolation is not None
     assert report.paper_scope_isolation["isolation_successful"] is True
     assert len(report.threshold_calibration) == 4
+
+
+# ---------------------------------------------------------------------------
+# 2b. Regression Test: Simulated/Synthetic Provider Cannot Be Reported as Live Production
+# ---------------------------------------------------------------------------
+def test_simulated_or_synthetic_provider_cannot_be_reported_as_genuine_live_production():
+    """Regression test: simulated or synthetic embeddings cannot be reported as genuine live production.
+
+    Requirement (Milestone 12C-31.1):
+    Do not report metrics from SimulatedProductionOpenAIProvider or any synthetic backend
+    as real OpenAI or production embedding measurements.
+    """
+    # 1. Simulated OpenAI provider injected into PRODUCTION mode
+    simulated_provider = SimulatedProductionOpenAIProvider()
+    cfg1 = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        embedding_provider=simulated_provider,
+    )
+    report1 = evaluate_production_retrieval(cfg1)
+
+    assert report1.is_live is False
+    assert report1.is_synthetic is True
+    assert "simulated" in report1.provider_name.lower()
+    assert report1.vector_store_type == "in_memory (local evaluation)"
+    assert report1.infrastructure_limitation is not None
+    assert "Simulated test double" in report1.infrastructure_limitation
+    assert report1.evaluation_conditions is not None
+    assert report1.evaluation_conditions["is_live_provider"] is False
+    assert report1.evaluation_conditions["is_live_vector_store"] is False
+
+    # 2. BenchmarkSynthetic provider injected into PRODUCTION mode
+    synthetic_provider = BenchmarkSemanticEmbeddingService()
+    cfg2 = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        embedding_provider=synthetic_provider,
+    )
+    report2 = evaluate_production_retrieval(cfg2)
+
+    assert report2.is_live is False
+    assert report2.is_synthetic is True
+    assert "simulated" in report2.provider_name.lower() or "synthetic" in report2.provider_name.lower()
+    assert report2.vector_store_type == "in_memory (local evaluation)"
+    assert report2.infrastructure_limitation is not None
+    assert report2.evaluation_conditions["is_live_provider"] is False
+
+    # 3. OpenAIEmbeddingProvider with a mock client injected into PRODUCTION mode
+    mock_client = MagicMock()
+    item = MagicMock()
+    item.embedding = [0.05] * 1536
+    item.index = 0
+    mock_client.embeddings.create.return_value = MagicMock(data=[item])
+    config = EmbeddingConfig(provider="openai", model="text-embedding-3-small", api_key="sk-test", dimension=1536)
+    from nexora.embedding.openai_provider import OpenAIEmbeddingProvider
+    mock_openai_provider = OpenAIEmbeddingProvider(config, client=mock_client)
+    cfg3 = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        embedding_provider=mock_openai_provider,
+    )
+    report3 = evaluate_production_retrieval(cfg3)
+
+    assert report3.is_live is False
+    assert report3.is_synthetic is True
+    assert "simulated" in report3.provider_name.lower()
+    assert report3.vector_store_type == "in_memory (local evaluation)"
+    assert report3.infrastructure_limitation is not None
+    assert report3.evaluation_conditions["is_live_provider"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +223,8 @@ def test_configured_pipeline_mode_reports_honestly():
     assert report.provider_name == "hash"
     assert report.is_semantic is False
     assert report.is_synthetic is False
+    assert report.is_live is False
+    assert report.vector_store_type == "in_memory (local evaluation)"
     # Reports honest limitation about hash non-semantic nature
     assert "deterministic text hashing and does not model semantic" in report.infrastructure_limitation
 
@@ -169,6 +246,8 @@ def test_synthetic_mode_is_clearly_demarcated():
     assert report.provider_name == "benchmark_synthetic"
     assert report.is_synthetic is True
     assert report.is_semantic is True
+    assert report.is_live is False
+    assert report.vector_store_type == "in_memory (local evaluation)"
     assert report.metrics is not None
     assert report.metrics.mean_reciprocal_rank >= 0.75
 
@@ -249,6 +328,10 @@ def test_production_evaluation_report_to_dict():
 
     assert data["mode"] == "synthetic"
     assert data["status"] == "completed"
+    assert data["is_live"] is False
+    assert data["is_synthetic"] is True
+    assert data["vector_store_type"] == "in_memory (local evaluation)"
+    assert "evaluation_conditions" in data
     assert "metrics" in data
     assert "total_queries" in data["metrics"]
     assert "paper_scope_isolation" in data

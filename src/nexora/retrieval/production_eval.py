@@ -88,6 +88,8 @@ class ProductionEvaluationReport:
     infrastructure_limitation: str | None
     corpus_info: dict[str, Any]
     policy_settings: dict[str, Any]
+    is_live: bool = False
+    evaluation_conditions: dict[str, Any] | None = None
     metrics: RetrievalEvaluationMetrics | None = None
     paper_scope_isolation: dict[str, Any] | None = None
     threshold_calibration: list[dict[str, Any]] | None = None
@@ -116,13 +118,73 @@ class ProductionEvaluationReport:
             "vector_store_type": self.vector_store_type,
             "is_semantic": self.is_semantic,
             "is_synthetic": self.is_synthetic,
+            "is_live": self.is_live,
             "infrastructure_limitation": self.infrastructure_limitation,
             "corpus_info": self.corpus_info,
             "policy_settings": self.policy_settings,
+            "evaluation_conditions": self.evaluation_conditions,
             "metrics": metrics_dict,
             "paper_scope_isolation": self.paper_scope_isolation,
             "threshold_calibration": self.threshold_calibration,
         }
+
+
+def format_vector_store_label(vector_store: VectorStore | None) -> str:
+    """Format an honest vector store description distinguishing live from local evaluation."""
+    if vector_store is None:
+        return "uninitialized"
+    store_cls_name = type(vector_store).__name__
+    if isinstance(vector_store, InMemoryVectorStore) or store_cls_name == "InMemoryVectorStore":
+        return "in_memory (local evaluation)"
+    if store_cls_name == "QdrantVectorStore":
+        client = getattr(vector_store, "_client", None)
+        client_cls = type(client).__name__
+        if "Mock" in client_cls or "Fake" in client_cls:
+            return "qdrant (simulated local evaluation)"
+        return "qdrant (live persistent)"
+    return f"{store_cls_name} (local evaluation)"
+
+
+def is_simulated_or_synthetic_provider(provider: Any) -> bool:
+    """Return True if provider is a mock, simulation, or synthetic test double."""
+    if provider is None:
+        return False
+    if getattr(provider, "is_simulated", False) or getattr(provider, "is_synthetic", False):
+        return True
+    if hasattr(provider, "_synthetic_backend"):
+        return True
+    cls_name = type(provider).__name__
+    if any(k in cls_name for k in ("Simulated", "Mock", "Fake", "Synthetic", "Double", "Stub")):
+        return True
+    if isinstance(provider, BenchmarkSemanticEmbeddingService):
+        return True
+    provider_id = str(getattr(provider, "provider", getattr(provider, "name", ""))).lower()
+    from nexora.embedding.openai_provider import OpenAIEmbeddingProvider
+    if provider_id == "openai" and not isinstance(provider, OpenAIEmbeddingProvider):
+        return True
+    if isinstance(provider, OpenAIEmbeddingProvider):
+        client = getattr(provider, "_client", None)
+        if client is not None:
+            client_cls = type(client).__name__
+            if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
+                return True
+    return False
+
+
+def is_genuine_live_openai_provider(provider: Any) -> bool:
+    """Return True if provider is a live, genuine OpenAI provider with real client and credentials."""
+    from nexora.embedding.openai_provider import OpenAIEmbeddingProvider
+    if not isinstance(provider, OpenAIEmbeddingProvider):
+        return False
+    if is_simulated_or_synthetic_provider(provider):
+        return False
+    config = getattr(provider, "_config", None)
+    if config is None or not getattr(config, "has_api_key", False):
+        return False
+    client = getattr(provider, "_client", None)
+    if client is None:
+        return False
+    return True
 
 
 def check_production_credentials(api_key: str | None = None) -> tuple[bool, str | None]:
@@ -256,30 +318,57 @@ def evaluate_production_retrieval(
     # 1. Production Mode: Requires real external model credentials
     # -----------------------------------------------------------------------
     if cfg.mode == EvaluationMode.PRODUCTION:
-        has_credentials, limitation_msg = check_production_credentials(cfg.api_key)
-        if not has_credentials and cfg.embedding_provider is None:
-            # Explicit limitation reporting: DO NOT silently substitute synthetic embedding!
-            return ProductionEvaluationReport(
-                mode=cfg.mode.value,
-                status="unavailable",
-                provider_name="openai",
-                model_name=cfg.model_name,
-                dimension=cfg.dimension,
-                vector_store_type="qdrant" if cfg.vector_store is not None else "uninitialized",
-                is_semantic=True,
-                is_synthetic=False,
-                infrastructure_limitation=limitation_msg,
-                corpus_info=corpus_info,
-                policy_settings=policy_info,
-                metrics=None,
-                paper_scope_isolation=None,
-                threshold_calibration=None,
-            )
-
-        # Build real production embedding provider
         if cfg.embedding_provider is not None:
             provider = cfg.embedding_provider
+            if is_simulated_or_synthetic_provider(provider):
+                # Injected test double or synthetic provider: do not report as genuine production!
+                is_live = False
+                is_synthetic = True
+                is_semantic = True
+                base_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
+                provider_name = f"{base_name} (simulated)" if "(simulated)" not in str(base_name) else str(base_name)
+                model_name = getattr(provider, "model", cfg.model_name)
+                dim = getattr(provider, "dimension", cfg.dimension)
+                simulated_limitation = (
+                    "Simulated test double: metrics reflect deterministic mock embeddings, "
+                    "not genuine live production API measurements."
+                )
+            else:
+                is_live = is_genuine_live_openai_provider(provider)
+                is_synthetic = False
+                is_semantic = True
+                provider_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
+                model_name = getattr(provider, "model", cfg.model_name)
+                dim = getattr(provider, "dimension", cfg.dimension)
+                simulated_limitation = None
         else:
+            has_credentials, limitation_msg = check_production_credentials(cfg.api_key)
+            if not has_credentials:
+                # Explicit limitation reporting: DO NOT silently substitute synthetic embedding!
+                return ProductionEvaluationReport(
+                    mode=cfg.mode.value,
+                    status="unavailable",
+                    provider_name="openai",
+                    model_name=cfg.model_name,
+                    dimension=cfg.dimension,
+                    vector_store_type=format_vector_store_label(cfg.vector_store),
+                    is_semantic=True,
+                    is_synthetic=False,
+                    is_live=False,
+                    infrastructure_limitation=limitation_msg,
+                    corpus_info=corpus_info,
+                    policy_settings=policy_info,
+                    evaluation_conditions={
+                        "is_live_provider": False,
+                        "is_live_vector_store": False,
+                        "credentials_available": False,
+                    },
+                    metrics=None,
+                    paper_scope_isolation=None,
+                    threshold_calibration=None,
+                )
+
+            # Build real production embedding provider
             emb_config = EmbeddingConfig(
                 provider="openai",
                 model=cfg.model_name,
@@ -287,12 +376,13 @@ def evaluate_production_retrieval(
                 dimension=cfg.dimension,
             )
             provider = create_embedding_provider(emb_config)
-
-        provider_name = getattr(provider, "name", "openai")
-        model_name = getattr(provider, "model", cfg.model_name)
-        dim = getattr(provider, "dimension", cfg.dimension)
-        is_semantic = True
-        is_synthetic = False
+            is_live = True
+            is_synthetic = False
+            is_semantic = True
+            provider_name = "openai"
+            model_name = cfg.model_name
+            dim = cfg.dimension
+            simulated_limitation = None
 
     # -----------------------------------------------------------------------
     # 2. Configured Pipeline Mode: Uses whatever pipeline is currently configured
@@ -307,15 +397,20 @@ def evaluate_production_retrieval(
             emb_config = EmbeddingConfig()
             provider = create_embedding_provider(emb_config)
 
+        is_live = False
+        is_synthetic = False
         if isinstance(provider, HashEmbeddingProvider):
             provider_name = "hash"
             model_name = getattr(provider, "model", "hash-sha256")
+            is_semantic = False
         else:
             provider_name = getattr(provider, "provider", getattr(provider, "name", type(provider).__name__))
             model_name = getattr(provider, "model", "default")
+            is_semantic = (str(provider_name).lower() == "openai")
+            if is_semantic and is_genuine_live_openai_provider(provider):
+                is_live = True
         dim = getattr(provider, "dimension", None)
-        is_semantic = (str(provider_name).lower() == "openai")
-        is_synthetic = False
+        simulated_limitation = None
 
     # -----------------------------------------------------------------------
     # 3. Synthetic Mode: Offline deterministic CI benchmark
@@ -327,6 +422,8 @@ def evaluate_production_retrieval(
         dim = 64
         is_semantic = True
         is_synthetic = True
+        is_live = False
+        simulated_limitation = None
 
     # Assemble pipeline pieces
     embedding_service = (
@@ -384,12 +481,28 @@ def evaluate_production_retrieval(
         k_values=cfg.k_values,
     )
 
-    limitation_text = None
+    limitation_text = simulated_limitation
     if not is_semantic:
-        limitation_text = (
+        hash_limitation = (
             f"The '{provider_name}' provider uses deterministic text hashing and does not model "
             "semantic conceptual similarity. Production deployment requires semantic embeddings."
         )
+        limitation_text = (
+            f"{simulated_limitation}; {hash_limitation}"
+            if simulated_limitation
+            else hash_limitation
+        )
+
+    vector_store_label = format_vector_store_label(vector_store)
+    eval_conditions = {
+        "is_live_provider": is_live,
+        "is_live_vector_store": "live persistent" in vector_store_label,
+        "vector_store_type": vector_store_label,
+        "cache_queries": True,
+        "k_values": list(cfg.k_values),
+        "total_benchmark_cases": len(benchmark_cases),
+        "corpus_chunks_count": len(corpus_records),
+    }
 
     return ProductionEvaluationReport(
         mode=cfg.mode.value,
@@ -397,12 +510,14 @@ def evaluate_production_retrieval(
         provider_name=str(provider_name),
         model_name=str(model_name),
         dimension=dim,
-        vector_store_type=type(vector_store).__name__,
+        vector_store_type=vector_store_label,
         is_semantic=is_semantic,
         is_synthetic=is_synthetic,
+        is_live=is_live,
         infrastructure_limitation=limitation_text,
         corpus_info=corpus_info,
         policy_settings=_get_policy_metadata(policy),
+        evaluation_conditions=eval_conditions,
         metrics=metrics,
         paper_scope_isolation=isolation_res,
         threshold_calibration=calibration_res,
