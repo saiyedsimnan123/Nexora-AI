@@ -374,3 +374,180 @@ def test_cli_with_invalid_dataset_exits_with_error(tmp_path):
     assert exit_code == 1
     assert report.status == "failed"
     assert "missing required field 'text'" in report.error
+
+
+# ===========================================================================
+# 6. Provenance Validation Tests (Milestone 12C-33.1)
+# ===========================================================================
+
+def test_is_illustrative_only_true_boolean(sample_valid_dataset_dict):
+    sample_valid_dataset_dict["is_illustrative_only"] = True
+    ds = validate_dataset_dict(sample_valid_dataset_dict)
+    assert ds.is_illustrative_only is True
+    assert ds.provenance == "illustrative"
+    assert ds.to_dict()["is_illustrative_only"] is True
+    assert ds.to_dict()["provenance"] == "illustrative"
+
+
+def test_is_illustrative_only_false_boolean(sample_valid_dataset_dict):
+    sample_valid_dataset_dict["is_illustrative_only"] = False
+    ds = validate_dataset_dict(sample_valid_dataset_dict)
+    assert ds.is_illustrative_only is False
+    assert ds.provenance == "benchmark"
+    assert ds.to_dict()["is_illustrative_only"] is False
+    assert ds.to_dict()["provenance"] == "benchmark"
+
+
+def test_is_illustrative_only_omitted_represents_unknown(sample_valid_dataset_dict):
+    del sample_valid_dataset_dict["is_illustrative_only"]
+    ds = validate_dataset_dict(sample_valid_dataset_dict)
+    assert ds.is_illustrative_only is None
+    assert ds.provenance == "unknown"
+    assert ds.to_dict()["is_illustrative_only"] is None
+    assert ds.to_dict()["provenance"] == "unknown"
+    # Never silently claim benchmark or automatically classify as illustrative
+    assert ds.is_illustrative_only is not True
+    assert ds.is_illustrative_only is not False
+
+
+def test_is_illustrative_only_rejects_string_booleans(sample_valid_dataset_dict):
+    # Reject string "false"
+    sample_valid_dataset_dict["is_illustrative_only"] = "false"
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean"):
+        validate_dataset_dict(sample_valid_dataset_dict)
+
+    # Reject string "true"
+    sample_valid_dataset_dict["is_illustrative_only"] = "true"
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean"):
+        validate_dataset_dict(sample_valid_dataset_dict)
+
+
+def test_is_illustrative_only_rejects_numbers_and_null(sample_valid_dataset_dict):
+    # Reject number 0
+    sample_valid_dataset_dict["is_illustrative_only"] = 0
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean.*got int"):
+        validate_dataset_dict(sample_valid_dataset_dict)
+
+    # Reject number 1
+    sample_valid_dataset_dict["is_illustrative_only"] = 1
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean.*got int"):
+        validate_dataset_dict(sample_valid_dataset_dict)
+
+    # Reject explicit null (None)
+    sample_valid_dataset_dict["is_illustrative_only"] = None
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean.*got null"):
+        validate_dataset_dict(sample_valid_dataset_dict)
+
+
+def test_provenance_json_and_jsonl_consistency(tmp_path):
+    chunks = [{"chunk_id": "c1", "paper_id": "p1", "text": "text content"}]
+    queries = [{"query": "sample query", "expected_chunk_ids": ["c1"]}]
+
+    # 1. Explicit true
+    json_path = tmp_path / "true.json"
+    json_path.write_text(json.dumps({"chunks": chunks, "queries": queries, "is_illustrative_only": True}), encoding="utf-8")
+    jsonl_path = tmp_path / "true.jsonl"
+    jsonl_path.write_text(
+        json.dumps({"type": "metadata", "is_illustrative_only": True}) + "\n"
+        + json.dumps({"type": "chunk", "chunk_id": "c1", "paper_id": "p1", "text": "text content"}) + "\n"
+        + json.dumps({"type": "query", "query": "sample query", "expected_chunk_ids": ["c1"]}) + "\n",
+        encoding="utf-8",
+    )
+    ds_json = load_retrieval_dataset(json_path)
+    ds_jsonl = load_retrieval_dataset(jsonl_path)
+    assert ds_json.is_illustrative_only is True and ds_json.provenance == "illustrative"
+    assert ds_jsonl.is_illustrative_only is True and ds_jsonl.provenance == "illustrative"
+
+    # 2. Explicit false
+    json_path_f = tmp_path / "false.json"
+    json_path_f.write_text(json.dumps({"chunks": chunks, "queries": queries, "is_illustrative_only": False}), encoding="utf-8")
+    jsonl_path_f = tmp_path / "false.jsonl"
+    jsonl_path_f.write_text(
+        json.dumps({"type": "metadata", "is_illustrative_only": False}) + "\n"
+        + json.dumps({"type": "chunk", "chunk_id": "c1", "paper_id": "p1", "text": "text content"}) + "\n"
+        + json.dumps({"type": "query", "query": "sample query", "expected_chunk_ids": ["c1"]}) + "\n",
+        encoding="utf-8",
+    )
+    ds_json_f = load_retrieval_dataset(json_path_f)
+    ds_jsonl_f = load_retrieval_dataset(jsonl_path_f)
+    assert ds_json_f.is_illustrative_only is False and ds_json_f.provenance == "benchmark"
+    assert ds_jsonl_f.is_illustrative_only is False and ds_jsonl_f.provenance == "benchmark"
+
+    # 3. Omitted provenance
+    json_path_omit = tmp_path / "omit.json"
+    json_path_omit.write_text(json.dumps({"chunks": chunks, "queries": queries}), encoding="utf-8")
+    jsonl_path_omit = tmp_path / "omit.jsonl"
+    jsonl_path_omit.write_text(
+        json.dumps({"type": "chunk", "chunk_id": "c1", "paper_id": "p1", "text": "text content"}) + "\n"
+        + json.dumps({"type": "query", "query": "sample query", "expected_chunk_ids": ["c1"]}) + "\n",
+        encoding="utf-8",
+    )
+    ds_json_omit = load_retrieval_dataset(json_path_omit)
+    ds_jsonl_omit = load_retrieval_dataset(jsonl_path_omit)
+    assert ds_json_omit.is_illustrative_only is None and ds_json_omit.provenance == "unknown"
+    assert ds_jsonl_omit.is_illustrative_only is None and ds_jsonl_omit.provenance == "unknown"
+
+    # 4. Invalid string "false" rejected by both
+    json_path_bad = tmp_path / "bad.json"
+    json_path_bad.write_text(json.dumps({"chunks": chunks, "queries": queries, "is_illustrative_only": "false"}), encoding="utf-8")
+    jsonl_path_bad = tmp_path / "bad.jsonl"
+    jsonl_path_bad.write_text(
+        json.dumps({"type": "metadata", "is_illustrative_only": "false"}) + "\n"
+        + json.dumps({"type": "chunk", "chunk_id": "c1", "paper_id": "p1", "text": "text content"}) + "\n"
+        + json.dumps({"type": "query", "query": "sample query", "expected_chunk_ids": ["c1"]}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean"):
+        load_retrieval_dataset(json_path_bad)
+    with pytest.raises(DatasetValidationError, match=r"Invalid 'is_illustrative_only': must be a boolean"):
+        load_retrieval_dataset(jsonl_path_bad)
+
+
+def test_evaluate_production_retrieval_provenance_reporting(sample_valid_dataset_dict):
+    # Omitted provenance
+    del sample_valid_dataset_dict["is_illustrative_only"]
+    ds = validate_dataset_dict(sample_valid_dataset_dict)
+    report = evaluate_production_retrieval(ProductionEvaluationConfig(mode=EvaluationMode.SYNTHETIC, dataset=ds))
+    assert report.dataset_info["is_illustrative_only"] is None
+    assert report.dataset_info["provenance"] == "unknown"
+
+    # Explicit benchmark
+    sample_valid_dataset_dict["is_illustrative_only"] = False
+    ds_bench = validate_dataset_dict(sample_valid_dataset_dict)
+    report_bench = evaluate_production_retrieval(ProductionEvaluationConfig(mode=EvaluationMode.SYNTHETIC, dataset=ds_bench))
+    assert report_bench.dataset_info["is_illustrative_only"] is False
+    assert report_bench.dataset_info["provenance"] == "benchmark"
+
+    # Default synthetic benchmark
+    report_synth = evaluate_production_retrieval(ProductionEvaluationConfig(mode=EvaluationMode.SYNTHETIC))
+    assert report_synth.dataset_info["is_illustrative_only"] is True
+    assert report_synth.dataset_info["provenance"] == "illustrative"
+
+
+def test_cli_provenance_reporting(tmp_path, sample_valid_dataset_dict):
+    # Omitted provenance
+    del sample_valid_dataset_dict["is_illustrative_only"]
+    ds_file = tmp_path / "cli_omit_dataset.json"
+    ds_file.write_text(json.dumps(sample_valid_dataset_dict), encoding="utf-8")
+
+    exit_code, report, _ = run_eval_cli([
+        "--mode", "synthetic",
+        "--dataset", str(ds_file),
+    ])
+    assert exit_code == 0
+    assert report.dataset_info["is_illustrative_only"] is None
+    assert report.dataset_info["provenance"] == "unknown"
+
+    # Invalid string provenance fails closed
+    bad_ds_file = tmp_path / "cli_bad_provenance.json"
+    sample_valid_dataset_dict["is_illustrative_only"] = "true"
+    bad_ds_file.write_text(json.dumps(sample_valid_dataset_dict), encoding="utf-8")
+
+    exit_code, report, _ = run_eval_cli([
+        "--mode", "synthetic",
+        "--dataset", str(bad_ds_file),
+    ])
+    assert exit_code == 1
+    assert report.status == "failed"
+    assert "Invalid 'is_illustrative_only'" in report.error
+

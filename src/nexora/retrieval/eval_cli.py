@@ -178,8 +178,13 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
             d_name = report.dataset_info.get("name") or "custom"
             d_chunks = report.dataset_info.get("chunks_count", 0)
             d_queries = report.dataset_info.get("queries_count", 0)
-            d_illustrative = report.dataset_info.get("is_illustrative_only", False)
-            ill_str = " (illustrative)" if d_illustrative else ""
+            d_illustrative = report.dataset_info.get("is_illustrative_only")
+            if d_illustrative is True:
+                ill_str = " (illustrative)"
+            elif d_illustrative is False:
+                ill_str = " (benchmark)"
+            else:
+                ill_str = " (unknown provenance)"
             print(f"Dataset: {d_name}{ill_str} | Chunks: {d_chunks} | Queries: {d_queries}")
         if report.metrics is not None:
             mrr = report.metrics.mean_reciprocal_rank
@@ -239,7 +244,7 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
                 unavailable_dependencies=[],
                 corpus_info={"papers_count": 0, "chunks_count": 0, "papers": []},
                 policy_settings=policy_info,
-                dataset_info={"path": args.dataset, "error": str(exc)},
+                dataset_info={"path": args.dataset, "error": str(exc), "provenance": "invalid"},
             )
             json_text = json.dumps(report.to_dict(), indent=None if args.compact else 2)
             _handle_output(args.output, json_text, report)

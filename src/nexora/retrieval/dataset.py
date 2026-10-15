@@ -31,12 +31,21 @@ class ResearchRetrievalDataset:
     description: str
     chunks: list[dict[str, Any]]
     queries: list[dict[str, Any]]
-    is_illustrative_only: bool = True
+    is_illustrative_only: bool | None = None
 
     @property
     def name(self) -> str:
         """Name/ID of the dataset."""
         return self.dataset_id
+
+    @property
+    def provenance(self) -> str:
+        """Explicit dataset provenance classification: 'illustrative', 'benchmark', or 'unknown'."""
+        if self.is_illustrative_only is True:
+            return "illustrative"
+        if self.is_illustrative_only is False:
+            return "benchmark"
+        return "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert dataset to dictionary representation."""
@@ -46,6 +55,7 @@ class ResearchRetrievalDataset:
             "chunks": [dict(c) for c in self.chunks],
             "queries": [dict(q) for q in self.queries],
             "is_illustrative_only": self.is_illustrative_only,
+            "provenance": self.provenance,
         }
 
 
@@ -259,7 +269,18 @@ def validate_dataset_dict(raw: dict[str, Any]) -> ResearchRetrievalDataset:
         raw.get("description")
         or "Custom research retrieval dataset for quantitative evaluation"
     ).strip()
-    is_illustrative = bool(raw.get("is_illustrative_only", True))
+
+    if "is_illustrative_only" in raw:
+        raw_illustrative = raw["is_illustrative_only"]
+        if not isinstance(raw_illustrative, bool):
+            val_type = "null" if raw_illustrative is None else type(raw_illustrative).__name__
+            raise DatasetValidationError(
+                f"Invalid 'is_illustrative_only': must be a boolean (true or false), "
+                f"got {val_type} ({raw_illustrative!r})"
+            )
+        is_illustrative = raw_illustrative
+    else:
+        is_illustrative = None
 
     return ResearchRetrievalDataset(
         dataset_id=dataset_id,
@@ -276,7 +297,8 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
     queries: list[dict[str, Any]] = []
     dataset_id = "custom_jsonl_dataset"
     description = "JSONL research retrieval dataset"
-    is_illustrative = True
+    is_illustrative_specified = False
+    is_illustrative_val: Any = None
 
     non_empty_lines = 0
     for line_num, line in enumerate(lines, start=1):
@@ -301,7 +323,8 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
             dataset_id = str(record.get("dataset_id") or dataset_id)
             description = str(record.get("description") or description)
             if "is_illustrative_only" in record:
-                is_illustrative = bool(record["is_illustrative_only"])
+                is_illustrative_specified = True
+                is_illustrative_val = record["is_illustrative_only"]
         elif rec_type == "chunk" or ("chunk_id" in record and "text" in record):
             chunks.append(record)
         elif rec_type == "query" or ("query" in record and ("expected_chunk_ids" in record or "relevant_chunk_ids" in record)):
@@ -309,6 +332,9 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
         elif "dataset_id" in record and "chunks" not in record:
             dataset_id = str(record.get("dataset_id") or dataset_id)
             description = str(record.get("description") or description)
+            if "is_illustrative_only" in record:
+                is_illustrative_specified = True
+                is_illustrative_val = record["is_illustrative_only"]
         else:
             raise DatasetValidationError(
                 f"Line {line_num} has unrecognized record format: {record}"
@@ -317,13 +343,16 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
     if non_empty_lines == 0:
         raise DatasetValidationError("JSONL dataset is empty")
 
-    return validate_dataset_dict({
+    dict_to_validate: dict[str, Any] = {
         "dataset_id": dataset_id,
         "description": description,
         "chunks": chunks,
         "queries": queries,
-        "is_illustrative_only": is_illustrative,
-    })
+    }
+    if is_illustrative_specified:
+        dict_to_validate["is_illustrative_only"] = is_illustrative_val
+
+    return validate_dataset_dict(dict_to_validate)
 
 
 def load_retrieval_dataset(source: str | os.PathLike | dict[str, Any]) -> ResearchRetrievalDataset:

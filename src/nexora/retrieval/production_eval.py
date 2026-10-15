@@ -435,7 +435,8 @@ def evaluate_production_retrieval(
                 "name": getattr(ds, "name", getattr(ds, "dataset_id", "custom_dataset")),
                 "description": getattr(ds, "description", ""),
                 "path": cfg.dataset_path or getattr(ds, "path", None),
-                "is_illustrative_only": getattr(ds, "is_illustrative_only", False),
+                "is_illustrative_only": getattr(ds, "is_illustrative_only", None),
+                "provenance": getattr(ds, "provenance", "unknown"),
                 "chunks_count": len(raw_chunks),
                 "queries_count": len(benchmark_cases),
                 "unanswerable_queries_count": sum(
@@ -470,7 +471,7 @@ def evaluate_production_retrieval(
                 unavailable_dependencies=[],
                 corpus_info={"papers_count": 0, "chunks_count": 0, "papers": []},
                 policy_settings=policy_info,
-                dataset_info={"path": cfg.dataset_path, "error": str(exc)},
+                dataset_info={"path": cfg.dataset_path, "error": str(exc), "provenance": "invalid"},
                 evaluation_conditions={"dataset_valid": False},
                 metrics=None,
                 paper_scope_isolation=None,
@@ -489,6 +490,7 @@ def evaluate_production_retrieval(
             "description": "Built-in synthetic research retrieval benchmark",
             "path": None,
             "is_illustrative_only": True,
+            "provenance": "illustrative",
             "chunks_count": len(raw_chunks),
             "queries_count": len(benchmark_cases),
             "unanswerable_queries_count": sum(
