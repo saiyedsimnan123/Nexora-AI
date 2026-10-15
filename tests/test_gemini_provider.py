@@ -44,6 +44,10 @@ from nexora.embedding.gemini_provider import (
     LEGACY_MODEL_ALIASES,
     GeminiEmbeddingProvider,
     GeminiEmbeddingProviderError,
+    GeminiReadinessReport,
+    check_gemini_readiness,
+    is_simulated_client,
+    sanitize_secret_text,
 )
 from nexora.retrieval.eval_cli import run_eval_cli
 from nexora.retrieval.production_eval import (
@@ -592,7 +596,304 @@ def test_cli_fail_on_unavailable_with_gemini(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 9. Opt-In Live Smoke Test (Skipped in CI)
+# 9. Provider Readiness & Offline Smoke Testing (Milestone 12C-39)
+# ---------------------------------------------------------------------------
+def test_gemini_readiness_report_structure():
+    """Verify GeminiReadinessReport dataclass fields, defaults, and dictionary export."""
+    report = GeminiReadinessReport(
+        status="ready",
+        is_ready=True,
+        is_live=True,
+        is_simulated=False,
+        model="gemini-embedding-2",
+        dimension=768,
+        sample_vector_dimension=768,
+        configuration_valid=True,
+        error=None,
+        probe_text="health probe",
+        latency_ms=12.34,
+    )
+    assert report.status == "ready"
+    assert report.is_ready is True
+    assert report.is_live is True
+    assert report.is_simulated is False
+    assert report.model == "gemini-embedding-2"
+    assert report.dimension == 768
+    assert report.sample_vector_dimension == 768
+    assert report.configuration_valid is True
+    assert report.error is None
+    assert report.probe_text == "health probe"
+    assert report.latency_ms == 12.34
+    assert isinstance(report.timestamp, str)
+
+    d = report.to_dict()
+    assert d["status"] == "ready"
+    assert d["is_ready"] is True
+    assert d["is_live"] is True
+    assert d["is_simulated"] is False
+    assert d["model"] == "gemini-embedding-2"
+    assert d["dimension"] == 768
+    assert d["sample_vector_dimension"] == 768
+    assert d["latency_ms"] == 12.34
+
+
+def test_gemini_readiness_missing_credentials_report(monkeypatch):
+    """When credentials are unset, readiness check reports status='unavailable' honestly."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv(ENV_API_KEY, raising=False)
+
+    report_none = check_gemini_readiness(None)
+    assert report_none.status == "unavailable"
+    assert report_none.is_ready is False
+    assert report_none.is_live is False
+    assert report_none.is_simulated is False
+    assert "GEMINI_API_KEY" in (report_none.error or "")
+
+    cfg = EmbeddingConfig(provider="gemini", model="gemini-embedding-2")
+    report_cfg = check_gemini_readiness(cfg)
+    assert report_cfg.status == "unavailable"
+    assert report_cfg.is_ready is False
+    assert report_cfg.is_live is False
+
+
+def test_gemini_readiness_invalid_configuration():
+    """Invalid configuration parameters yield status='failed' with configuration_valid=False."""
+    report_dict = check_gemini_readiness({"dimension": -10})
+    assert report_dict.status == "failed"
+    assert report_dict.configuration_valid is False
+    assert report_dict.is_ready is False
+    assert report_dict.is_live is False
+    assert "dimension" in (report_dict.error or "")
+
+    report_invalid_type = check_gemini_readiness(12345)  # type: ignore
+    assert report_invalid_type.status == "failed"
+    assert report_invalid_type.configuration_valid is False
+    assert report_invalid_type.is_ready is False
+
+
+def test_gemini_readiness_simulated_client_success():
+    """Mock/fake client executes the probe cleanly but reports status='simulated' and is_live=False."""
+    provider, client = make_provider(dimension=768)
+    assert provider.is_simulated is True
+    assert provider.is_live is False
+
+    report = provider.check_readiness()
+    assert report.status == "simulated"
+    assert report.is_ready is True
+    assert report.is_live is False
+    assert report.is_simulated is True
+    assert report.sample_vector_dimension == 768
+    assert report.dimension == 768
+    assert report.model == "gemini-embedding-2"
+    assert report.error is None
+    assert report.latency_ms is not None and report.latency_ms >= 0
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["path"] == "/v1beta/models/gemini-embedding-2:embedContent"
+    assert call["json"]["content"]["parts"][0]["text"] == "health check"
+
+
+def test_gemini_readiness_never_claims_mock_is_live():
+    """Strict integrity: even if a valid-looking API key is present, mock doubles are never live."""
+    client = FakeGeminiClient()
+    config = EmbeddingConfig(
+        provider="gemini",
+        model="gemini-embedding-2",
+        api_key="looks-like-real-key-12345",
+        dimension=768,
+    )
+    provider = GeminiEmbeddingProvider(config, client=client)
+
+    assert provider.is_simulated is True
+    assert provider.is_live is False
+
+    report = provider.check_readiness()
+    assert report.status == "simulated"
+    assert report.is_live is False
+    assert report.is_simulated is True
+    assert report.is_ready is True
+
+    provider.is_simulated = True
+    assert provider.is_live is False
+    report2 = provider.check_readiness()
+    assert report2.is_live is False
+    assert report2.status == "simulated"
+
+
+@pytest.mark.parametrize(
+    "status_code, expected_hint",
+    [
+        (400, "rejected (HTTP 400)"),
+        (401, "authentication failed (HTTP 401)"),
+        (403, "permission denied (HTTP 403)"),
+        (404, "not found (HTTP 404)"),
+        (429, "rate limit or quota exceeded (HTTP 429)"),
+        (500, "service error (HTTP 500)"),
+    ],
+)
+def test_gemini_readiness_http_errors_actionable(status_code, expected_hint):
+    """HTTP errors produce clear, actionable messages while preserving secrecy."""
+    provider, _ = make_provider(status_code=status_code)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert report.error is not None
+    assert expected_hint in report.error
+    assert FAKE_API_KEY not in report.error
+
+
+def test_gemini_readiness_network_error_actionable():
+    """Network connection failures produce actionable error messages."""
+    import httpx
+    conn_err = httpx.ConnectError("Network unreachable: generativelanguage.googleapis.com")
+    provider, _ = make_provider(error=conn_err)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "network connection error" in (report.error or "").lower() or "connecterror" in (report.error or "").lower()
+    assert FAKE_API_KEY not in (report.error or "")
+
+
+def test_gemini_readiness_vector_dimension_mismatch_failure():
+    """Returning vector with unexpected dimension reports status='failed'."""
+    provider, _ = make_provider(vector=[0.1] * 256, dimension=768)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "768" in (report.error or "")
+
+
+def test_gemini_readiness_empty_vector_failure():
+    """Returning an empty embedding reports status='failed' without silent fallback."""
+    provider, _ = make_provider(vector=[])
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "empty" in (report.error or "").lower()
+
+
+def test_gemini_readiness_non_finite_vector_failure():
+    """Returning NaN/Inf floats reports status='failed'."""
+    provider, _ = make_provider(vector=[float("nan")] * 768)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "non-finite" in (report.error or "").lower()
+
+
+def test_gemini_readiness_never_falls_back_to_synthetic_or_hash():
+    """When Gemini provider fails, it never silently falls back to hash or synthetic embeddings."""
+    provider, _ = make_provider(status_code=500)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.sample_vector_dimension is None
+    assert report.model == "gemini-embedding-2"
+    assert report.dimension == 768
+
+
+def test_gemini_readiness_secret_scrubbing():
+    """Ensure any raw credentials appearing in exceptions or headers are scrubbed."""
+    raw_secret = "secret-token-abcdef-123456"
+    leak_exception = RuntimeError(f"Failed to connect to API with key {raw_secret} and header x-goog-api-key: {raw_secret}")
+    provider, _ = make_provider(error=leak_exception, api_key=raw_secret)
+
+    report = provider.check_readiness()
+    assert report.status == "failed"
+    assert raw_secret not in (report.error or "")
+    assert "***REDACTED***" in (report.error or "")
+
+
+def test_gemini_provider_repr_is_secret_free():
+    """GeminiEmbeddingProvider.__repr__ does not expose api_key."""
+    provider, _ = make_provider(api_key="super-secret-key-123")
+    repr_str = repr(provider)
+    assert "super-secret-key-123" not in repr_str
+    assert "GeminiEmbeddingProvider" in repr_str
+    assert "gemini-embedding-2" in repr_str
+    assert "dimension=768" in repr_str
+
+
+def test_gemini_readiness_custom_probe_text():
+    """Custom probe text is sent in the embedContent request."""
+    provider, client = make_provider()
+    custom_text = "Custom readiness probe 9988"
+    report = provider.check_readiness(probe_text=custom_text)
+
+    assert report.status == "simulated"
+    assert report.probe_text == custom_text
+    assert len(client.calls) == 1
+    assert client.calls[0]["json"]["content"]["parts"][0]["text"] == custom_text
+
+
+def test_cli_smoke_test_gemini_unavailable(monkeypatch):
+    """Running CLI with --smoke-test --provider gemini when credentials are unset."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv(ENV_API_KEY, raising=False)
+
+    exit_code, report, json_text = run_eval_cli([
+        "--provider", "gemini",
+        "--smoke-test",
+    ])
+    assert exit_code == 0
+    assert report.status == "unavailable"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "unavailable" in json_text
+
+
+def test_cli_smoke_test_gemini_fail_on_unavailable(monkeypatch):
+    """Running CLI with --smoke-test --fail-on-unavailable exits with code 1 if unavailable."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv(ENV_API_KEY, raising=False)
+
+    exit_code, report, _ = run_eval_cli([
+        "--provider", "gemini",
+        "--smoke-test",
+        "--fail-on-unavailable",
+    ])
+    assert exit_code == 1
+    assert report.status == "unavailable"
+
+
+def test_cli_smoke_test_gemini_output_file(monkeypatch, tmp_path):
+    """CLI --smoke-test writes JSON report to --output file."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv(ENV_API_KEY, raising=False)
+
+    out_file = tmp_path / "smoke_report.json"
+    exit_code, report, _ = run_eval_cli([
+        "--provider", "gemini",
+        "--smoke-test",
+        "--output", str(out_file),
+    ])
+    assert exit_code == 0
+    assert out_file.exists()
+    import json
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["status"] == "unavailable"
+    assert data["is_ready"] is False
+    assert data["is_live"] is False
+
+
+# ---------------------------------------------------------------------------
+# 10. Opt-In Live Smoke Test (Skipped in CI)
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(
     not (os.getenv("GEMINI_API_KEY") or os.getenv("NEXORA_GEMINI_API_KEY")),
@@ -611,6 +912,15 @@ def test_live_gemini_api_smoke():
         dimension=768,
     )
     provider = GeminiEmbeddingProvider(config)
+
+    readiness = provider.check_readiness()
+    assert readiness.is_ready is True
+    assert readiness.is_live is True
+    assert readiness.is_simulated is False
+    assert readiness.status == "ready"
+    assert readiness.sample_vector_dimension == 768
+    assert readiness.error is None
+    assert readiness.latency_ms is not None and readiness.latency_ms > 0
 
     t1 = "Attention is all you need for sequence transduction"
     t2 = "FlashAttention computes exact attention with IO awareness"

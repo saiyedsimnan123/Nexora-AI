@@ -243,15 +243,15 @@ def is_simulated_or_synthetic_provider(provider: Any) -> bool:
             if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
                 return True
 
-    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider, is_simulated_client
     if provider_id == "gemini" and not isinstance(provider, GeminiEmbeddingProvider):
         return True
     if isinstance(provider, GeminiEmbeddingProvider):
+        if getattr(provider, "is_simulated", False):
+            return True
         client = getattr(provider, "_client", None)
-        if client is not None:
-            client_cls = type(client).__name__
-            if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
-                return True
+        if client is not None and is_simulated_client(client):
+            return True
     return False
 
 
@@ -273,10 +273,12 @@ def is_genuine_live_openai_provider(provider: Any) -> bool:
 
 def is_genuine_live_gemini_provider(provider: Any) -> bool:
     """Return True if provider is a live, genuine Gemini provider with real client and credentials."""
-    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider, is_simulated_client
     if not isinstance(provider, GeminiEmbeddingProvider):
         return False
     if is_simulated_or_synthetic_provider(provider):
+        return False
+    if getattr(provider, "is_live", None) is False:
         return False
     config = getattr(provider, "_config", None)
     if config is None or not getattr(config, "has_api_key", False):
@@ -284,8 +286,7 @@ def is_genuine_live_gemini_provider(provider: Any) -> bool:
     client = getattr(provider, "_client", None)
     if client is None:
         return False
-    client_cls = type(client).__name__
-    if any(k in client_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
+    if is_simulated_client(client):
         return False
     return True
 

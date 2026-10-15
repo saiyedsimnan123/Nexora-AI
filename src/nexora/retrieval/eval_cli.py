@@ -171,6 +171,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output compact JSON without indentation.",
     )
 
+    parser.add_argument(
+        "--smoke-test",
+        "--check-provider",
+        action="store_true",
+        dest="smoke_test",
+        help="Perform provider readiness smoke test and print readiness report.",
+    )
+
     return parser
 
 
@@ -246,10 +254,66 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
         print(json_text)
 
 
-def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEvaluationReport, str]:
+def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, Any, str]:
     """Execute evaluation CLI and return (exit_code, report, json_string)."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.smoke_test:
+        prov_name = (args.provider or os.getenv("NEXORA_EMBEDDING_PROVIDER") or "gemini").strip().lower()
+        if prov_name == "gemini":
+            from nexora.embedding.config import ENV_API_KEY, EmbeddingConfig
+            from nexora.embedding.gemini_provider import check_gemini_readiness
+
+            target_model = args.model
+            if target_model in ("text-embedding-3-small", "text-embedding-004", "default"):
+                target_model = "gemini-embedding-2"
+            target_dim = args.dimension if args.dimension != 1536 else 768
+
+            api_key = (
+                args.api_key
+                or os.getenv("GEMINI_API_KEY")
+                or os.getenv("NEXORA_GEMINI_API_KEY")
+                or os.getenv(ENV_API_KEY)
+            )
+            base_url = (
+                args.base_url
+                or os.getenv("GEMINI_BASE_URL")
+                or os.getenv("NEXORA_EMBEDDING_BASE_URL")
+            )
+
+            emb_cfg = EmbeddingConfig(
+                provider="gemini",
+                model=target_model,
+                api_key=api_key,
+                base_url=base_url,
+                dimension=target_dim,
+            )
+            readiness = check_gemini_readiness(emb_cfg)
+            json_text = json.dumps(readiness.to_dict(), indent=None if args.compact else 2)
+            if args.output and args.output != "-":
+                path = os.path.abspath(args.output)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(json_text + "\n")
+                print(f"Readiness report written to: {path}")
+                print(
+                    f"Provider: gemini | Status: {readiness.status} | "
+                    f"Ready: {readiness.is_ready} | Live: {readiness.is_live} | "
+                    f"Simulated: {readiness.is_simulated}"
+                )
+                if readiness.error:
+                    print(f"Detail: {readiness.error}")
+            else:
+                print(json_text)
+
+            if readiness.is_ready:
+                exit_code = 0
+            elif readiness.status == "unavailable":
+                exit_code = 1 if args.fail_on_unavailable else 0
+            else:
+                exit_code = 1
+            return exit_code, readiness, json_text
 
     mode = EvaluationMode(args.mode)
     k_vals = parse_k_values(args.k_values)

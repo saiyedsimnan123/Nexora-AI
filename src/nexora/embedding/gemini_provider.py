@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Sequence
+import re
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -43,6 +47,167 @@ LEGACY_MODEL_ALIASES: dict[str, str] = {
     "embedding-001": "gemini-embedding-2",
     "models/embedding-001": "gemini-embedding-2",
 }
+
+
+def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) -> str:
+    """Sanitize any API keys or secret tokens from ``text`` to prevent leaks."""
+    if not text:
+        return ""
+    result = text
+    # 1. Scrub extra secrets and environment variables
+    keys_to_scrub: set[str] = set()
+    for s in extra_secrets:
+        if s and len(str(s).strip()) >= 4:
+            keys_to_scrub.add(str(s).strip())
+    for env_var in (
+        ENV_GEMINI_API_KEY,
+        ENV_NEXORA_GEMINI_API_KEY,
+        ENV_API_KEY,
+        "OPENAI_API_KEY",
+        "GEMINI_KEY",
+    ):
+        val = os.getenv(env_var)
+        if val and len(val.strip()) >= 4:
+            keys_to_scrub.add(val.strip())
+
+    for key in sorted(keys_to_scrub, key=len, reverse=True):
+        result = result.replace(key, "***REDACTED***")
+
+    # 2. Scrub regex patterns
+    result = re.sub(
+        r"x-goog-api-key['\":\s=]+[a-zA-Z0-9_\-]+",
+        "x-goog-api-key: ***REDACTED***",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"([?&]key=)[^&\s]+",
+        r"\1***REDACTED***",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"(Bearer\s+)[a-zA-Z0-9_\-]+",
+        r"\1***REDACTED***",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(r"AIza[0-9A-Za-z-_]{35}", "***REDACTED***", result)
+
+    return result
+
+
+def _format_actionable_error(exc: Exception, api_key: str | None = None) -> str:
+    """Format a sanitized, actionable error message from an exception."""
+    raw_msg = sanitize_secret_text(str(exc), extra_secrets=[api_key])
+    exc_type = type(exc).__name__
+
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        sanitized_cause = sanitize_secret_text(str(cause), extra_secrets=[api_key])
+        if sanitized_cause and sanitized_cause not in raw_msg:
+            raw_msg = f"{raw_msg}: {sanitized_cause}"
+
+    resp = getattr(exc, "response", None) or (getattr(cause, "response", None) if cause else None)
+    status_code = getattr(resp, "status_code", None) if resp is not None else None
+    if status_code is None and "HTTP " in raw_msg:
+        match = re.search(r"HTTP\s+(\d{3})", raw_msg)
+        if match:
+            try:
+                status_code = int(match.group(1))
+            except ValueError:
+                pass
+
+    if status_code == 400:
+        return f"Gemini API request rejected (HTTP 400): check model name and request parameters. Details: {raw_msg}"
+    if status_code == 401:
+        return f"Gemini authentication failed (HTTP 401): invalid or missing API key. Details: {raw_msg}"
+    if status_code == 403:
+        return f"Gemini permission denied (HTTP 403): verify API key permissions, API activation, and project quota. Details: {raw_msg}"
+    if status_code == 404:
+        return f"Gemini model or endpoint not found (HTTP 404): check configured model name. Details: {raw_msg}"
+    if status_code == 429:
+        return f"Gemini rate limit or quota exceeded (HTTP 429): retry after backoff. Details: {raw_msg}"
+    if status_code is not None and status_code >= 500:
+        return f"Gemini upstream service error (HTTP {status_code}): Google Generative Language service error. Details: {raw_msg}"
+    if "ConnectError" in exc_type or "ConnectionError" in exc_type or (cause and ("ConnectError" in type(cause).__name__ or "ConnectionError" in type(cause).__name__)):
+        return f"Gemini network connection error: unable to reach API endpoint. Details: {raw_msg}"
+    if "Timeout" in exc_type or (cause and "Timeout" in type(cause).__name__):
+        return f"Gemini request timed out: API did not respond within timeout. Details: {raw_msg}"
+
+    return f"Gemini readiness check failed ({exc_type}): {raw_msg}"
+
+
+def is_simulated_client(client: Any) -> bool:
+    """Determine whether a client is a mock, fake, or synthetic test double."""
+    if client is None:
+        return False
+    if getattr(client, "is_simulated", False) or getattr(client, "is_synthetic", False):
+        return True
+    cls_name = type(client).__name__
+    if any(k in cls_name for k in ("Mock", "Fake", "Stub", "MagicMock", "TestDouble")):
+        return True
+    if hasattr(client, "calls") and isinstance(getattr(client, "calls"), list):
+        return True
+    if not isinstance(client, httpx.Client):
+        return True
+    transport = getattr(client, "_transport", None)
+    if transport is not None:
+        transport_cls = type(transport).__name__
+        if any(k in transport_cls for k in ("Mock", "Fake", "Stub", "MagicMock")):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class GeminiReadinessReport:
+    """Readiness report for the Google Gemini embedding provider.
+
+    Attributes:
+        status: High-level status: 'ready', 'simulated', 'unavailable', or 'failed'.
+        is_ready: True if the provider is operational and produced a valid probe vector.
+        is_live: True ONLY if a genuine live network API call succeeded with real credentials.
+                 Never True for simulated, mock, or synthetic test doubles.
+        is_simulated: True if a mock, fake, or synthetic client/provider was detected.
+        model: Effective Gemini embedding model name (e.g. 'gemini-embedding-2').
+        dimension: Configured output vector dimension (e.g. 768).
+        sample_vector_dimension: Actual length of the returned probe embedding vector, if obtained.
+        configuration_valid: True if provider configuration parameters are valid.
+        error: Sanitized error or limitation message if not ready, or None if successful.
+        probe_text: Text used for the readiness probe.
+        latency_ms: Round-trip latency in milliseconds, if the probe was executed.
+        timestamp: ISO 8601 UTC timestamp of the check.
+    """
+
+    status: str  # "ready" | "simulated" | "unavailable" | "failed"
+    is_ready: bool
+    is_live: bool
+    is_simulated: bool
+    model: str
+    dimension: int
+    sample_vector_dimension: int | None = None
+    configuration_valid: bool = True
+    error: str | None = None
+    probe_text: str = "health check"
+    latency_ms: float | None = None
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert readiness report to a JSON-serializable dictionary."""
+        return {
+            "status": self.status,
+            "is_ready": self.is_ready,
+            "is_live": self.is_live,
+            "is_simulated": self.is_simulated,
+            "model": self.model,
+            "dimension": self.dimension,
+            "sample_vector_dimension": self.sample_vector_dimension,
+            "configuration_valid": self.configuration_valid,
+            "error": self.error,
+            "probe_text": self.probe_text,
+            "latency_ms": self.latency_ms,
+            "timestamp": self.timestamp,
+        }
 
 
 class GeminiEmbeddingProviderError(RuntimeError):
@@ -128,6 +293,7 @@ class GeminiEmbeddingProvider:
         self._clean_model = self._model.removeprefix("models/")
 
         self._owns_client = False
+        self._is_simulated_override: bool | None = None
         if client is not None:
             self._client = client
             self._api_key: str | None = config.api_key
@@ -156,6 +322,37 @@ class GeminiEmbeddingProvider:
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def is_simulated(self) -> bool:
+        """Whether this provider is backed by a simulated or mock test double."""
+        if self._is_simulated_override is not None:
+            return self._is_simulated_override
+        return is_simulated_client(self._client)
+
+    @is_simulated.setter
+    def is_simulated(self, value: bool) -> None:
+        self._is_simulated_override = bool(value)
+
+    @property
+    def is_live(self) -> bool:
+        """Whether this provider is backed by a genuine live client with credentials."""
+        if self.is_simulated:
+            return False
+        if not self._api_key or not str(self._api_key).strip():
+            return False
+        if self._client is None or not isinstance(self._client, httpx.Client):
+            return False
+        return True
+
+    def __repr__(self) -> str:
+        """Safe representation containing zero secrets."""
+        return (
+            f"GeminiEmbeddingProvider(model={self._model!r}, "
+            f"dimension={self._dimension}, "
+            f"base_url={self._base_url!r}, "
+            f"is_simulated={self.is_simulated})"
+        )
 
     def _request(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Send an HTTP POST request to the Gemini API and return parsed JSON."""
@@ -301,8 +498,275 @@ class GeminiEmbeddingProvider:
             if hasattr(self._client, "close"):
                 self._client.close()
 
+    def check_readiness(self, probe_text: str = "health check") -> GeminiReadinessReport:
+        """Perform a safe, explicit readiness check and smoke test.
+
+        Returns a ``GeminiReadinessReport`` capturing operational status,
+        model, dimension, vector validation, latency, and sanitized error info.
+
+        Guarantees:
+        - Never raises unhandled exceptions.
+        - Never falls back to synthetic or hash embeddings.
+        - Never reports a mock, fake, or synthetic provider as live (``is_live=False``).
+        - Completely sanitizes any secrets or API keys from error messages.
+        """
+        if not isinstance(probe_text, str) or not probe_text.strip():
+            probe_text = "health check"
+
+        simulated = self.is_simulated
+
+        # Check credentials if not simulated
+        if not simulated and (not self._api_key or not str(self._api_key).strip()):
+            return GeminiReadinessReport(
+                status="unavailable",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=self._model,
+                dimension=self._dimension,
+                sample_vector_dimension=None,
+                configuration_valid=True,
+                error=(
+                    f"External Gemini credentials are unavailable. Set {ENV_GEMINI_API_KEY} "
+                    f"or {ENV_NEXORA_GEMINI_API_KEY}."
+                ),
+                probe_text=probe_text,
+                latency_ms=None,
+            )
+
+        start_time = time.perf_counter()
+        try:
+            vector = self.embed_text(probe_text)
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+        except Exception as exc:
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            sanitized_err = _format_actionable_error(exc, self._api_key)
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=simulated,
+                model=self._model,
+                dimension=self._dimension,
+                sample_vector_dimension=None,
+                configuration_valid=True,
+                error=sanitized_err,
+                probe_text=probe_text,
+                latency_ms=latency_ms,
+            )
+
+        # Validate returned vector
+        if not isinstance(vector, list) or len(vector) != self._dimension:
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=simulated,
+                model=self._model,
+                dimension=self._dimension,
+                sample_vector_dimension=len(vector) if isinstance(vector, (list, tuple)) else None,
+                configuration_valid=True,
+                error=(
+                    f"Vector dimension mismatch: expected {self._dimension}, "
+                    f"got {len(vector) if isinstance(vector, (list, tuple)) else type(vector).__name__}"
+                ),
+                probe_text=probe_text,
+                latency_ms=latency_ms,
+            )
+
+        if simulated:
+            return GeminiReadinessReport(
+                status="simulated",
+                is_ready=True,
+                is_live=False,
+                is_simulated=True,
+                model=self._model,
+                dimension=self._dimension,
+                sample_vector_dimension=len(vector),
+                configuration_valid=True,
+                error=None,
+                probe_text=probe_text,
+                latency_ms=latency_ms,
+            )
+
+        return GeminiReadinessReport(
+            status="ready",
+            is_ready=True,
+            is_live=True,
+            is_simulated=False,
+            model=self._model,
+            dimension=self._dimension,
+            sample_vector_dimension=len(vector),
+            configuration_valid=True,
+            error=None,
+            probe_text=probe_text,
+            latency_ms=latency_ms,
+        )
+
     def __enter__(self) -> GeminiEmbeddingProvider:
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+def check_gemini_readiness(
+    target: GeminiEmbeddingProvider | EmbeddingConfig | Mapping[str, Any] | None = None,
+    probe_text: str = "health check",
+) -> GeminiReadinessReport:
+    """Safe, high-level readiness check for Google Gemini embedding provider.
+
+    Accepts an existing ``GeminiEmbeddingProvider``, an ``EmbeddingConfig``,
+    a config dict, or ``None`` (which loads environment configuration).
+
+    Returns a ``GeminiReadinessReport`` without throwing unhandled exceptions.
+    """
+    if isinstance(target, GeminiEmbeddingProvider):
+        return target.check_readiness(probe_text=probe_text)
+
+    # If target is None, load from environment
+    if target is None:
+        api_key = (
+            os.getenv(ENV_GEMINI_API_KEY)
+            or os.getenv(ENV_NEXORA_GEMINI_API_KEY)
+            or os.getenv(ENV_API_KEY)
+        )
+        model = os.getenv("NEXORA_EMBEDDING_MODEL") or DEFAULT_GEMINI_MODEL
+        dim_str = os.getenv("NEXORA_EMBEDDING_DIMENSION")
+        try:
+            dim = int(dim_str) if dim_str and dim_str.strip().isdigit() else DEFAULT_GEMINI_DIMENSION
+        except Exception:
+            dim = DEFAULT_GEMINI_DIMENSION
+
+        if not api_key or not str(api_key).strip():
+            return GeminiReadinessReport(
+                status="unavailable",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=model,
+                dimension=dim,
+                configuration_valid=True,
+                error=(
+                    f"External Gemini credentials are unavailable. Set {ENV_GEMINI_API_KEY} "
+                    f"or {ENV_NEXORA_GEMINI_API_KEY}."
+                ),
+                probe_text=probe_text,
+            )
+
+        try:
+            config = EmbeddingConfig(
+                provider="gemini",
+                model=model,
+                api_key=api_key,
+                base_url=os.getenv("GEMINI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL"),
+                dimension=dim,
+            )
+        except Exception as exc:
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=model,
+                dimension=dim,
+                configuration_valid=False,
+                error=f"Gemini configuration error: {sanitize_secret_text(str(exc))}",
+                probe_text=probe_text,
+            )
+
+        try:
+            provider = GeminiEmbeddingProvider(config)
+            return provider.check_readiness(probe_text=probe_text)
+        except Exception as exc:
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=model,
+                dimension=dim,
+                configuration_valid=True,
+                error=f"Failed to initialize Gemini provider: {sanitize_secret_text(str(exc))}",
+                probe_text=probe_text,
+            )
+
+    # If target is EmbeddingConfig
+    if isinstance(target, EmbeddingConfig):
+        model = target.model if target.model not in ("hash-sha256", "text-embedding-3-small", "default") else DEFAULT_GEMINI_MODEL
+        dim = target.dimension if target.dimension is not None else DEFAULT_GEMINI_DIMENSION
+
+        if not target.has_api_key:
+            env_key = os.getenv(ENV_GEMINI_API_KEY) or os.getenv(ENV_NEXORA_GEMINI_API_KEY) or os.getenv(ENV_API_KEY)
+            if not env_key or not str(env_key).strip():
+                return GeminiReadinessReport(
+                    status="unavailable",
+                    is_ready=False,
+                    is_live=False,
+                    is_simulated=False,
+                    model=model,
+                    dimension=dim,
+                    configuration_valid=True,
+                    error=(
+                        f"External Gemini credentials are unavailable. Set api_key or "
+                        f"{ENV_GEMINI_API_KEY}."
+                    ),
+                    probe_text=probe_text,
+                )
+
+        try:
+            provider = GeminiEmbeddingProvider(target)
+            return provider.check_readiness(probe_text=probe_text)
+        except Exception as exc:
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=model,
+                dimension=dim,
+                configuration_valid=True,
+                error=f"Failed to initialize Gemini provider: {sanitize_secret_text(str(exc))}",
+                probe_text=probe_text,
+            )
+
+    # If target is Mapping (dict)
+    if isinstance(target, Mapping):
+        try:
+            model = str(target.get("model", DEFAULT_GEMINI_MODEL))
+            dim = target.get("dimension", DEFAULT_GEMINI_DIMENSION)
+            cfg = EmbeddingConfig(
+                provider="gemini",
+                model=model,
+                api_key=target.get("api_key"),
+                base_url=target.get("base_url"),
+                dimension=dim,
+                batch_size=target.get("batch_size"),
+            )
+            return check_gemini_readiness(cfg, probe_text=probe_text)
+        except Exception as exc:
+            raw_dim = target.get("dimension")
+            effective_dim = raw_dim if isinstance(raw_dim, int) and raw_dim > 0 else DEFAULT_GEMINI_DIMENSION
+            return GeminiReadinessReport(
+                status="failed",
+                is_ready=False,
+                is_live=False,
+                is_simulated=False,
+                model=str(target.get("model", DEFAULT_GEMINI_MODEL)),
+                dimension=effective_dim,
+                configuration_valid=False,
+                error=f"Invalid Gemini configuration dictionary: {sanitize_secret_text(str(exc))}",
+                probe_text=probe_text,
+            )
+
+    return GeminiReadinessReport(
+        status="failed",
+        is_ready=False,
+        is_live=False,
+        is_simulated=False,
+        model=DEFAULT_GEMINI_MODEL,
+        dimension=DEFAULT_GEMINI_DIMENSION,
+        configuration_valid=False,
+        error=f"Expected GeminiEmbeddingProvider, EmbeddingConfig, or dict, got {type(target).__name__}",
+        probe_text=probe_text,
+    )
