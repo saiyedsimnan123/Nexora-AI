@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Sequence
 
@@ -48,6 +50,31 @@ from nexora.retrieval.models import RetrievedChunk, SearchResult, VectorRecord
 from nexora.retrieval.quality import RetrievalQualityPolicy, RetrievalQualityService
 from nexora.retrieval.service import RetrievalService
 from nexora.retrieval.store import VectorStore
+
+
+def _get_code_identity() -> dict[str, Any]:
+    """Retrieve version and git commit hash if available."""
+    try:
+        import nexora
+        version = getattr(nexora, "__version__", "0.1.0")
+    except Exception:
+        version = "0.1.0"
+    commit = None
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            commit = res.stdout.strip()
+    except Exception:
+        commit = None
+    return {
+        "version": version,
+        "commit": commit,
+    }
 
 
 class EvaluationMode(str, Enum):
@@ -89,6 +116,12 @@ class ProductionEvaluationReport:
     corpus_info: dict[str, Any]
     policy_settings: dict[str, Any]
     is_live: bool = False
+    provider_live: bool = False
+    vector_store_live: bool = False
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    code_version: dict[str, Any] = field(default_factory=_get_code_identity)
+    error: str | None = None
+    unavailable_dependencies: list[str] = field(default_factory=list)
     evaluation_conditions: dict[str, Any] | None = None
     metrics: RetrievalEvaluationMetrics | None = None
     paper_scope_isolation: dict[str, Any] | None = None
@@ -110,6 +143,8 @@ class ProductionEvaluationReport:
                 "category_metrics": self.metrics.category_metrics,
             }
         return {
+            "timestamp": self.timestamp,
+            "code_version": self.code_version,
             "mode": self.mode,
             "status": self.status,
             "provider_name": self.provider_name,
@@ -119,7 +154,11 @@ class ProductionEvaluationReport:
             "is_semantic": self.is_semantic,
             "is_synthetic": self.is_synthetic,
             "is_live": self.is_live,
+            "provider_live": self.provider_live,
+            "vector_store_live": self.vector_store_live,
             "infrastructure_limitation": self.infrastructure_limitation,
+            "error": self.error,
+            "unavailable_dependencies": self.unavailable_dependencies,
             "corpus_info": self.corpus_info,
             "policy_settings": self.policy_settings,
             "evaluation_conditions": self.evaluation_conditions,
@@ -143,6 +182,28 @@ def format_vector_store_label(vector_store: VectorStore | None) -> str:
             return "qdrant (simulated local evaluation)"
         return "qdrant (live persistent)"
     return f"{store_cls_name} (local evaluation)"
+
+
+def is_genuine_live_qdrant_store(vector_store: VectorStore | None) -> bool:
+    """Return True if vector_store is a genuine live Qdrant store (not in-memory or mock)."""
+    if vector_store is None:
+        return False
+    if isinstance(vector_store, InMemoryVectorStore):
+        return False
+    store_cls_name = type(vector_store).__name__
+    if store_cls_name != "QdrantVectorStore":
+        return False
+    client = getattr(vector_store, "_client", None)
+    if client is None:
+        return False
+    client_cls = type(client).__name__
+    if any(k in client_cls for k in ("Mock", "Fake", "Stub")):
+        return False
+    config = getattr(vector_store, "_config", None)
+    url = getattr(config, "url", "")
+    if not url or url == ":memory:":
+        return False
+    return True
 
 
 def is_simulated_or_synthetic_provider(provider: Any) -> bool:
@@ -317,12 +378,13 @@ def evaluate_production_retrieval(
     # -----------------------------------------------------------------------
     # 1. Production Mode: Requires real external model credentials
     # -----------------------------------------------------------------------
+    candidate_provider_live = False
     if cfg.mode == EvaluationMode.PRODUCTION:
         if cfg.embedding_provider is not None:
             provider = cfg.embedding_provider
             if is_simulated_or_synthetic_provider(provider):
                 # Injected test double or synthetic provider: do not report as genuine production!
-                is_live = False
+                candidate_provider_live = False
                 is_synthetic = True
                 is_semantic = True
                 base_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
@@ -334,7 +396,7 @@ def evaluate_production_retrieval(
                     "not genuine live production API measurements."
                 )
             else:
-                is_live = is_genuine_live_openai_provider(provider)
+                candidate_provider_live = is_genuine_live_openai_provider(provider)
                 is_synthetic = False
                 is_semantic = True
                 provider_name = getattr(provider, "name", getattr(provider, "provider", "openai"))
@@ -355,7 +417,11 @@ def evaluate_production_retrieval(
                     is_semantic=True,
                     is_synthetic=False,
                     is_live=False,
+                    provider_live=False,
+                    vector_store_live=False,
                     infrastructure_limitation=limitation_msg,
+                    error=None,
+                    unavailable_dependencies=["openai_credentials"],
                     corpus_info=corpus_info,
                     policy_settings=policy_info,
                     evaluation_conditions={
@@ -369,20 +435,47 @@ def evaluate_production_retrieval(
                 )
 
             # Build real production embedding provider
-            emb_config = EmbeddingConfig(
-                provider="openai",
-                model=cfg.model_name,
-                api_key=cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY),
-                dimension=cfg.dimension,
-            )
-            provider = create_embedding_provider(emb_config)
-            is_live = True
-            is_synthetic = False
-            is_semantic = True
-            provider_name = "openai"
-            model_name = cfg.model_name
-            dim = cfg.dimension
-            simulated_limitation = None
+            try:
+                emb_config = EmbeddingConfig(
+                    provider="openai",
+                    model=cfg.model_name,
+                    api_key=cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY),
+                    dimension=cfg.dimension,
+                )
+                provider = create_embedding_provider(emb_config)
+                candidate_provider_live = True
+                is_synthetic = False
+                is_semantic = True
+                provider_name = "openai"
+                model_name = cfg.model_name
+                dim = cfg.dimension
+                simulated_limitation = None
+            except Exception as exc:
+                return ProductionEvaluationReport(
+                    mode=cfg.mode.value,
+                    status="failed",
+                    provider_name="openai",
+                    model_name=cfg.model_name,
+                    dimension=cfg.dimension,
+                    vector_store_type=format_vector_store_label(cfg.vector_store),
+                    is_semantic=True,
+                    is_synthetic=False,
+                    is_live=False,
+                    provider_live=False,
+                    vector_store_live=False,
+                    infrastructure_limitation=str(exc),
+                    error=f"Failed to initialize OpenAI provider: {exc}",
+                    unavailable_dependencies=["openai_provider"],
+                    corpus_info=corpus_info,
+                    policy_settings=policy_info,
+                    evaluation_conditions={
+                        "is_live_provider": False,
+                        "is_live_vector_store": False,
+                    },
+                    metrics=None,
+                    paper_scope_isolation=None,
+                    threshold_calibration=None,
+                )
 
     # -----------------------------------------------------------------------
     # 2. Configured Pipeline Mode: Uses whatever pipeline is currently configured
@@ -397,7 +490,7 @@ def evaluate_production_retrieval(
             emb_config = EmbeddingConfig()
             provider = create_embedding_provider(emb_config)
 
-        is_live = False
+        candidate_provider_live = False
         is_synthetic = False
         if isinstance(provider, HashEmbeddingProvider):
             provider_name = "hash"
@@ -408,7 +501,7 @@ def evaluate_production_retrieval(
             model_name = getattr(provider, "model", "default")
             is_semantic = (str(provider_name).lower() == "openai")
             if is_semantic and is_genuine_live_openai_provider(provider):
-                is_live = True
+                candidate_provider_live = True
         dim = getattr(provider, "dimension", None)
         simulated_limitation = None
 
@@ -422,39 +515,127 @@ def evaluate_production_retrieval(
         dim = 64
         is_semantic = True
         is_synthetic = True
-        is_live = False
+        candidate_provider_live = False
         simulated_limitation = None
 
     # Assemble pipeline pieces
-    embedding_service = (
-        cfg.embedding_service
-        if cfg.embedding_service is not None
-        else EmbeddingService(provider)
-    )
+    try:
+        embedding_service = (
+            cfg.embedding_service
+            if cfg.embedding_service is not None
+            else EmbeddingService(provider)
+        )
 
-    vector_store = (
-        cfg.vector_store
-        if cfg.vector_store is not None
-        else InMemoryVectorStore(dimension=dim)
-    )
+        vector_store = (
+            cfg.vector_store
+            if cfg.vector_store is not None
+            else InMemoryVectorStore(dimension=dim)
+        )
+    except Exception as exc:
+        return ProductionEvaluationReport(
+            mode=cfg.mode.value,
+            status="failed",
+            provider_name=str(provider_name),
+            model_name=str(model_name),
+            dimension=dim,
+            vector_store_type=format_vector_store_label(cfg.vector_store),
+            is_semantic=is_semantic,
+            is_synthetic=is_synthetic,
+            is_live=False,
+            provider_live=False,
+            vector_store_live=False,
+            infrastructure_limitation=f"Failed to assemble embedding service or vector store: {exc}",
+            error=f"Service initialization failed: {exc}",
+            unavailable_dependencies=["embedding_service"],
+            corpus_info=corpus_info,
+            policy_settings=policy_info,
+            evaluation_conditions={"is_live_provider": False, "is_live_vector_store": False},
+            metrics=None,
+            paper_scope_isolation=None,
+            threshold_calibration=None,
+        )
+
+    if hasattr(vector_store, "ensure_collection"):
+        try:
+            vector_store.ensure_collection()
+        except Exception as exc:
+            return ProductionEvaluationReport(
+                mode=cfg.mode.value,
+                status="failed",
+                provider_name=str(provider_name),
+                model_name=str(model_name),
+                dimension=dim,
+                vector_store_type=format_vector_store_label(vector_store),
+                is_semantic=is_semantic,
+                is_synthetic=is_synthetic,
+                is_live=False,
+                provider_live=False,
+                vector_store_live=False,
+                infrastructure_limitation=f"Failed to initialize vector store collection: {exc}",
+                error=f"Vector store collection creation failed: {exc}",
+                unavailable_dependencies=["vector_store"],
+                corpus_info=corpus_info,
+                policy_settings=policy_info,
+                evaluation_conditions={"is_live_provider": False, "is_live_vector_store": False},
+                metrics=None,
+                paper_scope_isolation=None,
+                threshold_calibration=None,
+            )
 
     # Ingest fixed labeled benchmark corpus
     from nexora.retrieval.benchmark import _RAW_CHUNKS
     corpus_records = []
-    for raw in _RAW_CHUNKS:
-        vec = embedding_service.embed_text(raw["text"])
-        payload = {
-            "chunk_id": raw["chunk_id"],
-            "document_id": raw["document_id"],
-            "paper_id": raw["paper_id"],
-            "title": raw["title"],
-            "filename": raw["filename"],
-            "chunk_index": raw["chunk_index"],
-            "text": raw["text"],
-        }
-        corpus_records.append(VectorRecord(id=raw["chunk_id"], vector=vec, payload=payload))
+    actual_embeddings_completed = 0
+    try:
+        for raw in _RAW_CHUNKS:
+            vec = embedding_service.embed_text(raw["text"])
+            actual_embeddings_completed += 1
+            payload = {
+                "chunk_id": raw["chunk_id"],
+                "document_id": raw["document_id"],
+                "paper_id": raw["paper_id"],
+                "title": raw["title"],
+                "filename": raw["filename"],
+                "chunk_index": raw["chunk_index"],
+                "text": raw["text"],
+            }
+            corpus_records.append(VectorRecord(id=raw["chunk_id"], vector=vec, payload=payload))
 
-    vector_store.upsert(corpus_records)
+        vector_store.upsert(corpus_records)
+    except Exception as exc:
+        vector_store_label = format_vector_store_label(vector_store)
+        return ProductionEvaluationReport(
+            mode=cfg.mode.value,
+            status="failed",
+            provider_name=str(provider_name),
+            model_name=str(model_name),
+            dimension=dim,
+            vector_store_type=vector_store_label,
+            is_semantic=is_semantic,
+            is_synthetic=is_synthetic,
+            is_live=False,
+            provider_live=False,
+            vector_store_live=False,
+            infrastructure_limitation=f"Execution failed during corpus embedding/indexing: {exc}",
+            error=f"Embedding or indexing call failed: {exc}",
+            unavailable_dependencies=[],
+            corpus_info=corpus_info,
+            policy_settings=policy_info,
+            evaluation_conditions={
+                "is_live_provider": False,
+                "is_live_vector_store": False,
+                "vector_store_type": vector_store_label,
+                "actual_embeddings_completed": actual_embeddings_completed,
+            },
+            metrics=None,
+            paper_scope_isolation=None,
+            threshold_calibration=None,
+        )
+
+    # Truthful live status: Mark provider live ONLY after actual embedding calls complete successfully!
+    provider_live = candidate_provider_live and (actual_embeddings_completed > 0)
+    vector_store_live = is_genuine_live_qdrant_store(vector_store)
+    is_live = provider_live
 
     retrieval_service = RetrievalService(embedding_service, vector_store, cache_queries=True)
 
@@ -467,19 +648,49 @@ def evaluate_production_retrieval(
         retrieve_fn = lambda q, limit=5: retrieval_service.retrieve(q, limit=limit)
 
     # Execute deterministic queries
-    benchmark_cases = get_benchmark_cases()
-    metrics = evaluate_retrieval(benchmark_cases, retrieve_fn, k_values=cfg.k_values)
+    try:
+        benchmark_cases = get_benchmark_cases()
+        metrics = evaluate_retrieval(benchmark_cases, retrieve_fn, k_values=cfg.k_values)
 
-    # Measure paper scope isolation
-    isolation_res = evaluate_paper_scope_isolation(retrieval_service, target_paper_id=PAPER_TRANSFORMER)
+        # Measure paper scope isolation
+        isolation_res = evaluate_paper_scope_isolation(retrieval_service, target_paper_id=PAPER_TRANSFORMER)
 
-    # Calibrate thresholds
-    calibration_res = calibrate_retrieval_thresholds(
-        retrieval_service,
-        benchmark_cases,
-        candidate_thresholds=(None, 0.20, 0.35, 0.50),
-        k_values=cfg.k_values,
-    )
+        # Calibrate thresholds
+        calibration_res = calibrate_retrieval_thresholds(
+            retrieval_service,
+            benchmark_cases,
+            candidate_thresholds=(None, 0.20, 0.35, 0.50),
+            k_values=cfg.k_values,
+        )
+    except Exception as exc:
+        vector_store_label = format_vector_store_label(vector_store)
+        return ProductionEvaluationReport(
+            mode=cfg.mode.value,
+            status="failed",
+            provider_name=str(provider_name),
+            model_name=str(model_name),
+            dimension=dim,
+            vector_store_type=vector_store_label,
+            is_semantic=is_semantic,
+            is_synthetic=is_synthetic,
+            is_live=False,
+            provider_live=False,
+            vector_store_live=False,
+            infrastructure_limitation=f"Execution failed during retrieval query evaluation: {exc}",
+            error=f"Retrieval query evaluation failed: {exc}",
+            unavailable_dependencies=[],
+            corpus_info=corpus_info,
+            policy_settings=_get_policy_metadata(policy),
+            evaluation_conditions={
+                "is_live_provider": False,
+                "is_live_vector_store": False,
+                "vector_store_type": vector_store_label,
+                "actual_embeddings_completed": actual_embeddings_completed,
+            },
+            metrics=None,
+            paper_scope_isolation=None,
+            threshold_calibration=None,
+        )
 
     limitation_text = simulated_limitation
     if not is_semantic:
@@ -495,13 +706,14 @@ def evaluate_production_retrieval(
 
     vector_store_label = format_vector_store_label(vector_store)
     eval_conditions = {
-        "is_live_provider": is_live,
-        "is_live_vector_store": "live persistent" in vector_store_label,
+        "is_live_provider": provider_live,
+        "is_live_vector_store": vector_store_live,
         "vector_store_type": vector_store_label,
         "cache_queries": True,
         "k_values": list(cfg.k_values),
         "total_benchmark_cases": len(benchmark_cases),
         "corpus_chunks_count": len(corpus_records),
+        "actual_embeddings_completed": actual_embeddings_completed,
     }
 
     return ProductionEvaluationReport(
@@ -514,7 +726,11 @@ def evaluate_production_retrieval(
         is_semantic=is_semantic,
         is_synthetic=is_synthetic,
         is_live=is_live,
+        provider_live=provider_live,
+        vector_store_live=vector_store_live,
         infrastructure_limitation=limitation_text,
+        error=None,
+        unavailable_dependencies=[],
         corpus_info=corpus_info,
         policy_settings=_get_policy_metadata(policy),
         evaluation_conditions=eval_conditions,
@@ -522,3 +738,9 @@ def evaluate_production_retrieval(
         paper_scope_isolation=isolation_res,
         threshold_calibration=calibration_res,
     )
+
+
+if __name__ == "__main__":
+    import sys
+    from nexora.retrieval.eval_cli import main
+    sys.exit(main())
