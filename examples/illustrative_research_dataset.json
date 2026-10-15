@@ -1,0 +1,91 @@
+{
+  "dataset_id": "illustrative-rag-dataset-v1",
+  "description": "Illustrative small-scale research retrieval dataset for demonstration and testing only. Not a real-world benchmark.",
+  "is_illustrative_only": true,
+  "chunks": [
+    {
+      "chunk_id": "chunk_kv_01",
+      "document_id": "doc_kv_cache",
+      "paper_id": "paper_kv_cache_2023",
+      "title": "KV Cache Compression Policies",
+      "filename": "kv_cache_2023.pdf",
+      "chunk_index": 0,
+      "text": "Key-value cache eviction using attention-score accumulation minimizes memory footprint in long-context inference."
+    },
+    {
+      "chunk_id": "chunk_kv_02",
+      "document_id": "doc_kv_cache",
+      "paper_id": "paper_kv_cache_2023",
+      "title": "KV Cache Compression Policies",
+      "filename": "kv_cache_2023.pdf",
+      "chunk_index": 1,
+      "text": "PagedAttention partitions KV cache blocks into non-contiguous physical memory pages to eradicate internal fragmentation."
+    },
+    {
+      "chunk_id": "chunk_spec_01",
+      "document_id": "doc_speculative",
+      "paper_id": "paper_speculative_2023",
+      "title": "Speculative Decoding for Accelerated Generation",
+      "filename": "speculative_2023.pdf",
+      "chunk_index": 0,
+      "text": "Speculative decoding uses a smaller draft model to generate candidate tokens which are verified in parallel by the target model."
+    },
+    {
+      "chunk_id": "chunk_spec_02",
+      "document_id": "doc_speculative",
+      "paper_id": "paper_speculative_2023",
+      "title": "Speculative Decoding for Accelerated Generation",
+      "filename": "speculative_2023.pdf",
+      "chunk_index": 1,
+      "text": "Exact acceptance criteria in speculative decoding mathematically preserve the target model's output probability distribution."
+    },
+    {
+      "chunk_id": "chunk_quant_01",
+      "document_id": "doc_quantization",
+      "paper_id": "paper_quantization_2023",
+      "title": "Post-Training Quantization for Large Models",
+      "filename": "quantization_2023.pdf",
+      "chunk_index": 0,
+      "text": "4-bit weight-only quantization using second-order Taylor expansion retains baseline perplexity while cutting DRAM bandwidth in half."
+    },
+    {
+      "chunk_id": "chunk_quant_02",
+      "document_id": "doc_quantization",
+      "paper_id": "paper_quantization_2023",
+      "title": "Post-Training Quantization for Large Models",
+      "filename": "quantization_2023.pdf",
+      "chunk_index": 1,
+      "text": "Activation outlier preservation prevents gradient divergence during low-bit linear layer inference."
+    }
+  ],
+  "queries": [
+    {
+      "query": "How does attention-score accumulation guide KV cache eviction?",
+      "expected_chunk_ids": ["chunk_kv_01"],
+      "query_id": "q_exact_kv_cache",
+      "category": "exact_term",
+      "target_paper_ids": ["paper_kv_cache_2023"]
+    },
+    {
+      "query": "Accelerating LLM token sampling by verifying parallel predictions from a small auxiliary network",
+      "expected_chunk_ids": ["chunk_spec_01"],
+      "query_id": "q_semantic_speculative",
+      "category": "semantic",
+      "target_paper_ids": ["paper_speculative_2023"]
+    },
+    {
+      "query": "Techniques for mitigating GPU DRAM bandwidth bottlenecks through compression or lower precision",
+      "expected_chunk_ids": ["chunk_kv_01", "chunk_quant_01"],
+      "query_id": "q_comparative_compression",
+      "category": "comparative",
+      "target_paper_ids": ["paper_kv_cache_2023", "paper_quantization_2023"]
+    },
+    {
+      "query": "Quantum flux qubit coherence times in dilution refrigerators",
+      "expected_chunk_ids": [],
+      "query_id": "q_unanswerable_quantum",
+      "category": "unanswerable_empty",
+      "target_paper_ids": null
+    }
+  ]
+}

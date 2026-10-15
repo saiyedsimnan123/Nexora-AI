@@ -98,6 +98,8 @@ class ProductionEvaluationConfig:
     api_key: str | None = None
     model_name: str = "text-embedding-3-small"
     dimension: int = 1536
+    dataset: Any = None
+    dataset_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,7 @@ class ProductionEvaluationReport:
     code_version: dict[str, Any] = field(default_factory=_get_code_identity)
     error: str | None = None
     unavailable_dependencies: list[str] = field(default_factory=list)
+    dataset_info: dict[str, Any] | None = None
     evaluation_conditions: dict[str, Any] | None = None
     metrics: RetrievalEvaluationMetrics | None = None
     paper_scope_isolation: dict[str, Any] | None = None
@@ -159,6 +162,7 @@ class ProductionEvaluationReport:
             "infrastructure_limitation": self.infrastructure_limitation,
             "error": self.error,
             "unavailable_dependencies": self.unavailable_dependencies,
+            "dataset_info": self.dataset_info,
             "corpus_info": self.corpus_info,
             "policy_settings": self.policy_settings,
             "evaluation_conditions": self.evaluation_conditions,
@@ -372,8 +376,125 @@ def evaluate_production_retrieval(
     reports that limitation explicitly without silently substituting synthetic embeddings.
     """
     cfg = config or ProductionEvaluationConfig()
-    corpus_info = _get_corpus_metadata()
     policy_info = _get_policy_metadata(cfg.quality_policy)
+
+    # -----------------------------------------------------------------------
+    # 0. Dataset Resolution: custom dataset or built-in synthetic benchmark
+    # -----------------------------------------------------------------------
+    dataset_info: dict[str, Any]
+    corpus_info: dict[str, Any]
+    raw_chunks: Sequence[dict[str, Any]]
+    benchmark_cases: Sequence[dict[str, Any]]
+    target_isolation_paper_id: str
+    target_isolation_query: str
+
+    if cfg.dataset is not None or cfg.dataset_path is not None:
+        try:
+            from nexora.retrieval.dataset import (
+                DatasetValidationError,
+                ResearchRetrievalDataset,
+                load_retrieval_dataset,
+                validate_dataset_dict,
+            )
+
+            if isinstance(cfg.dataset, ResearchRetrievalDataset):
+                ds = cfg.dataset
+            elif isinstance(cfg.dataset, dict):
+                ds = validate_dataset_dict(cfg.dataset)
+            elif cfg.dataset is not None and hasattr(cfg.dataset, "chunks") and hasattr(cfg.dataset, "queries"):
+                ds = cfg.dataset
+            elif cfg.dataset_path:
+                ds = load_retrieval_dataset(cfg.dataset_path)
+            elif isinstance(cfg.dataset, str):
+                ds = load_retrieval_dataset(cfg.dataset)
+            else:
+                raise DatasetValidationError(f"Invalid dataset configuration: {cfg.dataset!r}")
+
+            raw_chunks = ds.chunks
+            benchmark_cases = ds.queries
+
+            # Compute dynamic corpus metadata
+            paper_counts: dict[str, dict[str, Any]] = {}
+            for chunk in raw_chunks:
+                pid = chunk["paper_id"]
+                if pid not in paper_counts:
+                    paper_counts[pid] = {
+                        "paper_id": pid,
+                        "title": chunk.get("title", pid),
+                        "chunks": 0,
+                    }
+                paper_counts[pid]["chunks"] += 1
+
+            corpus_info = {
+                "papers_count": len(paper_counts),
+                "chunks_count": len(raw_chunks),
+                "papers": list(paper_counts.values()),
+            }
+
+            dataset_info = {
+                "name": getattr(ds, "name", getattr(ds, "dataset_id", "custom_dataset")),
+                "description": getattr(ds, "description", ""),
+                "path": cfg.dataset_path or getattr(ds, "path", None),
+                "is_illustrative_only": getattr(ds, "is_illustrative_only", False),
+                "chunks_count": len(raw_chunks),
+                "queries_count": len(benchmark_cases),
+                "unanswerable_queries_count": sum(
+                    1 for q in benchmark_cases if not q.get("expected_chunk_ids")
+                ),
+            }
+
+            # Select dynamic target paper and query for paper-scope isolation
+            target_isolation_paper_id = raw_chunks[0]["paper_id"]
+            target_isolation_query = benchmark_cases[0]["query"]
+            for q in benchmark_cases:
+                tgt_pids = q.get("target_paper_ids")
+                if tgt_pids and target_isolation_paper_id in tgt_pids:
+                    target_isolation_query = q["query"]
+                    break
+
+        except Exception as exc:
+            return ProductionEvaluationReport(
+                mode=cfg.mode.value,
+                status="failed",
+                provider_name="unknown",
+                model_name=cfg.model_name,
+                dimension=cfg.dimension,
+                vector_store_type=format_vector_store_label(cfg.vector_store),
+                is_semantic=False,
+                is_synthetic=False,
+                is_live=False,
+                provider_live=False,
+                vector_store_live=False,
+                infrastructure_limitation=f"Invalid evaluation dataset: {exc}",
+                error=f"Dataset validation error: {exc}",
+                unavailable_dependencies=[],
+                corpus_info={"papers_count": 0, "chunks_count": 0, "papers": []},
+                policy_settings=policy_info,
+                dataset_info={"path": cfg.dataset_path, "error": str(exc)},
+                evaluation_conditions={"dataset_valid": False},
+                metrics=None,
+                paper_scope_isolation=None,
+                threshold_calibration=None,
+            )
+    else:
+        from nexora.retrieval.benchmark import PAPER_TRANSFORMER, _RAW_CHUNKS, get_benchmark_cases
+
+        raw_chunks = _RAW_CHUNKS
+        benchmark_cases = get_benchmark_cases()
+        corpus_info = _get_corpus_metadata()
+        target_isolation_paper_id = PAPER_TRANSFORMER
+        target_isolation_query = "Attention mechanisms and computational complexity"
+        dataset_info = {
+            "name": "builtin_synthetic_benchmark",
+            "description": "Built-in synthetic research retrieval benchmark",
+            "path": None,
+            "is_illustrative_only": True,
+            "chunks_count": len(raw_chunks),
+            "queries_count": len(benchmark_cases),
+            "unanswerable_queries_count": sum(
+                1 for q in benchmark_cases if not q.get("expected_chunk_ids")
+            ),
+        }
 
     # -----------------------------------------------------------------------
     # 1. Production Mode: Requires real external model credentials
@@ -424,6 +545,7 @@ def evaluate_production_retrieval(
                     unavailable_dependencies=["openai_credentials"],
                     corpus_info=corpus_info,
                     policy_settings=policy_info,
+                    dataset_info=dataset_info,
                     evaluation_conditions={
                         "is_live_provider": False,
                         "is_live_vector_store": False,
@@ -468,6 +590,7 @@ def evaluate_production_retrieval(
                     unavailable_dependencies=["openai_provider"],
                     corpus_info=corpus_info,
                     policy_settings=policy_info,
+                    dataset_info=dataset_info,
                     evaluation_conditions={
                         "is_live_provider": False,
                         "is_live_vector_store": False,
@@ -549,6 +672,7 @@ def evaluate_production_retrieval(
             unavailable_dependencies=["embedding_service"],
             corpus_info=corpus_info,
             policy_settings=policy_info,
+            dataset_info=dataset_info,
             evaluation_conditions={"is_live_provider": False, "is_live_vector_store": False},
             metrics=None,
             paper_scope_isolation=None,
@@ -576,27 +700,27 @@ def evaluate_production_retrieval(
                 unavailable_dependencies=["vector_store"],
                 corpus_info=corpus_info,
                 policy_settings=policy_info,
+                dataset_info=dataset_info,
                 evaluation_conditions={"is_live_provider": False, "is_live_vector_store": False},
                 metrics=None,
                 paper_scope_isolation=None,
                 threshold_calibration=None,
             )
 
-    # Ingest fixed labeled benchmark corpus
-    from nexora.retrieval.benchmark import _RAW_CHUNKS
+    # Ingest corpus records
     corpus_records = []
     actual_embeddings_completed = 0
     try:
-        for raw in _RAW_CHUNKS:
+        for raw in raw_chunks:
             vec = embedding_service.embed_text(raw["text"])
             actual_embeddings_completed += 1
             payload = {
                 "chunk_id": raw["chunk_id"],
-                "document_id": raw["document_id"],
+                "document_id": raw.get("document_id", f"doc_{raw['paper_id']}"),
                 "paper_id": raw["paper_id"],
-                "title": raw["title"],
-                "filename": raw["filename"],
-                "chunk_index": raw["chunk_index"],
+                "title": raw.get("title", ""),
+                "filename": raw.get("filename", f"{raw['paper_id']}.pdf"),
+                "chunk_index": raw.get("chunk_index", 0),
                 "text": raw["text"],
             }
             corpus_records.append(VectorRecord(id=raw["chunk_id"], vector=vec, payload=payload))
@@ -621,6 +745,7 @@ def evaluate_production_retrieval(
             unavailable_dependencies=[],
             corpus_info=corpus_info,
             policy_settings=policy_info,
+            dataset_info=dataset_info,
             evaluation_conditions={
                 "is_live_provider": False,
                 "is_live_vector_store": False,
@@ -649,11 +774,14 @@ def evaluate_production_retrieval(
 
     # Execute deterministic queries
     try:
-        benchmark_cases = get_benchmark_cases()
         metrics = evaluate_retrieval(benchmark_cases, retrieve_fn, k_values=cfg.k_values)
 
         # Measure paper scope isolation
-        isolation_res = evaluate_paper_scope_isolation(retrieval_service, target_paper_id=PAPER_TRANSFORMER)
+        isolation_res = evaluate_paper_scope_isolation(
+            retrieval_service,
+            target_paper_id=target_isolation_paper_id,
+            query=target_isolation_query,
+        )
 
         # Calibrate thresholds
         calibration_res = calibrate_retrieval_thresholds(
@@ -681,6 +809,7 @@ def evaluate_production_retrieval(
             unavailable_dependencies=[],
             corpus_info=corpus_info,
             policy_settings=_get_policy_metadata(policy),
+            dataset_info=dataset_info,
             evaluation_conditions={
                 "is_live_provider": False,
                 "is_live_vector_store": False,
@@ -733,6 +862,7 @@ def evaluate_production_retrieval(
         unavailable_dependencies=[],
         corpus_info=corpus_info,
         policy_settings=_get_policy_metadata(policy),
+        dataset_info=dataset_info,
         evaluation_conditions=eval_conditions,
         metrics=metrics,
         paper_scope_isolation=isolation_res,

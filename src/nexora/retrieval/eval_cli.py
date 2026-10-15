@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--dataset",
+        "-d",
+        type=str,
+        default=None,
+        help="Path to custom evaluation dataset (.json or .jsonl). If omitted, uses built-in synthetic benchmark.",
+    )
+
+    parser.add_argument(
         "--api-key",
         type=str,
         default=None,
@@ -166,6 +174,13 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
             f"Provider: {report.provider_name} (live={report.provider_live}) | "
             f"Store: {report.vector_store_type} (live={report.vector_store_live})"
         )
+        if report.dataset_info is not None:
+            d_name = report.dataset_info.get("name") or "custom"
+            d_chunks = report.dataset_info.get("chunks_count", 0)
+            d_queries = report.dataset_info.get("queries_count", 0)
+            d_illustrative = report.dataset_info.get("is_illustrative_only", False)
+            ill_str = " (illustrative)" if d_illustrative else ""
+            print(f"Dataset: {d_name}{ill_str} | Chunks: {d_chunks} | Queries: {d_queries}")
         if report.metrics is not None:
             mrr = report.metrics.mean_reciprocal_rank
             r1 = report.metrics.recall_at_k.get(1, 0.0)
@@ -197,6 +212,38 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
         max_results_per_paper=2,
         max_results_per_document=2,
     )
+
+    # 1. Dataset loading and validation if --dataset is specified
+    loaded_dataset = None
+    if args.dataset:
+        try:
+            from nexora.retrieval.dataset import load_retrieval_dataset
+
+            loaded_dataset = load_retrieval_dataset(args.dataset)
+        except Exception as exc:
+            policy_info = _get_policy_metadata(policy)
+            report = ProductionEvaluationReport(
+                mode=mode.value,
+                status="failed",
+                provider_name="unknown",
+                model_name=args.model,
+                dimension=args.dimension,
+                vector_store_type=args.vector_store,
+                is_semantic=False,
+                is_synthetic=False,
+                is_live=False,
+                provider_live=False,
+                vector_store_live=False,
+                infrastructure_limitation=f"Invalid evaluation dataset: {exc}",
+                error=f"Dataset error: {exc}",
+                unavailable_dependencies=[],
+                corpus_info={"papers_count": 0, "chunks_count": 0, "papers": []},
+                policy_settings=policy_info,
+                dataset_info={"path": args.dataset, "error": str(exc)},
+            )
+            json_text = json.dumps(report.to_dict(), indent=None if args.compact else 2)
+            _handle_output(args.output, json_text, report)
+            return 1, report, json_text
 
     vector_store = None
     if args.vector_store == "qdrant":
@@ -266,6 +313,8 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
         api_key=args.api_key,
         model_name=args.model,
         dimension=args.dimension,
+        dataset=loaded_dataset,
+        dataset_path=args.dataset,
     )
 
     report = evaluate_production_retrieval(config)
