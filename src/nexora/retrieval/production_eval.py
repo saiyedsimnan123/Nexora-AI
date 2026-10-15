@@ -594,7 +594,7 @@ def evaluate_production_retrieval(
         else:
             target_prov = (cfg.provider_name or os.getenv("NEXORA_EMBEDDING_PROVIDER") or "openai").strip().lower()
             if target_prov == "gemini":
-                target_model = cfg.model_name if cfg.model_name != "text-embedding-3-small" else "text-embedding-004"
+                target_model = cfg.model_name if cfg.model_name not in ("text-embedding-3-small", "text-embedding-004") else "gemini-embedding-2"
                 target_dim = cfg.dimension if cfg.dimension != 1536 else 768
                 has_credentials, limitation_msg = check_gemini_credentials(cfg.api_key)
                 if not has_credentials:
@@ -772,7 +772,7 @@ def evaluate_production_retrieval(
                 base_url = cfg.base_url or os.getenv("GEMINI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL")
                 emb_config = EmbeddingConfig(
                     provider="gemini",
-                    model=cfg.model_name if cfg.model_name not in ("hash-sha256", "text-embedding-3-small") else "text-embedding-004",
+                    model=cfg.model_name if cfg.model_name not in ("hash-sha256", "text-embedding-3-small", "text-embedding-004") else "gemini-embedding-2",
                     api_key=api_key,
                     base_url=base_url,
                     dimension=cfg.dimension if cfg.dimension not in (64, 1536) else 768,

@@ -1,15 +1,18 @@
-"""Tests for Google Gemini semantic embedding integration (Milestone 12C-38).
+"""Tests for Google Gemini semantic embedding integration (Milestones 12C-38 and 12C-38.1).
 
 Verifies:
-1. Configuration loading, provider factory integration, and default models/dimensions.
-2. Injected mock/fake client transport for 100% offline, deterministic testing.
-3. Proper REST API payload formatting (embedContent and batchEmbedContents).
-4. Strict vector validation: dimension matching, finite floats, non-empty outputs.
-5. Error handling for HTTP 401, 403, 429, 500, timeouts, and network failures.
-6. Secret hygiene: API keys and auth headers are never logged or exposed in errors.
-7. Compatibility between document and query embeddings.
-8. Truthful live status and limitation reporting in production retrieval evaluation.
-9. Opt-in live smoke test when valid credentials are provided in the environment.
+1. Configuration loading, provider factory integration, and default model (gemini-embedding-2).
+2. Transparent migration of legacy and shut down aliases (e.g. text-embedding-004, gemini-embedding-001).
+3. Consistent effective outputDimensionality sent in all REST payloads (single and batch),
+   both when dimension is omitted (default 768) and when explicitly configured (e.g. 1536, 3072).
+4. Injected mock/fake client transport for 100% offline, deterministic testing.
+5. Proper REST API payload formatting (embedContent and batchEmbedContents).
+6. Strict vector validation: dimension matching, finite floats, non-empty outputs.
+7. Error handling for HTTP 401, 403, 429, 500, timeouts, and network failures.
+8. Secret hygiene: API keys and auth headers are never logged or exposed in errors.
+9. Compatibility between document and query embeddings.
+10. Truthful live status and limitation reporting in production retrieval evaluation and CLI.
+11. Opt-in live smoke test when valid credentials are provided in the environment.
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ from __future__ import annotations
 import math
 import os
 import socket
-from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -39,6 +41,7 @@ from nexora.embedding.gemini_provider import (
     DEFAULT_GEMINI_BASE_URL,
     DEFAULT_GEMINI_DIMENSION,
     DEFAULT_GEMINI_MODEL,
+    LEGACY_MODEL_ALIASES,
     GeminiEmbeddingProvider,
     GeminiEmbeddingProviderError,
 )
@@ -118,13 +121,15 @@ class FakeGeminiClient:
 def make_provider(
     vector: list[float] | None = None,
     model: str = DEFAULT_GEMINI_MODEL,
-    dimension: int = DEFAULT_GEMINI_DIMENSION,
+    dimension: int | None = DEFAULT_GEMINI_DIMENSION,
     api_key: str | None = FAKE_API_KEY,
     base_url: str | None = None,
     batch_size: int | None = None,
     **client_kwargs: Any,
 ) -> tuple[GeminiEmbeddingProvider, FakeGeminiClient]:
-    client = FakeGeminiClient(vector=vector, **client_kwargs)
+    effective_dim = dimension if dimension is not None else DEFAULT_GEMINI_DIMENSION
+    vec = vector if vector is not None else [0.05] * effective_dim
+    client = FakeGeminiClient(vector=vec, **client_kwargs)
     config = EmbeddingConfig(
         provider="gemini",
         model=model,
@@ -138,35 +143,69 @@ def make_provider(
 
 
 # ---------------------------------------------------------------------------
-# 1. Configuration & Factory Registration
+# 1. Configuration & Factory Registration & Migration
 # ---------------------------------------------------------------------------
 def test_gemini_provider_constant_exported():
     assert PROVIDER_GEMINI == "gemini"
     assert "gemini" in SUPPORTED_PROVIDERS
 
 
-def test_gemini_provider_can_be_created_with_injected_client():
+def test_gemini_provider_defaults_to_gemini_embedding_2():
     provider, client = make_provider()
     assert isinstance(provider, GeminiEmbeddingProvider)
     assert isinstance(provider, EmbeddingProvider)
     assert provider.provider == "gemini"
     assert provider.name == "gemini"
-    assert provider.model == DEFAULT_GEMINI_MODEL
-    assert provider.dimension == DEFAULT_GEMINI_DIMENSION
+    assert provider.model == "gemini-embedding-2"
+    assert provider.dimension == 768
+
+
+@pytest.mark.parametrize(
+    "legacy_alias",
+    [
+        "text-embedding-004",
+        "models/text-embedding-004",
+        "gemini-embedding-001",
+        "models/gemini-embedding-001",
+        "embedding-001",
+        "models/embedding-001",
+        "default",
+        "hash-sha256",
+        "text-embedding-3-small",
+    ],
+)
+def test_legacy_aliases_migrated_to_gemini_embedding_2(legacy_alias):
+    """Verify deprecated or shutdown models transparently migrate to gemini-embedding-2."""
+    config = EmbeddingConfig(provider="gemini", model=legacy_alias, api_key=FAKE_API_KEY)
+    provider = GeminiEmbeddingProvider(config, client=FakeGeminiClient())
+    assert provider.model == "gemini-embedding-2"
+
+
+def test_custom_supported_model_preserved():
+    config = EmbeddingConfig(provider="gemini", model="gemini-embedding-2-preview", api_key=FAKE_API_KEY)
+    provider = GeminiEmbeddingProvider(config, client=FakeGeminiClient())
+    assert provider.model == "gemini-embedding-2-preview"
 
 
 def test_factory_creates_gemini_provider(monkeypatch):
-    config = EmbeddingConfig(provider="gemini", model="text-embedding-004", api_key=FAKE_API_KEY)
-    # Ensure network connect fails if attempted
+    config = EmbeddingConfig(provider="gemini", model="gemini-embedding-2", api_key=FAKE_API_KEY)
     monkeypatch.setattr(socket.socket, "connect", mock.Mock(side_effect=AssertionError("network blocked")))
     provider = create_embedding_provider(config)
     assert isinstance(provider, GeminiEmbeddingProvider)
     assert provider.provider == "gemini"
-    assert provider.model == "text-embedding-004"
+    assert provider.model == "gemini-embedding-2"
+
+
+def test_factory_creates_gemini_provider_migrating_legacy_model(monkeypatch):
+    config = EmbeddingConfig(provider="gemini", model="text-embedding-004", api_key=FAKE_API_KEY)
+    monkeypatch.setattr(socket.socket, "connect", mock.Mock(side_effect=AssertionError("network blocked")))
+    provider = create_embedding_provider(config)
+    assert isinstance(provider, GeminiEmbeddingProvider)
+    assert provider.model == "gemini-embedding-2"
 
 
 def test_factory_case_insensitive_gemini(monkeypatch):
-    config = EmbeddingConfig(provider="Gemini", model="text-embedding-004", api_key=FAKE_API_KEY)
+    config = EmbeddingConfig(provider="Gemini", model="gemini-embedding-2", api_key=FAKE_API_KEY)
     monkeypatch.setattr(socket.socket, "connect", mock.Mock(side_effect=AssertionError("network blocked")))
     provider = create_embedding_provider(config)
     assert isinstance(provider, GeminiEmbeddingProvider)
@@ -192,7 +231,7 @@ def test_config_from_env_loads_gemini_keys():
 
 
 def test_missing_api_key_raises_error_without_network():
-    config = EmbeddingConfig(provider="gemini", model="text-embedding-004")
+    config = EmbeddingConfig(provider="gemini", model="gemini-embedding-2")
     with mock.patch.dict(os.environ, {}, clear=True):
         with pytest.raises(GeminiEmbeddingProviderError, match="GEMINI_API_KEY"):
             GeminiEmbeddingProvider(config)
@@ -204,7 +243,50 @@ def test_non_embedding_config_raises_type_error():
 
 
 # ---------------------------------------------------------------------------
-# 2. embed_text (Single Text Embedding)
+# 2. Output Dimensionality Requirement
+# ---------------------------------------------------------------------------
+def test_effective_default_dimension_always_sent_in_embed_content():
+    """When dimension is omitted in config, REST payload MUST still send outputDimensionality: 768."""
+    provider, client = make_provider(dimension=None)
+    assert provider.dimension == 768
+
+    provider.embed_text("sample input")
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["json"]["outputDimensionality"] == 768
+
+
+def test_effective_default_dimension_always_sent_in_batch_embed():
+    """When dimension is omitted in config, batch requests MUST send outputDimensionality: 768 for each item."""
+    provider, client = make_provider(dimension=None)
+    assert provider.dimension == 768
+
+    provider.embed_texts(["sample input 1", "sample input 2"])
+    assert len(client.calls) == 1
+    requests_payload = client.calls[0]["json"]["requests"]
+    assert len(requests_payload) == 2
+    for item in requests_payload:
+        assert item["outputDimensionality"] == 768
+
+
+@pytest.mark.parametrize("dim", [512, 768, 1536, 3072])
+def test_explicit_dimension_always_sent_and_validated(dim):
+    """When dimension is explicitly set, request sends it and validates length matches."""
+    provider, client = make_provider(dimension=dim, vector=[0.01] * dim)
+    assert provider.dimension == dim
+
+    res_single = provider.embed_text("test single")
+    assert len(res_single) == dim
+    assert client.calls[-1]["json"]["outputDimensionality"] == dim
+
+    res_batch = provider.embed_texts(["test batch 1", "test batch 2"])
+    assert len(res_batch) == 2
+    assert len(res_batch[0]) == dim
+    assert client.calls[-1]["json"]["requests"][0]["outputDimensionality"] == dim
+
+
+# ---------------------------------------------------------------------------
+# 3. embed_text (Single Text Embedding)
 # ---------------------------------------------------------------------------
 def test_embed_text_sends_correct_payload_and_headers():
     provider, client = make_provider(dimension=768)
@@ -213,12 +295,12 @@ def test_embed_text_sends_correct_payload_and_headers():
 
     assert len(client.calls) == 1
     call = client.calls[0]
-    assert call["path"] == "/v1beta/models/text-embedding-004:embedContent"
+    assert call["path"] == "/v1beta/models/gemini-embedding-2:embedContent"
     assert call["headers"]["x-goog-api-key"] == FAKE_API_KEY
     assert call["headers"]["Content-Type"] == "application/json"
 
     expected_payload = {
-        "model": "models/text-embedding-004",
+        "model": "models/gemini-embedding-2",
         "content": {"parts": [{"text": text}]},
         "outputDimensionality": 768,
     }
@@ -228,13 +310,13 @@ def test_embed_text_sends_correct_payload_and_headers():
 
 
 def test_embed_text_normalizes_model_with_models_prefix():
-    provider, client = make_provider(model="models/gemini-embedding-001")
+    provider, client = make_provider(model="models/gemini-embedding-2")
     provider.embed_text("sample query")
 
     assert len(client.calls) == 1
     call = client.calls[0]
-    assert call["path"] == "/v1beta/models/gemini-embedding-001:embedContent"
-    assert call["json"]["model"] == "models/gemini-embedding-001"
+    assert call["path"] == "/v1beta/models/gemini-embedding-2:embedContent"
+    assert call["json"]["model"] == "models/gemini-embedding-2"
 
 
 @pytest.mark.parametrize("bad_text", ["", "   ", "\t\n", "  \n  "])
@@ -254,7 +336,7 @@ def test_embed_text_rejects_non_string(bad_type):
 
 
 # ---------------------------------------------------------------------------
-# 3. embed_texts (Batch Text Embedding)
+# 4. embed_texts (Batch Text Embedding)
 # ---------------------------------------------------------------------------
 def test_embed_texts_sends_batch_request():
     provider, client = make_provider(dimension=768)
@@ -263,7 +345,7 @@ def test_embed_texts_sends_batch_request():
 
     assert len(client.calls) == 1
     call = client.calls[0]
-    assert call["path"] == "/v1beta/models/text-embedding-004:batchEmbedContents"
+    assert call["path"] == "/v1beta/models/gemini-embedding-2:batchEmbedContents"
     requests_payload = call["json"].get("requests", [])
     assert len(requests_payload) == 3
     assert requests_payload[0]["content"]["parts"][0]["text"] == "First passage"
@@ -283,7 +365,6 @@ def test_embed_texts_empty_returns_empty_without_request():
 
 
 def test_embed_texts_chunks_batches():
-    # If batch_size=2 and 5 texts, 3 requests should be sent
     provider, client = make_provider(batch_size=2)
     texts = ["A", "B", "C", "D", "E"]
     res = provider.embed_texts(texts)
@@ -296,7 +377,7 @@ def test_embed_texts_chunks_batches():
 
 
 # ---------------------------------------------------------------------------
-# 4. Strict Vector & Response Validation
+# 5. Strict Vector & Response Validation
 # ---------------------------------------------------------------------------
 def test_dimension_mismatch_raises_error():
     provider, _ = make_provider(vector=[0.1] * 256, dimension=768)
@@ -337,7 +418,7 @@ def test_batch_response_count_mismatch():
 
 
 # ---------------------------------------------------------------------------
-# 5. API Error Handling & Secret Sanitization
+# 6. API Error Handling & Secret Sanitization
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("status_code", [401, 403, 429, 500])
 def test_http_errors_raise_provider_error(status_code):
@@ -363,7 +444,7 @@ def test_network_connection_error_sanitized():
 
 
 # ---------------------------------------------------------------------------
-# 6. Document & Query Embedding Compatibility
+# 7. Document & Query Embedding Compatibility
 # ---------------------------------------------------------------------------
 def test_document_and_query_dimension_compatibility():
     """Verify document chunks and user queries yield compatible embedding dimensions."""
@@ -381,7 +462,7 @@ def test_document_and_query_dimension_compatibility():
 
 
 # ---------------------------------------------------------------------------
-# 7. Production Evaluation Harness & Honest Demarcation
+# 8. Production Evaluation Harness & Honest Demarcation
 # ---------------------------------------------------------------------------
 def test_check_gemini_credentials_when_unset(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -409,6 +490,8 @@ def test_production_eval_with_gemini_fails_open_when_credentials_missing(monkeyp
     assert report.status == "unavailable"
     assert report.mode == "production"
     assert report.provider_name == "gemini"
+    assert report.model_name == "gemini-embedding-2"
+    assert report.dimension == 768
     assert report.is_semantic is True
     assert report.is_synthetic is False
     assert report.is_live is False
@@ -423,7 +506,7 @@ def test_production_eval_with_simulated_gemini_provider():
         def __init__(self):
             self.provider = "gemini"
             self.name = "gemini"
-            self.model = "text-embedding-004"
+            self.model = "gemini-embedding-2"
             self.dimension = 768
             self.is_simulated = True
 
@@ -464,6 +547,7 @@ def test_configured_pipeline_mode_with_gemini(monkeypatch):
 
     assert report.status == "completed"
     assert report.provider_name == "gemini"
+    assert report.model_name == "gemini-embedding-2"
     assert report.is_semantic is True
     assert report.metrics is not None
 
@@ -484,7 +568,7 @@ def test_cli_production_mode_with_gemini_unavailable(monkeypatch, tmp_path):
     assert exit_code == 0
     assert report.status == "unavailable"
     assert report.provider_name == "gemini"
-    assert report.model_name == "text-embedding-004"
+    assert report.model_name == "gemini-embedding-2"
     assert report.dimension == 768
     assert report.is_live is False
     assert report.provider_live is False
@@ -508,7 +592,7 @@ def test_cli_fail_on_unavailable_with_gemini(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 8. Opt-In Live Smoke Test (Skipped in CI)
+# 9. Opt-In Live Smoke Test (Skipped in CI)
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(
     not (os.getenv("GEMINI_API_KEY") or os.getenv("NEXORA_GEMINI_API_KEY")),
@@ -522,7 +606,7 @@ def test_live_gemini_api_smoke():
     key = os.getenv("GEMINI_API_KEY") or os.getenv("NEXORA_GEMINI_API_KEY")
     config = EmbeddingConfig(
         provider="gemini",
-        model="text-embedding-004",
+        model="gemini-embedding-2",
         api_key=key,
         dimension=768,
     )

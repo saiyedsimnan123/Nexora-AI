@@ -30,10 +30,19 @@ from nexora.embedding.config import ENV_API_KEY, EmbeddingConfig
 ENV_GEMINI_API_KEY = "GEMINI_API_KEY"
 ENV_NEXORA_GEMINI_API_KEY = "NEXORA_GEMINI_API_KEY"
 
-DEFAULT_GEMINI_MODEL = "text-embedding-004"
+DEFAULT_GEMINI_MODEL = "gemini-embedding-2"
 DEFAULT_GEMINI_DIMENSION = 768
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
 DEFAULT_GEMINI_BATCH_SIZE = 100
+
+LEGACY_MODEL_ALIASES: dict[str, str] = {
+    "text-embedding-004": "gemini-embedding-2",
+    "models/text-embedding-004": "gemini-embedding-2",
+    "gemini-embedding-001": "gemini-embedding-2",
+    "models/gemini-embedding-001": "gemini-embedding-2",
+    "embedding-001": "gemini-embedding-2",
+    "models/embedding-001": "gemini-embedding-2",
+}
 
 
 class GeminiEmbeddingProviderError(RuntimeError):
@@ -97,12 +106,17 @@ class GeminiEmbeddingProvider:
             )
         self._config = config
 
-        # Determine model: normalize default/fallback names
-        model = config.model
-        if not model or model in ("hash-sha256", "text-embedding-3-small", "default"):
+        # Determine model: normalize default/fallback names and migrate legacy aliases
+        raw_model = (config.model or "").strip()
+        clean_raw = raw_model.removeprefix("models/")
+        if not raw_model or raw_model in ("hash-sha256", "text-embedding-3-small", "default"):
             self._model = DEFAULT_GEMINI_MODEL
+        elif raw_model in LEGACY_MODEL_ALIASES:
+            self._model = LEGACY_MODEL_ALIASES[raw_model]
+        elif clean_raw in LEGACY_MODEL_ALIASES:
+            self._model = LEGACY_MODEL_ALIASES[clean_raw]
         else:
-            self._model = model
+            self._model = raw_model
 
         self._dimension = config.dimension if config.dimension is not None else DEFAULT_GEMINI_DIMENSION
         self._batch_size = config.batch_size if config.batch_size is not None else DEFAULT_GEMINI_BATCH_SIZE
@@ -110,7 +124,7 @@ class GeminiEmbeddingProvider:
         raw_base = config.base_url or os.getenv("GEMINI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL") or DEFAULT_GEMINI_BASE_URL
         self._base_url = raw_base.rstrip("/")
 
-        # Clean model name for URL paths (e.g. models/text-embedding-004 -> text-embedding-004)
+        # Clean model name for URL paths (e.g. models/gemini-embedding-2 -> gemini-embedding-2)
         self._clean_model = self._model.removeprefix("models/")
 
         self._owns_client = False
@@ -192,9 +206,8 @@ class GeminiEmbeddingProvider:
         payload: dict[str, Any] = {
             "model": f"models/{self._clean_model}",
             "content": {"parts": [{"text": text}]},
+            "outputDimensionality": self._dimension,
         }
-        if self._config.dimension is not None:
-            payload["outputDimensionality"] = self._config.dimension
 
         response_data = self._request(path, payload)
         if not isinstance(response_data, dict):
@@ -243,9 +256,8 @@ class GeminiEmbeddingProvider:
                 item: dict[str, Any] = {
                     "model": f"models/{self._clean_model}",
                     "content": {"parts": [{"text": t}]},
+                    "outputDimensionality": self._dimension,
                 }
-                if self._config.dimension is not None:
-                    item["outputDimensionality"] = self._config.dimension
                 req_items.append(item)
 
             payload = {"requests": req_items}

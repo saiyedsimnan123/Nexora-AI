@@ -357,8 +357,8 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
     model_name = args.model
     dimension = args.dimension
     if args.provider and args.provider.strip().lower() == "gemini":
-        if model_name == "text-embedding-3-small":
-            model_name = "text-embedding-004"
+        if model_name in ("text-embedding-3-small", "text-embedding-004"):
+            model_name = "gemini-embedding-2"
         if dimension == 1536:
             dimension = 768
 
