@@ -45,6 +45,7 @@ from nexora.embedding.gemini_provider import (
     GeminiEmbeddingProvider,
     GeminiEmbeddingProviderError,
     GeminiReadinessReport,
+    _extract_response_error_details,
     check_gemini_readiness,
     is_simulated_client,
     sanitize_secret_text,
@@ -75,11 +76,25 @@ class FakeHttpResponse:
     def json(self) -> Any:
         return self.data
 
+    @property
+    def text(self) -> str:
+        import json
+        if isinstance(self.data, (dict, list)):
+            return json.dumps(self.data)
+        return str(self.data or "")
+
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
+            import json
             import httpx
             request = httpx.Request("POST", "https://generativelanguage.googleapis.com")
-            response = httpx.Response(self.status_code, request=request)
+            content = None
+            if self.data is not None:
+                if isinstance(self.data, (dict, list)):
+                    content = json.dumps(self.data).encode("utf-8")
+                else:
+                    content = str(self.data).encode("utf-8")
+            response = httpx.Response(self.status_code, request=request, content=content)
             raise httpx.HTTPStatusError(
                 f"HTTP {self.status_code}", request=request, response=response
             )
@@ -350,6 +365,7 @@ def test_embed_texts_sends_batch_request():
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call["path"] == "/v1beta/models/gemini-embedding-2:batchEmbedContents"
+    assert call["json"].get("model") == "models/gemini-embedding-2"
     requests_payload = call["json"].get("requests", [])
     assert len(requests_payload) == 3
     assert requests_payload[0]["content"]["parts"][0]["text"] == "First passage"
@@ -815,6 +831,118 @@ def test_gemini_readiness_secret_scrubbing():
     assert report.status == "failed"
     assert raw_secret not in (report.error or "")
     assert "***REDACTED***" in (report.error or "")
+
+
+def test_gemini_readiness_http_400_api_key_invalid_actionable():
+    """Google's HTTP 400 API_KEY_INVALID error is clearly diagnosed with AI Studio guidance."""
+    google_err = {
+        "error": {
+            "code": 400,
+            "message": "API key not valid. Please pass a valid API key.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_INVALID",
+                    "domain": "googleapis.com",
+                    "metadata": {"service": "generativelanguage.googleapis.com"},
+                }
+            ],
+        }
+    }
+    provider, _ = make_provider(status_code=400, response_data=google_err)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert report.is_live is False
+    assert "Gemini API key rejected (HTTP 400): invalid API key" in (report.error or "")
+    assert "https://aistudio.google.com/app/apikey" in (report.error or "")
+    assert "API_KEY_INVALID" in (report.error or "")
+    assert "API key not valid" in (report.error or "")
+    assert FAKE_API_KEY not in (report.error or "")
+
+
+def test_gemini_readiness_http_400_field_violation_preserves_details():
+    """HTTP 400 with schema or parameter violation preserves Google's exact details."""
+    google_err = {
+        "error": {
+            "code": 400,
+            "message": "Invalid JSON payload received. Unknown name 'bad_field': Cannot find field.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [
+                        {"description": "Invalid JSON payload received. Unknown name 'bad_field': Cannot find field."}
+                    ],
+                }
+            ],
+        }
+    }
+    provider, _ = make_provider(status_code=400, response_data=google_err)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert report.is_ready is False
+    assert "Gemini API request rejected (HTTP 400)" in (report.error or "")
+    assert "Unknown name 'bad_field'" in (report.error or "")
+    assert FAKE_API_KEY not in (report.error or "")
+
+
+def test_gemini_readiness_http_error_body_secrets_scrubbed():
+    """Ensure any secrets appearing in Google's error response body are completely scrubbed."""
+    secret = "secret-token-abcdef-123456"
+    google_err = {
+        "error": {
+            "code": 400,
+            "message": f"Rejected token {secret} with x-goog-api-key: {secret}",
+            "status": "INVALID_ARGUMENT",
+        }
+    }
+    provider, _ = make_provider(status_code=400, response_data=google_err, api_key=secret)
+    report = provider.check_readiness()
+
+    assert report.status == "failed"
+    assert secret not in (report.error or "")
+    assert "***REDACTED***" in (report.error or "")
+
+
+def test_api_key_outer_quotes_and_whitespace_stripped():
+    """API keys wrapped in single or double quotes from shell exports are stripped cleanly."""
+    provider1, _ = make_provider(api_key='"AIzaSyTestClean1234567890123456789012"')
+    assert provider1._api_key == "AIzaSyTestClean1234567890123456789012"
+
+    provider2, _ = make_provider(api_key="'AIzaSyTestClean1234567890123456789012'")
+    assert provider2._api_key == "AIzaSyTestClean1234567890123456789012"
+
+    provider3, _ = make_provider(api_key="  'AIzaSyTestClean1234567890123456789012'  ")
+    assert provider3._api_key == "AIzaSyTestClean1234567890123456789012"
+
+
+def test_extract_response_error_details_formats():
+    """Verify _extract_response_error_details extracts messages and reasons safely."""
+    # 1. Google standard error
+    data = {
+        "error": {
+            "message": "Key is invalid",
+            "status": "INVALID_ARGUMENT",
+            "details": [{"reason": "API_KEY_INVALID"}],
+        }
+    }
+    resp = FakeHttpResponse(data, status_code=400)
+    msg = _extract_response_error_details(resp)
+    assert "Key is invalid" in msg
+    assert "(reason: API_KEY_INVALID)" in msg
+
+    # 2. Plain text fallback
+    resp_text = FakeHttpResponse("Plain text error from upstream", status_code=502)
+    resp_text.data = "Plain text error from upstream"
+    msg2 = _extract_response_error_details(resp_text)
+    assert "Plain text error from upstream" in msg2
+
+    # 3. None / empty
+    assert _extract_response_error_details(None) == ""
 
 
 def test_gemini_provider_repr_is_secret_free():

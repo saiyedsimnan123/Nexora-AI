@@ -316,7 +316,7 @@ def check_gemini_credentials(api_key: str | None = None) -> tuple[bool, str | No
         or os.getenv("NEXORA_GEMINI_API_KEY")
         or os.getenv(ENV_API_KEY)
     )
-    if not key or not str(key).strip():
+    if not key or not str(key).strip().strip("'\""):
         return False, (
             "External Gemini credentials are unavailable. Set GEMINI_API_KEY or "
             f"{ENV_API_KEY} to exercise the real Gemini embedding provider."

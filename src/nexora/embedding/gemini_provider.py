@@ -58,7 +58,11 @@ def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) ->
     keys_to_scrub: set[str] = set()
     for s in extra_secrets:
         if s and len(str(s).strip()) >= 4:
-            keys_to_scrub.add(str(s).strip())
+            s_str = str(s).strip()
+            clean_s = s_str.strip("'\"")
+            keys_to_scrub.add(s_str)
+            if len(clean_s) >= 4:
+                keys_to_scrub.add(clean_s)
     for env_var in (
         ENV_GEMINI_API_KEY,
         ENV_NEXORA_GEMINI_API_KEY,
@@ -68,7 +72,11 @@ def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) ->
     ):
         val = os.getenv(env_var)
         if val and len(val.strip()) >= 4:
-            keys_to_scrub.add(val.strip())
+            val_str = val.strip()
+            clean_val = val_str.strip("'\"")
+            keys_to_scrub.add(val_str)
+            if len(clean_val) >= 4:
+                keys_to_scrub.add(clean_val)
 
     for key in sorted(keys_to_scrub, key=len, reverse=True):
         result = result.replace(key, "***REDACTED***")
@@ -97,6 +105,74 @@ def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) ->
     return result
 
 
+def _extract_response_error_details(
+    resp: Any,
+    extra_secrets: Sequence[str | None] = (),
+) -> str:
+    """Extract and sanitize descriptive error details from an HTTP response object.
+
+    Handles Google Generative Language JSON error formats:
+    - ``error.message``
+    - ``error.status``
+    - ``error.details[].reason`` (e.g. ``API_KEY_INVALID``)
+    - ``error.details[].fieldViolations[].description``
+    - Fallback to sanitized response text.
+
+    Guarantees secrets are never leaked.
+    """
+    if resp is None:
+        return ""
+
+    data: Any = None
+    try:
+        if callable(getattr(resp, "json", None)):
+            data = resp.json()
+        elif hasattr(resp, "data") and isinstance(resp.data, dict):
+            data = resp.data
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        error_obj = data.get("error")
+        if isinstance(error_obj, dict):
+            msg = str(error_obj.get("message") or "").strip()
+            status = str(error_obj.get("status") or "").strip()
+            details = error_obj.get("details")
+
+            reasons: list[str] = []
+            if isinstance(details, list):
+                for item in details:
+                    if isinstance(item, dict):
+                        if item.get("reason"):
+                            reasons.append(str(item["reason"]))
+                        if item.get("fieldViolations") and isinstance(item["fieldViolations"], list):
+                            for fv in item["fieldViolations"]:
+                                if isinstance(fv, dict) and fv.get("description"):
+                                    reasons.append(str(fv["description"]))
+
+            detail_parts: list[str] = []
+            if msg:
+                detail_parts.append(msg)
+            elif status:
+                detail_parts.append(f"Status {status}")
+
+            if reasons:
+                seen = set()
+                deduped = [r for r in reasons if not (r in seen or seen.add(r))]
+                detail_parts.append(f"(reason: {', '.join(deduped)})")
+
+            if detail_parts:
+                combined = " ".join(detail_parts)
+                return sanitize_secret_text(combined, extra_secrets=extra_secrets)
+
+    raw_text = getattr(resp, "text", "")
+    if isinstance(raw_text, str) and raw_text.strip():
+        collapsed = " ".join(raw_text.strip().split())[:300]
+        return sanitize_secret_text(collapsed, extra_secrets=extra_secrets)
+
+    return ""
+
+
 def _format_actionable_error(exc: Exception, api_key: str | None = None) -> str:
     """Format a sanitized, actionable error message from an exception."""
     raw_msg = sanitize_secret_text(str(exc), extra_secrets=[api_key])
@@ -109,6 +185,11 @@ def _format_actionable_error(exc: Exception, api_key: str | None = None) -> str:
             raw_msg = f"{raw_msg}: {sanitized_cause}"
 
     resp = getattr(exc, "response", None) or (getattr(cause, "response", None) if cause else None)
+    if resp is not None:
+        resp_detail = _extract_response_error_details(resp, extra_secrets=[api_key])
+        if resp_detail and resp_detail not in raw_msg:
+            raw_msg = f"{raw_msg}: {resp_detail}"
+
     status_code = getattr(resp, "status_code", None) if resp is not None else None
     if status_code is None and "HTTP " in raw_msg:
         match = re.search(r"HTTP\s+(\d{3})", raw_msg)
@@ -119,6 +200,12 @@ def _format_actionable_error(exc: Exception, api_key: str | None = None) -> str:
                 pass
 
     if status_code == 400:
+        if "API_KEY_INVALID" in raw_msg or "api key not valid" in raw_msg.lower():
+            return (
+                f"Gemini API key rejected (HTTP 400): invalid API key. "
+                f"Verify or regenerate your API key at https://aistudio.google.com/app/apikey. "
+                f"Details: {raw_msg}"
+            )
         return f"Gemini API request rejected (HTTP 400): check model name and request parameters. Details: {raw_msg}"
     if status_code == 401:
         return f"Gemini authentication failed (HTTP 401): invalid or missing API key. Details: {raw_msg}"
@@ -296,7 +383,13 @@ class GeminiEmbeddingProvider:
         self._is_simulated_override: bool | None = None
         if client is not None:
             self._client = client
-            self._api_key: str | None = config.api_key
+            key = (
+                config.api_key
+                or os.getenv(ENV_GEMINI_API_KEY)
+                or os.getenv(ENV_NEXORA_GEMINI_API_KEY)
+                or os.getenv(ENV_API_KEY)
+            )
+            self._api_key = str(key).strip().strip("'\"") if key and str(key).strip().strip("'\"") else None
             return
 
         api_key = (
@@ -305,13 +398,14 @@ class GeminiEmbeddingProvider:
             or os.getenv(ENV_NEXORA_GEMINI_API_KEY)
             or os.getenv(ENV_API_KEY)
         )
-        if not api_key or not str(api_key).strip():
+        cleaned_key = str(api_key).strip().strip("'\"") if api_key else ""
+        if not cleaned_key:
             raise GeminiEmbeddingProviderError(
                 f"An API key is required to create a Gemini client; "
                 f"set config.api_key or the {ENV_GEMINI_API_KEY} environment variable"
             )
 
-        self._api_key = str(api_key).strip()
+        self._api_key = cleaned_key
         self._client = httpx.Client(base_url=self._base_url, timeout=30.0)
         self._owns_client = True
 
@@ -373,11 +467,17 @@ class GeminiEmbeddingProvider:
             raise
         except Exception as error:
             status_info = ""
+            error_body_detail = ""
             resp = getattr(error, "response", None)
-            if resp is not None and hasattr(resp, "status_code"):
-                status_info = f" (HTTP {resp.status_code})"
+            if resp is not None:
+                if hasattr(resp, "status_code"):
+                    status_info = f" (HTTP {resp.status_code})"
+                error_body_detail = _extract_response_error_details(
+                    resp, extra_secrets=[self._api_key]
+                )
+            detail_suffix = f": {error_body_detail}" if error_body_detail else ""
             raise GeminiEmbeddingProviderError(
-                f"Gemini embedding request failed ({type(error).__name__}){status_info}"
+                f"Gemini embedding request failed ({type(error).__name__}){status_info}{detail_suffix}"
             ) from error
 
     def embed_text(self, text: str) -> list[float]:
@@ -457,7 +557,10 @@ class GeminiEmbeddingProvider:
                 }
                 req_items.append(item)
 
-            payload = {"requests": req_items}
+            payload = {
+                "model": f"models/{self._clean_model}",
+                "requests": req_items,
+            }
             response_data = self._request(path, payload)
 
             if not isinstance(response_data, dict):

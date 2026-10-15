@@ -276,6 +276,8 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, Any, str]:
                 or os.getenv("NEXORA_GEMINI_API_KEY")
                 or os.getenv(ENV_API_KEY)
             )
+            if api_key:
+                api_key = str(api_key).strip().strip("'\"")
             base_url = (
                 args.base_url
                 or os.getenv("GEMINI_BASE_URL")
@@ -431,7 +433,7 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, Any, str]:
         vector_store=vector_store,
         quality_policy=policy,
         k_values=k_vals,
-        api_key=args.api_key,
+        api_key=str(args.api_key).strip().strip("'\"") if args.api_key else None,
         base_url=args.base_url,
         provider_name=args.provider,
         model_name=model_name,
