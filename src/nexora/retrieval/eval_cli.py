@@ -180,11 +180,19 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
             d_queries = report.dataset_info.get("queries_count", 0)
             d_illustrative = report.dataset_info.get("is_illustrative_only")
             d_provenance = report.dataset_info.get("provenance")
-            if d_provenance in ("manually_reviewed_benchmark", "reviewed_benchmark"):
+            d_tier = report.dataset_info.get("benchmark_tier")
+            review_summary = report.dataset_info.get("review_summary") or {}
+            is_fully_reviewed = review_summary.get("is_fully_reviewed")
+
+            # Review integrity: Never display manually reviewed benchmark unless tier is confirmed
+            # and every query's review is verified (cannot overstate partial reviews).
+            if d_tier == "manually_reviewed_benchmark" and (
+                is_fully_reviewed is True or review_summary.get("reviewed_queries", 0) == d_queries
+            ):
                 ill_str = " (manually reviewed benchmark)"
-            elif d_provenance in ("candidate", "candidate_real_world"):
+            elif d_tier == "candidate_real_world" or d_provenance in ("candidate", "candidate_real_world"):
                 ill_str = " (candidate real-world)"
-            elif d_illustrative is True or d_provenance == "illustrative":
+            elif d_tier == "illustrative" or d_illustrative is True or d_provenance == "illustrative":
                 ill_str = " (illustrative)"
             elif d_illustrative is False or d_provenance == "benchmark":
                 ill_str = " (benchmark)"

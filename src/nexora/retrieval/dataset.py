@@ -62,6 +62,14 @@ class ResearchRetrievalDataset:
                 prov = "benchmark"
             else:
                 prov = "unknown"
+        if prov in ("manually_reviewed_benchmark", "reviewed_benchmark"):
+            if not self.is_manually_reviewed:
+                raise DatasetValidationError(
+                    f"Cannot classify dataset as '{prov}': "
+                    f"every query (including unanswerable queries) must have explicitly confirmed review status "
+                    f"with a non-empty reviewer identifier. "
+                    f"Found {self.unreviewed_queries_count} unreviewed query record(s)."
+                )
         object.__setattr__(self, "provenance", prov)
 
     @property
@@ -71,33 +79,46 @@ class ResearchRetrievalDataset:
 
     @property
     def reviewed_queries_count(self) -> int:
-        """Count of queries whose relevance labels are confirmed manually reviewed."""
-        return sum(1 for q in self.queries if q.get("reviewed") is True)
+        """Count of queries whose relevance labels are confirmed manually reviewed with non-empty reviewer."""
+        return sum(
+            1 for q in self.queries
+            if q.get("reviewed") is True and q.get("reviewer") and str(q.get("reviewer")).strip()
+        )
 
     @property
     def unreviewed_queries_count(self) -> int:
-        """Count of queries whose relevance labels are unreviewed or pending review."""
-        return sum(1 for q in self.queries if q.get("reviewed") is not True)
+        """Count of queries whose relevance labels are unreviewed, pending, or lack reviewer identity."""
+        return len(self.queries) - self.reviewed_queries_count
 
     @property
     def is_manually_reviewed(self) -> bool:
-        """True if the dataset has queries and every query with expected chunks has been manually reviewed."""
+        """True if and only if every query in the dataset has explicitly confirmed manual review."""
         if not self.queries:
             return False
-        return self.reviewed_queries_count > 0 and self.unreviewed_queries_count == 0
+        return (
+            self.reviewed_queries_count == len(self.queries)
+            and self.unreviewed_queries_count == 0
+        )
 
     @property
     def benchmark_tier(self) -> str:
-        """Categorize dataset into illustrative, candidate_real_world, or manually_reviewed_benchmark."""
+        """Categorize dataset into illustrative, candidate_real_world, or manually_reviewed_benchmark.
+
+        Integrity guarantee: A dataset is never classified as manually_reviewed_benchmark
+        unless every query (including unanswerable) has explicitly confirmed review status with reviewer identity.
+        """
         if self.is_illustrative_only is True or self.provenance == "illustrative":
             return "illustrative"
-        if self.provenance in ("manually_reviewed_benchmark", "reviewed_benchmark") or (
-            self.is_illustrative_only is False and self.is_manually_reviewed
-        ):
-            return "manually_reviewed_benchmark"
-        if self.provenance in ("candidate", "candidate_real_world", "benchmark") or (
-            self.is_illustrative_only is False
-        ):
+        if self.is_manually_reviewed and self.is_illustrative_only is False:
+            if self.provenance in (
+                "manually_reviewed_benchmark",
+                "reviewed_benchmark",
+                "benchmark",
+                "candidate",
+                "candidate_real_world",
+            ):
+                return "manually_reviewed_benchmark"
+        if self.is_illustrative_only is False or self.provenance in ("candidate", "candidate_real_world", "benchmark"):
             return "candidate_real_world"
         return "unknown"
 
@@ -372,6 +393,11 @@ def _validate_query(
             )
         reviewer = reviewer_val.strip() if reviewer_val.strip() else None
 
+    if is_reviewed is True and not reviewer:
+        raise DatasetValidationError(
+            f"Query '{q_id}' (index {index}) is marked as reviewed but is missing a valid, non-empty 'reviewer' identifier"
+        )
+
     review_notes: str | None = None
     if review_notes_val is not None:
         if not isinstance(review_notes_val, str):
@@ -514,18 +540,24 @@ def validate_dataset_dict(raw: dict[str, Any]) -> ResearchRetrievalDataset:
                 f"Dataset-level 'review_status' must be one of: {sorted(VALID_REVIEW_STATUS_VALUES)}"
             )
 
-    has_dataset_review = (
-        (isinstance(dataset_reviewed_flag, bool) and dataset_reviewed_flag)
-        or (isinstance(dataset_review_status, str) and dataset_review_status.strip().lower() == "reviewed")
-    )
-    has_query_review = any(q.get("reviewed") is True for q in validated_queries)
+    unreviewed_queries = [
+        q.get("query_id", f"q_{idx+1}")
+        for idx, q in enumerate(validated_queries)
+        if q.get("reviewed") is not True or not q.get("reviewer") or not str(q.get("reviewer")).strip()
+    ]
 
-    # Fail closed: Do not label a dataset as manually reviewed unless review status is explicitly recorded
+    # Fail closed: Do not label a dataset as manually reviewed unless EVERY query has explicitly confirmed review
     if provenance in ("manually_reviewed_benchmark", "reviewed_benchmark"):
-        if not (has_dataset_review or has_query_review):
+        if not validated_queries:
             raise DatasetValidationError(
-                "Cannot label dataset as manually reviewed ('manually_reviewed_benchmark') "
-                "unless relevance label review status is explicitly recorded"
+                f"Cannot label dataset as manually reviewed ('{provenance}'): dataset has no queries"
+            )
+        if unreviewed_queries:
+            raise DatasetValidationError(
+                f"Cannot label dataset as manually reviewed ('{provenance}'): "
+                f"every query's relevance labels (including unanswerable queries) must have explicitly "
+                f"confirmed review status and a non-empty reviewer identifier. "
+                f"Found {len(unreviewed_queries)} unreviewed or incomplete query record(s): {unreviewed_queries}"
             )
 
     return ResearchRetrievalDataset(

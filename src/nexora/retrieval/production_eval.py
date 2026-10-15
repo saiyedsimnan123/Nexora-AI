@@ -501,6 +501,7 @@ def evaluate_production_retrieval(
             "path": None,
             "is_illustrative_only": True,
             "provenance": "illustrative",
+            "benchmark_tier": "illustrative",
             "chunks_count": len(raw_chunks),
             "queries_count": len(benchmark_cases),
             "unanswerable_queries_count": sum(
