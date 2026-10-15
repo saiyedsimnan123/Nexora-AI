@@ -90,6 +90,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help="Base URL for OpenAI-compatible embedding endpoint (or uses OPENAI_BASE_URL / NEXORA_EMBEDDING_BASE_URL).",
+    )
+
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="Embedding provider name (e.g. 'openai' or 'hash'). Overrides configured default.",
+    )
+
+    parser.add_argument(
         "--model",
         type=str,
         default="text-embedding-3-small",
@@ -346,6 +360,8 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, ProductionEval
         quality_policy=policy,
         k_values=k_vals,
         api_key=args.api_key,
+        base_url=args.base_url,
+        provider_name=args.provider,
         model_name=args.model,
         dimension=args.dimension,
         dataset=loaded_dataset,

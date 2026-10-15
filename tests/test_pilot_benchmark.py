@@ -163,3 +163,240 @@ def test_pilot_benchmark_eval_cli(tmp_path, capsys):
     assert data["dataset_info"]["review_summary"]["is_fully_reviewed"] is True
     assert data["dataset_info"]["chunks_count"] == 6
     assert data["dataset_info"]["queries_count"] == 7
+
+
+# ===========================================================================
+# 7. Real Embedding Evaluation Pilot Tests (Milestone 12C-37)
+# ===========================================================================
+
+def test_pilot_benchmark_production_mode_unavailable_without_credentials(monkeypatch):
+    """When credentials are not set, production evaluation of pilot benchmark reports unavailable."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_EMBEDDING_API_KEY", raising=False)
+
+    ds = get_pilot_benchmark_dataset()
+    cfg = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        api_key=None,
+        dataset=ds,
+    )
+    report = evaluate_production_retrieval(cfg)
+
+    assert report.status == "unavailable"
+    assert report.mode == "production"
+    assert report.provider_name == "openai"
+    assert report.model_name == "text-embedding-3-small"
+    assert report.dimension == 1536
+    assert report.is_semantic is True
+    # Crucial guarantee: never substitute synthetic or hash embeddings when real credentials missing
+    assert report.is_synthetic is False
+    assert report.is_live is False
+    assert report.provider_live is False
+    assert "External model credentials are unavailable" in report.infrastructure_limitation
+    assert report.unavailable_dependencies == ["openai_credentials"]
+    assert report.metrics is None
+    assert report.baseline_metrics is None
+    assert report.dataset_info["benchmark_tier"] == "manually_reviewed_benchmark"
+    assert report.dataset_info["review_summary"]["is_fully_reviewed"] is True
+
+
+def test_pilot_benchmark_configured_pipeline_hash_provider():
+    """Configured pipeline evaluation with hash provider reports honestly without semantic pretense."""
+    from nexora.retrieval.quality import RetrievalQualityPolicy
+
+    ds = get_pilot_benchmark_dataset()
+    policy = RetrievalQualityPolicy(min_score=0.35, max_results=5)
+    cfg = ProductionEvaluationConfig(
+        mode=EvaluationMode.CONFIGURED_PIPELINE,
+        provider_name="hash",
+        quality_policy=policy,
+        dataset=ds,
+    )
+    report = evaluate_production_retrieval(cfg)
+
+    assert report.status == "completed"
+    assert report.provider_name == "hash"
+    assert report.is_semantic is False
+    assert report.is_synthetic is False
+    assert report.is_live is False
+    assert report.provider_live is False
+    assert "deterministic text hashing" in report.infrastructure_limitation
+
+    # Under hash retrieval with min_score=0.35, all queries return empty retrievals
+    assert report.metrics is not None
+    assert report.metrics.total_queries == 7
+    assert report.metrics.empty_retrievals == 7
+    assert report.metrics.mean_reciprocal_rank == 0.0
+
+    # Quality comparison against baseline is recorded honestly
+    assert report.baseline_metrics is not None
+    assert report.quality_comparison is not None
+    assert report.quality_comparison["dataset_provenance"] == "manually_reviewed_benchmark"
+    assert "regressions" in report.quality_comparison
+
+
+def test_pilot_benchmark_configured_pipeline_openai_without_credentials_fails(monkeypatch):
+    """Configured pipeline mode with provider='openai' and no key fails cleanly with informative report."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_EMBEDDING_API_KEY", raising=False)
+
+    ds = get_pilot_benchmark_dataset()
+    cfg = ProductionEvaluationConfig(
+        mode=EvaluationMode.CONFIGURED_PIPELINE,
+        provider_name="openai",
+        api_key=None,
+        dataset=ds,
+    )
+    report = evaluate_production_retrieval(cfg)
+
+    assert report.status == "failed"
+    assert report.provider_name == "openai"
+    assert report.is_live is False
+    assert report.provider_live is False
+    assert "openai_provider" in report.unavailable_dependencies
+    assert report.metrics is None
+
+
+def test_pilot_benchmark_production_mode_api_failure_handled_cleanly():
+    """Simulated API failure during real OpenAI call produces truthful failed report without crash."""
+    from unittest.mock import MagicMock
+    from nexora.embedding.config import EmbeddingConfig
+    from nexora.embedding.openai_provider import OpenAIEmbeddingProvider
+
+    mock_client = MagicMock()
+    mock_client.embeddings.create.side_effect = RuntimeError("Simulated 401 Unauthorized from OpenAI API")
+
+    emb_config = EmbeddingConfig(
+        provider="openai",
+        model="text-embedding-3-small",
+        api_key="sk-test-key",
+        dimension=1536,
+    )
+    provider = OpenAIEmbeddingProvider(emb_config, client=mock_client)
+
+    ds = get_pilot_benchmark_dataset()
+    cfg = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        embedding_provider=provider,
+        dataset=ds,
+    )
+    report = evaluate_production_retrieval(cfg)
+
+    assert report.status == "failed"
+    assert report.is_live is False
+    assert report.provider_live is False
+    assert "Embedding or indexing call failed" in report.error
+    assert "OpenAI embedding request failed (RuntimeError)" in report.error
+    assert report.metrics is None
+
+
+def test_pilot_benchmark_simulated_double_demarcation():
+    """Simulated test doubles exercise the 1536-d pipeline but are demarcated as non-live measurements."""
+    from tests.test_production_retrieval_evaluation import SimulatedProductionOpenAIProvider
+
+    provider = SimulatedProductionOpenAIProvider(dimension=1536)
+    ds = get_pilot_benchmark_dataset()
+    cfg = ProductionEvaluationConfig(
+        mode=EvaluationMode.PRODUCTION,
+        embedding_provider=provider,
+        dataset=ds,
+    )
+    report = evaluate_production_retrieval(cfg)
+
+    assert report.status == "completed"
+    assert report.is_synthetic is True
+    assert report.is_live is False
+    assert report.provider_live is False
+    assert "simulated" in report.provider_name.lower()
+    assert "Simulated test double" in report.infrastructure_limitation
+    assert report.dataset_info["benchmark_tier"] == "manually_reviewed_benchmark"
+    assert report.metrics is not None
+    assert report.quality_comparison is not None
+
+
+def test_pilot_benchmark_ground_truth_isolation():
+    """Ground-truth expected chunk IDs and review notes are never leaked into retrieval queries."""
+    from nexora.retrieval.evaluation import evaluate_retrieval
+    from nexora.retrieval.models import RetrievedChunk, SearchResult
+
+    captured_queries: list[str] = []
+
+    def spy_retrieve(query: str, limit: int = 5) -> SearchResult:
+        captured_queries.append(query)
+        chunk = RetrievedChunk(
+            document_id="doc_arxiv_1706.03762",
+            chunk_id="chunk_1706_03762_01",
+            text="Transformer architecture",
+            score=0.9,
+            metadata={"paper_id": "arxiv_1706.03762"},
+        )
+        return SearchResult(query=query, results=[chunk])
+
+    ds = get_pilot_benchmark_dataset()
+    metrics = evaluate_retrieval(ds.queries, spy_retrieve)
+
+    assert metrics.total_queries == 7
+    assert len(captured_queries) == 7
+
+    for q_text, query_obj in zip(captured_queries, ds.queries):
+        assert q_text == query_obj["query"]
+        for exp_id in query_obj["expected_chunk_ids"]:
+            assert exp_id not in q_text
+        if query_obj.get("reviewer"):
+            assert query_obj["reviewer"] not in q_text
+        if query_obj.get("review_notes"):
+            assert query_obj["review_notes"] not in q_text
+
+
+def test_pilot_benchmark_cli_production_unavailable_and_fail_on_unavailable(tmp_path, capsys, monkeypatch):
+    """CLI evaluates pilot benchmark in production mode, reporting unavailable and respecting fail_on_unavailable."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_EMBEDDING_API_KEY", raising=False)
+
+    out_file = str(tmp_path / "prod_unavail.json")
+
+    # 1. Without --fail-on-unavailable: exit code 0, status unavailable
+    exit_code, report, _ = run_eval_cli([
+        "--mode", "production",
+        "--dataset", JSON_PATH,
+        "--output", out_file,
+    ])
+    assert exit_code == 0
+    assert report.status == "unavailable"
+    assert report.provider_live is False
+    assert report.metrics is None
+
+    captured = capsys.readouterr().out
+    assert "Status: unavailable" in captured
+    assert "Limitation: External model credentials are unavailable" in captured
+
+    # 2. With --fail-on-unavailable: exit code 1
+    exit_code_fail, report_fail, _ = run_eval_cli([
+        "--mode", "production",
+        "--dataset", JSON_PATH,
+        "--fail-on-unavailable",
+    ])
+    assert exit_code_fail == 1
+    assert report_fail.status == "unavailable"
+
+
+def test_pilot_benchmark_cli_configured_pipeline_with_provider_flag(tmp_path, capsys):
+    """CLI configured_pipeline mode with --provider hash evaluates pilot benchmark."""
+    out_file = str(tmp_path / "pipeline_report.json")
+    exit_code, report, _ = run_eval_cli([
+        "--mode", "configured_pipeline",
+        "--provider", "hash",
+        "--dataset", JSON_PATH,
+        "--output", out_file,
+    ])
+    assert exit_code == 0
+    assert report.status == "completed"
+    assert report.provider_name == "hash"
+    assert report.is_semantic is False
+
+    captured = capsys.readouterr().out
+    assert "Provider: hash (live=False)" in captured
+    assert "(manually reviewed benchmark)" in captured
+    assert "Limitation:" in captured
+    assert "deterministic text hashing" in captured
+

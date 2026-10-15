@@ -97,6 +97,8 @@ class ProductionEvaluationConfig:
     quality_policy: RetrievalQualityPolicy | None = None
     k_values: tuple[int, ...] = (1, 3, 5)
     api_key: str | None = None
+    base_url: str | None = None
+    provider_name: str | None = None
     model_name: str = "text-embedding-3-small"
     dimension: int = 1536
     dataset: Any = None
@@ -575,10 +577,11 @@ def evaluate_production_retrieval(
                     provider="openai",
                     model=cfg.model_name,
                     api_key=cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY),
+                    base_url=cfg.base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL"),
                     dimension=cfg.dimension,
                 )
                 provider = create_embedding_provider(emb_config)
-                candidate_provider_live = True
+                candidate_provider_live = is_genuine_live_openai_provider(provider)
                 is_synthetic = False
                 is_semantic = True
                 provider_name = "openai"
@@ -622,9 +625,49 @@ def evaluate_production_retrieval(
         elif cfg.embedding_service is not None:
             provider = cfg.embedding_service
         else:
-            # Default configured provider from application config
-            emb_config = EmbeddingConfig()
-            provider = create_embedding_provider(emb_config)
+            prov_name = (cfg.provider_name or os.getenv("NEXORA_EMBEDDING_PROVIDER") or "hash").strip().lower()
+            if prov_name == "openai":
+                api_key = cfg.api_key or os.getenv("OPENAI_API_KEY") or os.getenv(ENV_API_KEY)
+                base_url = cfg.base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("NEXORA_EMBEDDING_BASE_URL")
+                emb_config = EmbeddingConfig(
+                    provider="openai",
+                    model=cfg.model_name if cfg.model_name != "hash-sha256" else "text-embedding-3-small",
+                    api_key=api_key,
+                    base_url=base_url,
+                    dimension=cfg.dimension,
+                )
+            else:
+                emb_config = EmbeddingConfig(
+                    provider="hash",
+                    model=cfg.model_name if cfg.model_name != "text-embedding-3-small" else "hash-sha256",
+                    dimension=cfg.dimension if cfg.dimension != 1536 else 64,
+                )
+            try:
+                provider = create_embedding_provider(emb_config)
+            except Exception as exc:
+                return ProductionEvaluationReport(
+                    mode=cfg.mode.value,
+                    status="failed",
+                    provider_name=prov_name,
+                    model_name=cfg.model_name,
+                    dimension=cfg.dimension,
+                    vector_store_type=format_vector_store_label(cfg.vector_store),
+                    is_semantic=(prov_name == "openai"),
+                    is_synthetic=False,
+                    is_live=False,
+                    provider_live=False,
+                    vector_store_live=False,
+                    infrastructure_limitation=f"Failed to create configured provider '{prov_name}': {exc}",
+                    error=f"Configured provider error: {exc}",
+                    unavailable_dependencies=[f"{prov_name}_provider"],
+                    corpus_info=corpus_info,
+                    policy_settings=policy_info,
+                    dataset_info=dataset_info,
+                    evaluation_conditions={"is_live_provider": False, "is_live_vector_store": False},
+                    metrics=None,
+                    paper_scope_isolation=None,
+                    threshold_calibration=None,
+                )
 
         candidate_provider_live = False
         is_synthetic = False
