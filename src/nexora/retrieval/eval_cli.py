@@ -194,6 +194,21 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
                 f"MRR: {mrr:.4f} | Recall@1: {r1:.4f} | Precision@1: {p1:.4f} | "
                 f"Rejection: {report.metrics.unanswerable_rejection_rate:.1%}"
             )
+        if report.quality_comparison is not None:
+            qc = report.quality_comparison
+            net_effect = qc.get("net_effect", "unchanged")
+            mrr_delta = qc.get("mrr_delta", 0.0)
+            sign = "+" if mrr_delta > 0 else ""
+            print(
+                f"Quality Filter Effect: {net_effect.upper()} | "
+                f"MRR Delta: {sign}{mrr_delta:.4f} | "
+                f"Regressions: {qc.get('regressions_count', 0)} | "
+                f"Improvements: {qc.get('improvements_count', 0)}"
+            )
+            regressions = qc.get("regressions", [])
+            if regressions:
+                for reg in regressions[:3]:
+                    print(f"  [REGRESSION] {reg.get('description', reg.get('metric'))}")
         if report.infrastructure_limitation:
             print(f"Limitation: {report.infrastructure_limitation}")
         if report.error:

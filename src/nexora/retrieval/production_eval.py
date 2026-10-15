@@ -41,6 +41,7 @@ from nexora.retrieval.benchmark import (
 )
 from nexora.retrieval.evaluation import (
     RetrievalEvaluationMetrics,
+    compare_retrieval_metrics,
     compute_precision_recall_at_k,
     compute_reciprocal_rank,
     evaluate_retrieval,
@@ -127,24 +128,28 @@ class ProductionEvaluationReport:
     dataset_info: dict[str, Any] | None = None
     evaluation_conditions: dict[str, Any] | None = None
     metrics: RetrievalEvaluationMetrics | None = None
+    baseline_metrics: RetrievalEvaluationMetrics | None = None
+    quality_comparison: dict[str, Any] | None = None
     paper_scope_isolation: dict[str, Any] | None = None
     threshold_calibration: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert report to dictionary representation."""
-        metrics_dict = None
-        if self.metrics is not None:
-            metrics_dict = {
-                "total_queries": self.metrics.total_queries,
-                "mean_reciprocal_rank": self.metrics.mean_reciprocal_rank,
-                "recall_at_k": self.metrics.recall_at_k,
-                "precision_at_k": self.metrics.precision_at_k,
-                "empty_retrievals": self.metrics.empty_retrievals,
-                "unanswerable_queries": self.metrics.unanswerable_queries,
-                "unanswerable_rejections": self.metrics.unanswerable_rejections,
-                "unanswerable_rejection_rate": self.metrics.unanswerable_rejection_rate,
-                "category_metrics": self.metrics.category_metrics,
+        def _metrics_to_dict(m: RetrievalEvaluationMetrics | None) -> dict[str, Any] | None:
+            if m is None:
+                return None
+            return {
+                "total_queries": m.total_queries,
+                "mean_reciprocal_rank": m.mean_reciprocal_rank,
+                "recall_at_k": m.recall_at_k,
+                "precision_at_k": m.precision_at_k,
+                "empty_retrievals": m.empty_retrievals,
+                "unanswerable_queries": m.unanswerable_queries,
+                "unanswerable_rejections": m.unanswerable_rejections,
+                "unanswerable_rejection_rate": m.unanswerable_rejection_rate,
+                "category_metrics": m.category_metrics,
             }
+
         return {
             "timestamp": self.timestamp,
             "code_version": self.code_version,
@@ -166,7 +171,9 @@ class ProductionEvaluationReport:
             "corpus_info": self.corpus_info,
             "policy_settings": self.policy_settings,
             "evaluation_conditions": self.evaluation_conditions,
-            "metrics": metrics_dict,
+            "metrics": _metrics_to_dict(self.metrics),
+            "baseline_metrics": _metrics_to_dict(self.baseline_metrics),
+            "quality_comparison": self.quality_comparison,
             "paper_scope_isolation": self.paper_scope_isolation,
             "threshold_calibration": self.threshold_calibration,
         }
@@ -766,17 +773,32 @@ def evaluate_production_retrieval(
 
     retrieval_service = RetrievalService(embedding_service, vector_store, cache_queries=True)
 
-    # Apply quality policy if configured, otherwise evaluate raw retrieval
+    # 1. Baseline retrieval (raw retrieval without quality filters)
+    baseline_limit = max(cfg.k_values)
+    baseline_retrieve_fn = lambda q, limit=baseline_limit: retrieval_service.retrieve(q, limit=limit)
+
+    # 2. Quality-filtered retrieval
     policy = cfg.quality_policy
     if policy is not None:
         quality_service = RetrievalQualityService(retrieval_service, policy)
-        retrieve_fn: Callable[[str], SearchResult] = quality_service.retrieve
+        filtered_retrieve_fn: Callable[[str], SearchResult] = quality_service.retrieve
     else:
-        retrieve_fn = lambda q, limit=5: retrieval_service.retrieve(q, limit=limit)
+        # Default quality policy when none explicitly passed
+        default_policy = RetrievalQualityPolicy(min_score=0.35, max_results=baseline_limit)
+        quality_service = RetrievalQualityService(retrieval_service, default_policy)
+        filtered_retrieve_fn = quality_service.retrieve
 
     # Execute deterministic queries
     try:
-        metrics = evaluate_retrieval(benchmark_cases, retrieve_fn, k_values=cfg.k_values)
+        baseline_metrics = evaluate_retrieval(benchmark_cases, baseline_retrieve_fn, k_values=cfg.k_values)
+        filtered_metrics = evaluate_retrieval(benchmark_cases, filtered_retrieve_fn, k_values=cfg.k_values)
+
+        quality_comparison = compare_retrieval_metrics(baseline_metrics, filtered_metrics)
+        provenance = dataset_info.get("provenance", "unknown") if dataset_info else "illustrative"
+        quality_comparison["dataset_provenance"] = provenance
+
+        # Primary metrics: filtered if quality_policy explicitly provided, otherwise baseline
+        evaluated_metrics = filtered_metrics if cfg.quality_policy is not None else baseline_metrics
 
         # Measure paper scope isolation
         isolation_res = evaluate_paper_scope_isolation(
@@ -866,7 +888,9 @@ def evaluate_production_retrieval(
         policy_settings=_get_policy_metadata(policy),
         dataset_info=dataset_info,
         evaluation_conditions=eval_conditions,
-        metrics=metrics,
+        metrics=evaluated_metrics,
+        baseline_metrics=baseline_metrics,
+        quality_comparison=quality_comparison,
         paper_scope_isolation=isolation_res,
         threshold_calibration=calibration_res,
     )

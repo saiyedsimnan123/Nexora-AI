@@ -195,12 +195,14 @@ def evaluate_retrieval(
     retrieve_fn: Callable[[str, int], SearchResult] | Callable[[str], SearchResult],
     *,
     k_values: Sequence[int] = (1, 3, 5),
+    categories: Sequence[str] | None = None,
 ) -> RetrievalEvaluationMetrics:
     """Run deterministic retrieval evaluation over a sequence of benchmark cases.
 
     Each case must be a dict with:
         - "query": str
         - "expected_chunk_ids": Sequence[str] (ground-truth relevant chunk IDs)
+        - "category": optional str category label
     """
     valid_k_values = _validate_k_values(k_values)
     valid_cases = _validate_benchmark_cases(benchmark_cases)
@@ -222,12 +224,25 @@ def evaluate_retrieval(
     empty_count = 0
     unanswerable_count = 0
     unanswerable_rejections = 0
+
+    explicit_category_seen = False
     category_buckets: dict[str, list[tuple[float, dict[int, float], dict[int, float]]]] = {}
+
+    if categories is not None:
+        for cat in categories:
+            clean_cat = str(cat).strip()
+            if clean_cat and clean_cat not in category_buckets:
+                category_buckets[clean_cat] = []
 
     for case in valid_cases:
         query = case["query"]
         relevant_ids = set(case["expected_chunk_ids"])
-        category = str(case.get("category", "")).strip()
+        raw_cat = case.get("category")
+        if raw_cat is not None and str(raw_cat).strip():
+            category = str(raw_cat).strip()
+            explicit_category_seen = True
+        else:
+            category = "uncategorized"
 
         result = caller(query, max_k)
         if not isinstance(result, SearchResult):
@@ -256,10 +271,9 @@ def evaluate_retrieval(
             case_p[k] = prec
             case_r[k] = rec
 
-        if category:
-            if category not in category_buckets:
-                category_buckets[category] = []
-            category_buckets[category].append((rr, case_p, case_r))
+        if category not in category_buckets:
+            category_buckets[category] = []
+        category_buckets[category].append((rr, case_p, case_r))
 
     num_cases = len(valid_cases)
     mrr = sum(reciprocal_ranks) / num_cases
@@ -268,17 +282,28 @@ def evaluate_retrieval(
     unans_rate = (unanswerable_rejections / unanswerable_count) if unanswerable_count > 0 else 1.0
 
     cat_metrics: dict[str, Any] = {}
-    for cat_name, entries in category_buckets.items():
-        n_cat = len(entries)
-        cat_mrr = sum(e[0] for e in entries) / n_cat
-        cat_p = {k: sum(e[1][k] for e in entries) / n_cat for k in valid_k_values}
-        cat_r = {k: sum(e[2][k] for e in entries) / n_cat for k in valid_k_values}
-        cat_metrics[cat_name] = {
-            "count": n_cat,
-            "mean_reciprocal_rank": round(cat_mrr, 4),
-            "precision_at_k": {k: round(v, 4) for k, v in cat_p.items()},
-            "recall_at_k": {k: round(v, 4) for k, v in cat_r.items()},
-        }
+    should_include_categories = explicit_category_seen or (categories is not None)
+
+    if should_include_categories:
+        for cat_name, entries in category_buckets.items():
+            if cat_name == "uncategorized" and not entries and (categories is None or "uncategorized" not in categories):
+                continue
+            n_cat = len(entries)
+            if n_cat > 0:
+                cat_mrr = sum(e[0] for e in entries) / n_cat
+                cat_p = {k: sum(e[1][k] for e in entries) / n_cat for k in valid_k_values}
+                cat_r = {k: sum(e[2][k] for e in entries) / n_cat for k in valid_k_values}
+            else:
+                cat_mrr = 0.0
+                cat_p = {k: 0.0 for k in valid_k_values}
+                cat_r = {k: 0.0 for k in valid_k_values}
+
+            cat_metrics[cat_name] = {
+                "count": n_cat,
+                "mean_reciprocal_rank": round(cat_mrr, 4),
+                "precision_at_k": {k: round(v, 4) for k, v in cat_p.items()},
+                "recall_at_k": {k: round(v, 4) for k, v in cat_r.items()},
+            }
 
     return RetrievalEvaluationMetrics(
         total_queries=num_cases,
@@ -291,6 +316,170 @@ def evaluate_retrieval(
         unanswerable_rejection_rate=round(unans_rate, 4),
         category_metrics=cat_metrics if cat_metrics else None,
     )
+
+
+def compare_retrieval_metrics(
+    baseline: RetrievalEvaluationMetrics,
+    filtered: RetrievalEvaluationMetrics,
+) -> dict[str, Any]:
+    """Compare baseline retrieval against quality-filtered retrieval honestly.
+
+    Computes exact metric deltas across MRR, Precision@K, Recall@K, unanswerable
+    rejection rate, and per-category metrics.
+
+    Identifies regressions and improvements explicitly without implying improvement
+    when metrics degraded.
+    """
+    mrr_delta = round(filtered.mean_reciprocal_rank - baseline.mean_reciprocal_rank, 4)
+    unans_delta = round(
+        filtered.unanswerable_rejection_rate - baseline.unanswerable_rejection_rate, 4
+    )
+    empty_delta = filtered.empty_retrievals - baseline.empty_retrievals
+
+    k_values = sorted(set(baseline.recall_at_k.keys()) | set(filtered.recall_at_k.keys()))
+    recall_deltas: dict[int, float] = {}
+    precision_deltas: dict[int, float] = {}
+
+    for k in k_values:
+        b_rec = baseline.recall_at_k.get(k, 0.0)
+        f_rec = filtered.recall_at_k.get(k, 0.0)
+        recall_deltas[k] = round(f_rec - b_rec, 4)
+
+        b_prec = baseline.precision_at_k.get(k, 0.0)
+        f_prec = filtered.precision_at_k.get(k, 0.0)
+        precision_deltas[k] = round(f_prec - b_prec, 4)
+
+    regressions: list[dict[str, Any]] = []
+    improvements: list[dict[str, Any]] = []
+
+    if mrr_delta < 0:
+        regressions.append({
+            "metric": "mean_reciprocal_rank",
+            "baseline": baseline.mean_reciprocal_rank,
+            "filtered": filtered.mean_reciprocal_rank,
+            "delta": mrr_delta,
+            "description": f"MRR degraded by {abs(mrr_delta):.4f}",
+        })
+    elif mrr_delta > 0:
+        improvements.append({
+            "metric": "mean_reciprocal_rank",
+            "baseline": baseline.mean_reciprocal_rank,
+            "filtered": filtered.mean_reciprocal_rank,
+            "delta": mrr_delta,
+            "description": f"MRR improved by {mrr_delta:.4f}",
+        })
+
+    for k in k_values:
+        r_d = recall_deltas[k]
+        if r_d < 0:
+            regressions.append({
+                "metric": f"recall@{k}",
+                "baseline": baseline.recall_at_k.get(k, 0.0),
+                "filtered": filtered.recall_at_k.get(k, 0.0),
+                "delta": r_d,
+                "description": f"Recall@{k} dropped by {abs(r_d):.4f}",
+            })
+        elif r_d > 0:
+            improvements.append({
+                "metric": f"recall@{k}",
+                "baseline": baseline.recall_at_k.get(k, 0.0),
+                "filtered": filtered.recall_at_k.get(k, 0.0),
+                "delta": r_d,
+                "description": f"Recall@{k} improved by {r_d:.4f}",
+            })
+
+        p_d = precision_deltas[k]
+        if p_d < 0:
+            regressions.append({
+                "metric": f"precision@{k}",
+                "baseline": baseline.precision_at_k.get(k, 0.0),
+                "filtered": filtered.precision_at_k.get(k, 0.0),
+                "delta": p_d,
+                "description": f"Precision@{k} dropped by {abs(p_d):.4f}",
+            })
+        elif p_d > 0:
+            improvements.append({
+                "metric": f"precision@{k}",
+                "baseline": baseline.precision_at_k.get(k, 0.0),
+                "filtered": filtered.precision_at_k.get(k, 0.0),
+                "delta": p_d,
+                "description": f"Precision@{k} improved by {p_d:.4f}",
+            })
+
+    if unans_delta < 0:
+        regressions.append({
+            "metric": "unanswerable_rejection_rate",
+            "baseline": baseline.unanswerable_rejection_rate,
+            "filtered": filtered.unanswerable_rejection_rate,
+            "delta": unans_delta,
+            "description": f"Unanswerable rejection rate dropped by {abs(unans_delta):.4f}",
+        })
+    elif unans_delta > 0:
+        improvements.append({
+            "metric": "unanswerable_rejection_rate",
+            "baseline": baseline.unanswerable_rejection_rate,
+            "filtered": filtered.unanswerable_rejection_rate,
+            "delta": unans_delta,
+            "description": f"Unanswerable rejection rate improved by {unans_delta:.4f}",
+        })
+
+    has_regressions = len(regressions) > 0
+    has_improvements = len(improvements) > 0
+
+    if has_improvements and not has_regressions:
+        net_effect = "improved"
+    elif has_regressions and not has_improvements:
+        net_effect = "degraded"
+    elif has_improvements and has_regressions:
+        net_effect = "mixed"
+    else:
+        net_effect = "unchanged"
+
+    # Per-category comparisons
+    category_comparisons: dict[str, Any] = {}
+    b_cats = baseline.category_metrics or {}
+    f_cats = filtered.category_metrics or {}
+    all_cats = sorted(set(b_cats.keys()) | set(f_cats.keys()))
+
+    for cat in all_cats:
+        b_c = b_cats.get(cat, {})
+        f_c = f_cats.get(cat, {})
+        b_mrr = b_c.get("mean_reciprocal_rank", 0.0)
+        f_mrr = f_c.get("mean_reciprocal_rank", 0.0)
+        cat_mrr_delta = round(f_mrr - b_mrr, 4)
+
+        b_p1 = b_c.get("precision_at_k", {}).get(1, 0.0)
+        f_p1 = f_c.get("precision_at_k", {}).get(1, 0.0)
+        b_r1 = b_c.get("recall_at_k", {}).get(1, 0.0)
+        f_r1 = f_c.get("recall_at_k", {}).get(1, 0.0)
+
+        category_comparisons[cat] = {
+            "count": f_c.get("count", b_c.get("count", 0)),
+            "baseline_mrr": b_mrr,
+            "filtered_mrr": f_mrr,
+            "mrr_delta": cat_mrr_delta,
+            "baseline_precision_at_1": b_p1,
+            "filtered_precision_at_1": f_p1,
+            "precision_at_1_delta": round(f_p1 - b_p1, 4),
+            "baseline_recall_at_1": b_r1,
+            "filtered_recall_at_1": f_r1,
+            "recall_at_1_delta": round(f_r1 - b_r1, 4),
+        }
+
+    return {
+        "net_effect": net_effect,
+        "has_regressions": has_regressions,
+        "regressions_count": len(regressions),
+        "improvements_count": len(improvements),
+        "mrr_delta": mrr_delta,
+        "recall_at_k_deltas": recall_deltas,
+        "precision_at_k_deltas": precision_deltas,
+        "unanswerable_rejection_rate_delta": unans_delta,
+        "empty_retrievals_delta": empty_delta,
+        "regressions": regressions,
+        "improvements": improvements,
+        "category_comparisons": category_comparisons,
+    }
 
 
 def evaluate_citations(
