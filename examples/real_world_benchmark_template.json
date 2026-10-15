@@ -1,0 +1,85 @@
+{
+  "dataset_id": "real-world-research-benchmark-template-v1",
+  "version": "1.0.0",
+  "description": "Template for real-world research retrieval evaluation datasets with traceable sources and reviewed relevance labels.",
+  "is_illustrative_only": false,
+  "provenance": "candidate_real_world",
+  "chunks": [
+    {
+      "chunk_id": "chunk_source1_01",
+      "paper_id": "paper_template_alpha",
+      "document_id": "doc_template_alpha",
+      "title": "Template Source Paper Alpha: Real-World Title Placeholder",
+      "doi": "10.xxxx/placeholder.alpha",
+      "url": "https://example.org/papers/placeholder_alpha.pdf",
+      "publication_year": 2024,
+      "filename": "placeholder_alpha.pdf",
+      "chunk_index": 0,
+      "text": "Template text placeholder for chunk 1. Replace with verbatim excerpt from genuine research paper."
+    },
+    {
+      "chunk_id": "chunk_source1_02",
+      "paper_id": "paper_template_alpha",
+      "document_id": "doc_template_alpha",
+      "title": "Template Source Paper Alpha: Real-World Title Placeholder",
+      "doi": "10.xxxx/placeholder.alpha",
+      "url": "https://example.org/papers/placeholder_alpha.pdf",
+      "publication_year": 2024,
+      "filename": "placeholder_alpha.pdf",
+      "chunk_index": 1,
+      "text": "Template text placeholder for chunk 2. Replace with verbatim excerpt from genuine research paper."
+    },
+    {
+      "chunk_id": "chunk_source2_01",
+      "paper_id": "paper_template_beta",
+      "document_id": "doc_template_beta",
+      "title": "Template Source Paper Beta: Real-World Title Placeholder",
+      "doi": "10.xxxx/placeholder.beta",
+      "url": "https://example.org/papers/placeholder_beta.pdf",
+      "publication_year": 2023,
+      "filename": "placeholder_beta.pdf",
+      "chunk_index": 0,
+      "text": "Template text placeholder for chunk 3. Replace with verbatim excerpt from genuine research paper."
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "q_template_01",
+      "query": "Template exact-term query placeholder reflecting verified research question",
+      "expected_chunk_ids": [
+        "chunk_source1_01"
+      ],
+      "category": "exact_term",
+      "target_paper_ids": [
+        "paper_template_alpha"
+      ],
+      "reviewed": false,
+      "reviewer": null,
+      "review_notes": "Pending manual review. Once confirmed against source document, set reviewed=true, record reviewer ID, and update provenance to manually_reviewed_benchmark."
+    },
+    {
+      "query_id": "q_template_02",
+      "query": "Template semantic query placeholder reflecting high-level conceptual search",
+      "expected_chunk_ids": [
+        "chunk_source2_01"
+      ],
+      "category": "semantic",
+      "target_paper_ids": [
+        "paper_template_beta"
+      ],
+      "reviewed": false,
+      "reviewer": null,
+      "review_notes": "Pending manual review. Verify that chunk_source2_01 contains direct evidential answer."
+    },
+    {
+      "query_id": "q_template_03",
+      "query": "Template unanswerable query placeholder outside scope of indexed documents",
+      "expected_chunk_ids": [],
+      "category": "unanswerable_empty",
+      "target_paper_ids": null,
+      "reviewed": false,
+      "reviewer": null,
+      "review_notes": "Pending manual review. Confirmed that no indexed chunk contains supporting evidence for this topic."
+    }
+  ]
+}

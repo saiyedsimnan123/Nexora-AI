@@ -444,6 +444,9 @@ def evaluate_production_retrieval(
                 "path": cfg.dataset_path or getattr(ds, "path", None),
                 "is_illustrative_only": getattr(ds, "is_illustrative_only", None),
                 "provenance": getattr(ds, "provenance", "unknown"),
+                "version": getattr(ds, "version", None),
+                "benchmark_tier": getattr(ds, "benchmark_tier", "unknown"),
+                "review_summary": getattr(ds, "review_summary", None),
                 "chunks_count": len(raw_chunks),
                 "queries_count": len(benchmark_cases),
                 "unanswerable_queries_count": sum(
@@ -731,6 +734,9 @@ def evaluate_production_retrieval(
                 "filename": raw.get("filename", f"{raw['paper_id']}.pdf"),
                 "chunk_index": raw.get("chunk_index", 0),
                 "text": raw["text"],
+                "doi": raw.get("doi"),
+                "url": raw.get("url"),
+                "publication_year": raw.get("publication_year"),
             }
             corpus_records.append(VectorRecord(id=raw["chunk_id"], vector=vec, payload=payload))
 

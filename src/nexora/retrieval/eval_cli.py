@@ -179,13 +179,20 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
             d_chunks = report.dataset_info.get("chunks_count", 0)
             d_queries = report.dataset_info.get("queries_count", 0)
             d_illustrative = report.dataset_info.get("is_illustrative_only")
-            if d_illustrative is True:
+            d_provenance = report.dataset_info.get("provenance")
+            if d_provenance in ("manually_reviewed_benchmark", "reviewed_benchmark"):
+                ill_str = " (manually reviewed benchmark)"
+            elif d_provenance in ("candidate", "candidate_real_world"):
+                ill_str = " (candidate real-world)"
+            elif d_illustrative is True or d_provenance == "illustrative":
                 ill_str = " (illustrative)"
-            elif d_illustrative is False:
+            elif d_illustrative is False or d_provenance == "benchmark":
                 ill_str = " (benchmark)"
             else:
                 ill_str = " (unknown provenance)"
-            print(f"Dataset: {d_name}{ill_str} | Chunks: {d_chunks} | Queries: {d_queries}")
+            d_ver = report.dataset_info.get("version")
+            ver_str = f" v{d_ver}" if d_ver else ""
+            print(f"Dataset: {d_name}{ver_str}{ill_str} | Chunks: {d_chunks} | Queries: {d_queries}")
         if report.metrics is not None:
             mrr = report.metrics.mean_reciprocal_rank
             r1 = report.metrics.recall_at_k.get(1, 0.0)

@@ -23,6 +23,24 @@ class DatasetValidationError(ValueError):
     """Raised when a research retrieval dataset fails structural, referential, or schema validation."""
 
 
+VALID_PROVENANCE_VALUES: set[str] = {
+    "illustrative",
+    "candidate",
+    "candidate_real_world",
+    "manually_reviewed_benchmark",
+    "reviewed_benchmark",
+    "benchmark",
+    "unknown",
+}
+
+VALID_REVIEW_STATUS_VALUES: set[str] = {
+    "reviewed",
+    "unreviewed",
+    "in_review",
+    "pending",
+}
+
+
 @dataclass(frozen=True)
 class ResearchRetrievalDataset:
     """Immutable, validated research retrieval evaluation dataset."""
@@ -32,6 +50,19 @@ class ResearchRetrievalDataset:
     chunks: list[dict[str, Any]]
     queries: list[dict[str, Any]]
     is_illustrative_only: bool | None = None
+    provenance: str = field(default="")
+    version: str | None = None
+
+    def __post_init__(self) -> None:
+        prov = str(self.provenance).strip() if self.provenance else ""
+        if not prov:
+            if self.is_illustrative_only is True:
+                prov = "illustrative"
+            elif self.is_illustrative_only is False:
+                prov = "benchmark"
+            else:
+                prov = "unknown"
+        object.__setattr__(self, "provenance", prov)
 
     @property
     def name(self) -> str:
@@ -39,17 +70,51 @@ class ResearchRetrievalDataset:
         return self.dataset_id
 
     @property
-    def provenance(self) -> str:
-        """Explicit dataset provenance classification: 'illustrative', 'benchmark', or 'unknown'."""
-        if self.is_illustrative_only is True:
+    def reviewed_queries_count(self) -> int:
+        """Count of queries whose relevance labels are confirmed manually reviewed."""
+        return sum(1 for q in self.queries if q.get("reviewed") is True)
+
+    @property
+    def unreviewed_queries_count(self) -> int:
+        """Count of queries whose relevance labels are unreviewed or pending review."""
+        return sum(1 for q in self.queries if q.get("reviewed") is not True)
+
+    @property
+    def is_manually_reviewed(self) -> bool:
+        """True if the dataset has queries and every query with expected chunks has been manually reviewed."""
+        if not self.queries:
+            return False
+        return self.reviewed_queries_count > 0 and self.unreviewed_queries_count == 0
+
+    @property
+    def benchmark_tier(self) -> str:
+        """Categorize dataset into illustrative, candidate_real_world, or manually_reviewed_benchmark."""
+        if self.is_illustrative_only is True or self.provenance == "illustrative":
             return "illustrative"
-        if self.is_illustrative_only is False:
-            return "benchmark"
+        if self.provenance in ("manually_reviewed_benchmark", "reviewed_benchmark") or (
+            self.is_illustrative_only is False and self.is_manually_reviewed
+        ):
+            return "manually_reviewed_benchmark"
+        if self.provenance in ("candidate", "candidate_real_world", "benchmark") or (
+            self.is_illustrative_only is False
+        ):
+            return "candidate_real_world"
         return "unknown"
+
+    @property
+    def review_summary(self) -> dict[str, Any]:
+        """Structured review metrics across all queries."""
+        return {
+            "total_queries": len(self.queries),
+            "reviewed_queries": self.reviewed_queries_count,
+            "unreviewed_queries": self.unreviewed_queries_count,
+            "is_fully_reviewed": self.is_manually_reviewed,
+            "benchmark_tier": self.benchmark_tier,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Convert dataset to dictionary representation."""
-        return {
+        res: dict[str, Any] = {
             "dataset_id": self.dataset_id,
             "description": self.description,
             "chunks": [dict(c) for c in self.chunks],
@@ -57,6 +122,11 @@ class ResearchRetrievalDataset:
             "is_illustrative_only": self.is_illustrative_only,
             "provenance": self.provenance,
         }
+        if self.version is not None:
+            res["version"] = self.version
+        res["benchmark_tier"] = self.benchmark_tier
+        res["review_summary"] = self.review_summary
+        return res
 
 
 def _validate_chunk(raw: Any, index: int, seen_ids: set[str]) -> dict[str, Any]:
@@ -121,6 +191,36 @@ def _validate_chunk(raw: Any, index: int, seen_ids: set[str]) -> dict[str, Any]:
             f"Chunk '{chunk_id}' has invalid 'chunk_index': must be a non-negative integer"
         )
 
+    # 5. Traceable research source identifiers (doi, url, publication_year)
+    doi = raw.get("doi")
+    if doi is not None:
+        if not isinstance(doi, str):
+            raise DatasetValidationError(
+                f"Chunk '{chunk_id}' (index {index}) has invalid 'doi': must be a string, got {type(doi).__name__}"
+            )
+        doi = doi.strip() if doi.strip() else None
+
+    url = raw.get("url") or raw.get("source_url")
+    if url is not None:
+        if not isinstance(url, str):
+            raise DatasetValidationError(
+                f"Chunk '{chunk_id}' (index {index}) has invalid 'url': must be a string, got {type(url).__name__}"
+            )
+        url = url.strip() if url.strip() else None
+
+    pub_year = raw.get("publication_year")
+    if pub_year is None and "year" in raw:
+        pub_year = raw.get("year")
+    if pub_year is not None:
+        if isinstance(pub_year, bool) or not isinstance(pub_year, int):
+            raise DatasetValidationError(
+                f"Chunk '{chunk_id}' (index {index}) has invalid 'publication_year': must be an integer, got {type(pub_year).__name__}"
+            )
+        if pub_year < 1000 or pub_year > 3000:
+            raise DatasetValidationError(
+                f"Chunk '{chunk_id}' (index {index}) has invalid 'publication_year': {pub_year} out of valid range (1000-3000)"
+            )
+
     return {
         "chunk_id": chunk_id,
         "document_id": doc_id,
@@ -129,6 +229,9 @@ def _validate_chunk(raw: Any, index: int, seen_ids: set[str]) -> dict[str, Any]:
         "filename": filename,
         "chunk_index": chunk_index,
         "text": text.strip(),
+        "doi": doi,
+        "url": url,
+        "publication_year": pub_year,
     }
 
 
@@ -217,12 +320,75 @@ def _validate_query(
                 f"Query '{q_id}' 'target_paper_ids' must be a list of strings or None"
             )
 
+    # 5. Relevance label review status and audit metadata (Milestone 12C-35)
+    reviewed_val = raw.get("reviewed")
+    review_status_val = raw.get("review_status")
+    reviewer_val = raw.get("reviewer")
+    review_notes_val = raw.get("review_notes") or raw.get("notes")
+
+    # Support nested review object if provided
+    raw_review = raw.get("review")
+    if raw_review is not None:
+        if not isinstance(raw_review, dict):
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'review': must be a dictionary, got {type(raw_review).__name__}"
+            )
+        if reviewed_val is None and "reviewed" in raw_review:
+            reviewed_val = raw_review.get("reviewed")
+        if review_status_val is None and "review_status" in raw_review:
+            review_status_val = raw_review.get("review_status")
+        if reviewer_val is None and "reviewer" in raw_review:
+            reviewer_val = raw_review.get("reviewer")
+        if review_notes_val is None:
+            review_notes_val = raw_review.get("review_notes") or raw_review.get("notes")
+
+    is_reviewed: bool | None = None
+    if reviewed_val is not None:
+        if not isinstance(reviewed_val, bool):
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'reviewed': must be a boolean (true or false), got {type(reviewed_val).__name__}"
+            )
+        is_reviewed = reviewed_val
+
+    if review_status_val is not None:
+        if not isinstance(review_status_val, str):
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'review_status': must be a string, got {type(review_status_val).__name__}"
+            )
+        clean_status = review_status_val.strip().lower()
+        if clean_status not in VALID_REVIEW_STATUS_VALUES:
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'review_status': '{review_status_val}'. "
+                f"Must be one of: {sorted(VALID_REVIEW_STATUS_VALUES)}"
+            )
+        if is_reviewed is None:
+            is_reviewed = (clean_status == "reviewed")
+
+    reviewer: str | None = None
+    if reviewer_val is not None:
+        if not isinstance(reviewer_val, str):
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'reviewer': must be a string, got {type(reviewer_val).__name__}"
+            )
+        reviewer = reviewer_val.strip() if reviewer_val.strip() else None
+
+    review_notes: str | None = None
+    if review_notes_val is not None:
+        if not isinstance(review_notes_val, str):
+            raise DatasetValidationError(
+                f"Query '{q_id}' (index {index}) has invalid 'review_notes': must be a string, got {type(review_notes_val).__name__}"
+            )
+        review_notes = review_notes_val.strip() if review_notes_val.strip() else None
+
     return {
         "query": query_text,
         "expected_chunk_ids": sanitized_expected,
         "query_id": q_id,
         "category": cat_str,
         "target_paper_ids": target_papers,
+        "reviewed": is_reviewed,
+        "reviewer": reviewer,
+        "review_notes": review_notes,
     }
 
 
@@ -270,6 +436,33 @@ def validate_dataset_dict(raw: dict[str, Any]) -> ResearchRetrievalDataset:
         or "Custom research retrieval dataset for quantitative evaluation"
     ).strip()
 
+    # Version validation (Milestone 12C-35)
+    raw_version = raw.get("version") or raw.get("dataset_version")
+    if raw_version is not None:
+        if not isinstance(raw_version, str) or not raw_version.strip():
+            raise DatasetValidationError(
+                f"Invalid 'version': must be a non-empty string when provided, got {type(raw_version).__name__}"
+            )
+        version = raw_version.strip()
+    else:
+        version = None
+
+    # Provenance validation (Milestone 12C-35)
+    raw_provenance = raw.get("provenance")
+    if raw_provenance is not None:
+        if not isinstance(raw_provenance, str) or not raw_provenance.strip():
+            raise DatasetValidationError(
+                f"Invalid 'provenance': must be a non-empty string, got {type(raw_provenance).__name__}"
+            )
+        prov_clean = raw_provenance.strip().lower()
+        if prov_clean not in VALID_PROVENANCE_VALUES:
+            raise DatasetValidationError(
+                f"Invalid 'provenance': '{raw_provenance}'. Must be one of: {sorted(VALID_PROVENANCE_VALUES)}"
+            )
+        provenance = prov_clean
+    else:
+        provenance = None
+
     if "is_illustrative_only" in raw:
         raw_illustrative = raw["is_illustrative_only"]
         if not isinstance(raw_illustrative, bool):
@@ -282,12 +475,67 @@ def validate_dataset_dict(raw: dict[str, Any]) -> ResearchRetrievalDataset:
     else:
         is_illustrative = None
 
+    # Check consistency between is_illustrative_only and provenance
+    if provenance == "illustrative":
+        if is_illustrative is False:
+            raise DatasetValidationError(
+                "Contradictory metadata: provenance='illustrative' cannot be combined with is_illustrative_only=False"
+            )
+        is_illustrative = True
+    elif provenance in ("candidate", "candidate_real_world", "manually_reviewed_benchmark", "reviewed_benchmark", "benchmark"):
+        if is_illustrative is True:
+            raise DatasetValidationError(
+                f"Contradictory metadata: provenance='{provenance}' cannot be combined with is_illustrative_only=True"
+            )
+        is_illustrative = False
+    elif provenance is None:
+        if is_illustrative is True:
+            provenance = "illustrative"
+        elif is_illustrative is False:
+            provenance = "benchmark"
+        else:
+            provenance = "unknown"
+
+    # Dataset-level review status validation
+    dataset_reviewed_flag = raw.get("reviewed")
+    if dataset_reviewed_flag is not None and not isinstance(dataset_reviewed_flag, bool):
+        raise DatasetValidationError(
+            f"Dataset-level 'reviewed' must be a boolean (true or false), got {type(dataset_reviewed_flag).__name__}"
+        )
+
+    dataset_review_status = raw.get("review_status")
+    if dataset_review_status is not None:
+        if not isinstance(dataset_review_status, str):
+            raise DatasetValidationError(
+                f"Dataset-level 'review_status' must be a string, got {type(dataset_review_status).__name__}"
+            )
+        if dataset_review_status.strip().lower() not in VALID_REVIEW_STATUS_VALUES:
+            raise DatasetValidationError(
+                f"Dataset-level 'review_status' must be one of: {sorted(VALID_REVIEW_STATUS_VALUES)}"
+            )
+
+    has_dataset_review = (
+        (isinstance(dataset_reviewed_flag, bool) and dataset_reviewed_flag)
+        or (isinstance(dataset_review_status, str) and dataset_review_status.strip().lower() == "reviewed")
+    )
+    has_query_review = any(q.get("reviewed") is True for q in validated_queries)
+
+    # Fail closed: Do not label a dataset as manually reviewed unless review status is explicitly recorded
+    if provenance in ("manually_reviewed_benchmark", "reviewed_benchmark"):
+        if not (has_dataset_review or has_query_review):
+            raise DatasetValidationError(
+                "Cannot label dataset as manually reviewed ('manually_reviewed_benchmark') "
+                "unless relevance label review status is explicitly recorded"
+            )
+
     return ResearchRetrievalDataset(
         dataset_id=dataset_id,
         description=description,
         chunks=validated_chunks,
         queries=validated_queries,
         is_illustrative_only=is_illustrative,
+        provenance=provenance,
+        version=version,
     )
 
 
@@ -299,6 +547,10 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
     description = "JSONL research retrieval dataset"
     is_illustrative_specified = False
     is_illustrative_val: Any = None
+    metadata_provenance: Any = None
+    metadata_version: Any = None
+    metadata_reviewed: Any = None
+    metadata_review_status: Any = None
 
     non_empty_lines = 0
     for line_num, line in enumerate(lines, start=1):
@@ -319,22 +571,26 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
             )
 
         rec_type = record.get("type")
-        if rec_type == "metadata":
+        if rec_type == "metadata" or ("dataset_id" in record and "chunks" not in record and "queries" not in record):
             dataset_id = str(record.get("dataset_id") or dataset_id)
             description = str(record.get("description") or description)
             if "is_illustrative_only" in record:
                 is_illustrative_specified = True
                 is_illustrative_val = record["is_illustrative_only"]
+            if "provenance" in record:
+                metadata_provenance = record["provenance"]
+            if "version" in record:
+                metadata_version = record["version"]
+            elif "dataset_version" in record:
+                metadata_version = record["dataset_version"]
+            if "reviewed" in record:
+                metadata_reviewed = record["reviewed"]
+            if "review_status" in record:
+                metadata_review_status = record["review_status"]
         elif rec_type == "chunk" or ("chunk_id" in record and "text" in record):
             chunks.append(record)
         elif rec_type == "query" or ("query" in record and ("expected_chunk_ids" in record or "relevant_chunk_ids" in record)):
             queries.append(record)
-        elif "dataset_id" in record and "chunks" not in record:
-            dataset_id = str(record.get("dataset_id") or dataset_id)
-            description = str(record.get("description") or description)
-            if "is_illustrative_only" in record:
-                is_illustrative_specified = True
-                is_illustrative_val = record["is_illustrative_only"]
         else:
             raise DatasetValidationError(
                 f"Line {line_num} has unrecognized record format: {record}"
@@ -351,6 +607,14 @@ def load_retrieval_dataset_from_jsonl(lines: Sequence[str]) -> ResearchRetrieval
     }
     if is_illustrative_specified:
         dict_to_validate["is_illustrative_only"] = is_illustrative_val
+    if metadata_provenance is not None:
+        dict_to_validate["provenance"] = metadata_provenance
+    if metadata_version is not None:
+        dict_to_validate["version"] = metadata_version
+    if metadata_reviewed is not None:
+        dict_to_validate["reviewed"] = metadata_reviewed
+    if metadata_review_status is not None:
+        dict_to_validate["review_status"] = metadata_review_status
 
     return validate_dataset_dict(dict_to_validate)
 
@@ -504,3 +768,92 @@ def get_illustrative_example_dataset() -> ResearchRetrievalDataset:
             },
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# Real-World Benchmark Dataset Template (Preparation Infrastructure, Milestone 12C-35)
+# ---------------------------------------------------------------------------
+def get_benchmark_template_dataset() -> ResearchRetrievalDataset:
+    """Return a validated real-world benchmark dataset template.
+
+    NOTE: This is a preparation template for structuring real research material.
+    It contains schema placeholders and is not proof of real-world retrieval quality.
+    """
+    return ResearchRetrievalDataset(
+        dataset_id="real-world-research-benchmark-template-v1",
+        version="1.0.0",
+        description="Template for real-world research retrieval evaluation datasets with traceable sources and reviewed relevance labels.",
+        is_illustrative_only=False,
+        provenance="candidate_real_world",
+        chunks=[
+            {
+                "chunk_id": "chunk_source1_01",
+                "document_id": "doc_template_alpha",
+                "paper_id": "paper_template_alpha",
+                "title": "Template Source Paper Alpha: Real-World Title Placeholder",
+                "doi": "10.xxxx/placeholder.alpha",
+                "url": "https://example.org/papers/placeholder_alpha.pdf",
+                "publication_year": 2024,
+                "filename": "placeholder_alpha.pdf",
+                "chunk_index": 0,
+                "text": "Template text placeholder for chunk 1. Replace with verbatim excerpt from genuine research paper.",
+            },
+            {
+                "chunk_id": "chunk_source1_02",
+                "document_id": "doc_template_alpha",
+                "paper_id": "paper_template_alpha",
+                "title": "Template Source Paper Alpha: Real-World Title Placeholder",
+                "doi": "10.xxxx/placeholder.alpha",
+                "url": "https://example.org/papers/placeholder_alpha.pdf",
+                "publication_year": 2024,
+                "filename": "placeholder_alpha.pdf",
+                "chunk_index": 1,
+                "text": "Template text placeholder for chunk 2. Replace with verbatim excerpt from genuine research paper.",
+            },
+            {
+                "chunk_id": "chunk_source2_01",
+                "document_id": "doc_template_beta",
+                "paper_id": "paper_template_beta",
+                "title": "Template Source Paper Beta: Real-World Title Placeholder",
+                "doi": "10.xxxx/placeholder.beta",
+                "url": "https://example.org/papers/placeholder_beta.pdf",
+                "publication_year": 2023,
+                "filename": "placeholder_beta.pdf",
+                "chunk_index": 0,
+                "text": "Template text placeholder for chunk 3. Replace with verbatim excerpt from genuine research paper.",
+            },
+        ],
+        queries=[
+            {
+                "query": "Template exact-term query placeholder reflecting verified research question",
+                "expected_chunk_ids": ["chunk_source1_01"],
+                "query_id": "q_template_01",
+                "category": "exact_term",
+                "target_paper_ids": ["paper_template_alpha"],
+                "reviewed": False,
+                "reviewer": None,
+                "review_notes": "Pending manual review. Once confirmed against source document, set reviewed=true, record reviewer ID, and update provenance to manually_reviewed_benchmark.",
+            },
+            {
+                "query": "Template semantic query placeholder reflecting high-level conceptual search",
+                "expected_chunk_ids": ["chunk_source2_01"],
+                "query_id": "q_template_02",
+                "category": "semantic",
+                "target_paper_ids": ["paper_template_beta"],
+                "reviewed": False,
+                "reviewer": None,
+                "review_notes": "Pending manual review. Verify that chunk_source2_01 contains direct evidential answer.",
+            },
+            {
+                "query": "Template unanswerable query placeholder outside scope of indexed documents",
+                "expected_chunk_ids": [],
+                "query_id": "q_template_03",
+                "category": "unanswerable_empty",
+                "target_paper_ids": None,
+                "reviewed": False,
+                "reviewer": None,
+                "review_notes": "Pending manual review. Confirmed that no indexed chunk contains supporting evidence for this topic.",
+            },
+        ],
+    )
+
