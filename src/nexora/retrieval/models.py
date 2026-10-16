@@ -112,4 +112,8 @@ class SearchResult:
                 raise TypeError(f"results[{position}] must be a RetrievedChunk")
 
         object.__setattr__(self, "results", list(self.results))
-      
+
+    @property
+    def chunks(self) -> list[RetrievedChunk]:
+        """Alias for results."""
+        return self.results

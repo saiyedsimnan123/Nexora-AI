@@ -74,9 +74,9 @@ class RetrievalQualityService:
         self._retrieval = retrieval_service
         self._policy = policy
 
-    def retrieve(self, query: str) -> SearchResult:
+    def retrieve(self, query: str, **kwargs: Any) -> SearchResult:
         candidates = self._retrieval.retrieve(
-            query, limit=self._policy.candidate_limit
+            query, limit=self._policy.candidate_limit, **kwargs
         )
         selected = self._select(candidates.results)
         return SearchResult(query=query, results=selected)

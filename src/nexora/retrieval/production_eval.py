@@ -103,6 +103,7 @@ class ProductionEvaluationConfig:
     dimension: int = 1536
     dataset: Any = None
     dataset_path: str | None = None
+    retrieval_method: str = "vector"
 
 
 @dataclass(frozen=True)
@@ -966,22 +967,36 @@ def evaluate_production_retrieval(
     vector_store_live = is_genuine_live_qdrant_store(vector_store)
     is_live = provider_live
 
-    retrieval_service = RetrievalService(embedding_service, vector_store, cache_queries=True)
+    from nexora.retrieval.bm25 import BM25Index
+
+    bm25_index = BM25Index()
+    bm25_index.index_chunks(raw_chunks)
+
+    retrieval_service = RetrievalService(
+        embedding_service,
+        vector_store,
+        cache_queries=True,
+        bm25_index=bm25_index,
+    )
+
+    ret_mode = getattr(cfg, "retrieval_method", "vector") or "vector"
 
     # 1. Baseline retrieval (raw retrieval without quality filters)
     baseline_limit = max(cfg.k_values)
-    baseline_retrieve_fn = lambda q, limit=baseline_limit: retrieval_service.retrieve(q, limit=limit)
+    baseline_retrieve_fn = lambda q, limit=baseline_limit: retrieval_service.retrieve(
+        q, limit=limit, mode=ret_mode
+    )
 
     # 2. Quality-filtered retrieval
     policy = cfg.quality_policy
     if policy is not None:
         quality_service = RetrievalQualityService(retrieval_service, policy)
-        filtered_retrieve_fn: Callable[[str], SearchResult] = quality_service.retrieve
+        filtered_retrieve_fn = lambda q, limit=None: quality_service.retrieve(q, mode=ret_mode)
     else:
         # Default quality policy when none explicitly passed
         default_policy = RetrievalQualityPolicy(min_score=0.35, max_results=baseline_limit)
         quality_service = RetrievalQualityService(retrieval_service, default_policy)
-        filtered_retrieve_fn = quality_service.retrieve
+        filtered_retrieve_fn = lambda q, limit=None: quality_service.retrieve(q, mode=ret_mode)
 
     # Execute deterministic queries
     try:
@@ -1062,6 +1077,7 @@ def evaluate_production_retrieval(
         "total_benchmark_cases": len(benchmark_cases),
         "corpus_chunks_count": len(corpus_records),
         "actual_embeddings_completed": actual_embeddings_completed,
+        "retrieval_method": ret_mode,
     }
 
     return ProductionEvaluationReport(

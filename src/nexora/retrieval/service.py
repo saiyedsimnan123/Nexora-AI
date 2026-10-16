@@ -24,6 +24,7 @@ class RetrievalService:
         dimension: int | None = None,
         cache_queries: bool = True,
         max_cache_entries: int = 256,
+        bm25_index: Any = None,
     ) -> None:
         if not callable(getattr(embedding_service, "embed_text", None)):
             raise TypeError("embedding_service must provide embed_text(text)")
@@ -38,6 +39,7 @@ class RetrievalService:
 
         self._embedding_service = embedding_service
         self._vector_store = vector_store
+        self._bm25_index = bm25_index
 
         self._dimension = dimension
         if self._dimension is None:
@@ -70,6 +72,11 @@ class RetrievalService:
         """Return the number of entries currently stored in the query cache."""
         return len(self._query_cache)
 
+    @property
+    def bm25_index(self) -> Any:
+        """Optional BM25 lexical index."""
+        return self._bm25_index
+
     def clear_cache(self) -> None:
         """Clear all entries currently stored in the query cache."""
         self._query_cache.clear()
@@ -100,7 +107,14 @@ class RetrievalService:
             )
         return vector
 
-    def retrieve(self, query: str, *, limit: int = 10) -> SearchResult:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        mode: str = "vector",
+        rrf_k: int = 60,
+    ) -> SearchResult:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
         if not query.strip():
@@ -109,6 +123,13 @@ class RetrievalService:
             raise TypeError("limit must be an integer")
         if limit <= 0:
             raise ValueError("limit must be a positive integer")
+        if mode not in ("vector", "bm25", "hybrid"):
+            raise ValueError(f"mode must be 'vector', 'bm25', or 'hybrid', got {mode!r}")
+
+        if mode == "bm25":
+            if self._bm25_index is None:
+                raise ValueError("BM25 retrieval requested but no bm25_index was configured")
+            return self._bm25_index.search(query, limit=limit)
 
         if self._cache_queries and query in self._query_cache:
             vector = list(self._query_cache[query])
@@ -125,5 +146,13 @@ class RetrievalService:
             raise TypeError(
                 f"Vector store search must return a SearchResult, got {type(raw_result).__name__}"
             )
+
+        if mode == "hybrid":
+            if self._bm25_index is None:
+                raise ValueError("Hybrid retrieval requested but no bm25_index was configured")
+            from nexora.retrieval.bm25 import reciprocal_rank_fusion
+
+            bm25_res = self._bm25_index.search(query, limit=limit)
+            return reciprocal_rank_fusion(raw_result, bm25_res, rrf_k=rrf_k, limit=limit)
 
         return raw_result

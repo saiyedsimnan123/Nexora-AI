@@ -139,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--retriever",
+        choices=["vector", "bm25", "hybrid"],
+        default="vector",
+        help="Retrieval method: 'vector' (semantic vector search), 'bm25' (Okapi BM25 lexical search), or 'hybrid' (combined vector + BM25).",
+    )
+
+    parser.add_argument(
         "--k-values",
         type=str,
         default="1,3,5",
@@ -191,10 +198,12 @@ def _handle_output(output_path: str | None, json_text: str, report: ProductionEv
             fh.write(json_text)
             fh.write("\n")
         print(f"Report written to: {path}")
+        method = (report.evaluation_conditions or {}).get("retrieval_method", "vector")
+        method_str = f" | Method: {method}" if method and method != "vector" else ""
         print(
             f"Mode: {report.mode} | Status: {report.status} | "
             f"Provider: {report.provider_name} (live={report.provider_live}) | "
-            f"Store: {report.vector_store_type} (live={report.vector_store_live})"
+            f"Store: {report.vector_store_type} (live={report.vector_store_live}){method_str}"
         )
         if report.dataset_info is not None:
             d_name = report.dataset_info.get("name") or "custom"
@@ -440,6 +449,7 @@ def run_eval_cli(argv: Sequence[str] | None = None) -> tuple[int, Any, str]:
         dimension=dimension,
         dataset=loaded_dataset,
         dataset_path=args.dataset,
+        retrieval_method=args.retriever,
     )
 
     report = evaluate_production_retrieval(config)
