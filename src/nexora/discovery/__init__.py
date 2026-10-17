@@ -13,6 +13,18 @@ from nexora.discovery.arxiv import (
     build_canonical_pdf_url,
     normalize_and_validate_arxiv_id,
 )
+from nexora.discovery.deduplication import (
+    DeduplicationMatchReason,
+    DeduplicationResult,
+    check_paper_duplicate_in_collection,
+    normalize_doi,
+    normalize_external_id,
+)
+from nexora.discovery.downloader import (
+    DownloadedPDF,
+    SafePDFDownloader,
+    validate_url_safety,
+)
 from nexora.discovery.errors import (
     DiscoveryConnectionError,
     DiscoveryError,
@@ -20,7 +32,11 @@ from nexora.discovery.errors import (
     DiscoveryResponseError,
     DiscoveryTimeoutError,
     InvalidIdentifierError,
+    InvalidPDFError,
+    OversizedPDFError,
+    PDFNotFoundError,
     PaperNotFoundError,
+    SSRFProtectionError,
 )
 from nexora.discovery.models import (
     ScholarlyPaperMetadata,
@@ -36,6 +52,14 @@ __all__ = [
     "ScholarlySourceProvider",
     "ArxivSourceProvider",
     "ArxivRateLimitPolicy",
+    "DownloadedPDF",
+    "SafePDFDownloader",
+    "validate_url_safety",
+    "DeduplicationMatchReason",
+    "DeduplicationResult",
+    "check_paper_duplicate_in_collection",
+    "normalize_doi",
+    "normalize_external_id",
     "normalize_and_validate_arxiv_id",
     "build_canonical_abstract_url",
     "build_canonical_pdf_url",
@@ -46,4 +70,8 @@ __all__ = [
     "DiscoveryConnectionError",
     "DiscoveryResponseError",
     "PaperNotFoundError",
+    "SSRFProtectionError",
+    "OversizedPDFError",
+    "InvalidPDFError",
+    "PDFNotFoundError",
 ]

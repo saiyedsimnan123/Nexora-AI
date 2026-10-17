@@ -33,3 +33,19 @@ class DiscoveryResponseError(DiscoveryError):
 
 class PaperNotFoundError(DiscoveryError, LookupError):
     """Raised when a specific paper identifier is not found on the external provider."""
+
+
+class SSRFProtectionError(DiscoveryError, PermissionError):
+    """Raised when a requested URL or redirect target resolves to a private, loopback, or forbidden address."""
+
+
+class OversizedPDFError(DiscoveryError, ValueError):
+    """Raised when a remote PDF exceeds the configured maximum download size."""
+
+
+class InvalidPDFError(DiscoveryError, ValueError):
+    """Raised when downloaded content is not a valid PDF (e.g. HTML, empty, or missing '%PDF-' signature)."""
+
+
+class PDFNotFoundError(DiscoveryError, LookupError):
+    """Raised when a remote PDF endpoint returns HTTP 404 Not Found."""
