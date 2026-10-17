@@ -335,3 +335,37 @@ When queried via `POST /api/v1/research/query`, the response will have:
 
 ### Offline Mode Preservation
 When no API key is provided, Nexora AI defaults safely to the deterministic offline mock generator (`is_mock: true`). If live mode is explicitly requested (`--live` or `NEXORA_RAG_GENERATOR_MODE=live`) without a key, the system raises an explicit `ConfigurationError` rather than silently faking live output.
+
+---
+
+## 8. Opt-In Live Provider Smoke Test
+
+To verify live end-to-end LLM connectivity, retrieval, answer generation, and citation attribution against a real OpenAI endpoint without affecting normal tests, Nexora provides a dedicated opt-in smoke test runner.
+
+### Running the Smoke Test (CLI)
+Run directly via the smoke runner:
+```powershell
+$env:PYTHONPATH='src'
+.venv\Scripts\python.exe -m nexora.rag.smoke
+```
+
+Alternatively, invoke via the primary RAG CLI:
+```powershell
+$env:PYTHONPATH='src'
+.venv\Scripts\python.exe -m nexora.rag.cli --smoke
+```
+
+For structured JSON output (suitable for CI/CD checks):
+```powershell
+$env:PYTHONPATH='src'
+.venv\Scripts\python.exe -m nexora.rag.smoke --json
+```
+
+### Safety Guarantees & Diagnostics
+1. **Unconfigured Safe Exit**: If no API key is found in your `.env` or shell environment, the smoke test outputs clear configuration instructions and exits safely with zero network calls.
+2. **Secret Masking**: API keys and tokens are never printed in logs, console output, or error traces.
+3. **Opt-In Pytest Execution**: Standard test runs (`pytest`) skip live API calls by default. To explicitly run the live smoke test under pytest:
+```powershell
+$env:NEXORA_RUN_LIVE_TESTS='1'
+.venv\Scripts\pytest.exe tests/test_rag_live_smoke.py -v
+```

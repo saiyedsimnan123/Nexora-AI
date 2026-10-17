@@ -18,6 +18,11 @@ from nexora.rag.pipeline import (
     create_offline_rag_pipeline,
     create_rag_pipeline,
 )
+from nexora.rag.smoke import (
+    SmokeTestResult,
+    check_live_configuration,
+    run_live_smoke_test,
+)
 
 __all__ = [
     "AttributedSource",
@@ -32,4 +37,7 @@ __all__ = [
     "create_live_rag_pipeline",
     "create_offline_rag_pipeline",
     "create_rag_pipeline",
+    "SmokeTestResult",
+    "check_live_configuration",
+    "run_live_smoke_test",
 ]

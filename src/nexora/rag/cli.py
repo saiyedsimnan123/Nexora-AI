@@ -134,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model name for answer generation (e.g. 'gpt-4o-mini').",
     )
     parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Run an opt-in live smoke test against the configured LLM provider and exit.",
+    )
+
+    parser.add_argument(
         "--sample-questions",
         action="store_true",
         help="Display curated sample research questions and exit.",
@@ -158,6 +164,22 @@ def run_rag_cli(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.smoke:
+        from nexora.rag.smoke import run_live_smoke_test
+
+        default_smoke_query = (
+            "How does Low-Rank Adaptation (LoRA) freeze pre-trained weights and reduce trainable parameters?"
+        )
+        result = run_live_smoke_test(
+            query=args.query or args.question or default_smoke_query,
+            model=args.model,
+            top_k=args.top_k,
+            verbose=not args.json,
+        )
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.status == "success" else (2 if result.status == "unconfigured" else 1)
+
     if args.sample_questions:
         print("\nCurated Sample Questions (Pilot Benchmark Corpus):")
         print("=" * 78)
@@ -165,6 +187,7 @@ def run_rag_cli(argv: Sequence[str] | None = None) -> int:
             print(f"  {i}. {q}")
         print("=" * 78)
         return 0
+
 
     if args.top_k <= 0:
         print(f"Error: --top-k must be a positive integer, got {args.top_k}", file=sys.stderr)
