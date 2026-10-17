@@ -386,16 +386,25 @@ def build_http_app(
             default_mode="hybrid",
         )
 
-    return create_app(
+    discovery_service = dependencies.get("discovery_service")
+    if discovery_service is None:
+        from nexora.discovery.service import DiscoveryService
 
+        discovery_service = DiscoveryService(
+            session_factory=session_factory,
+            ingestion_service=ingestion_service,
+            document_pipeline=document_pipeline,
+        )
+
+    return create_app(
         research_service,
         rag_pipeline=rag_pipeline,
         ingestion_service=ingestion_service,
         analysis_service=analysis_service,
         comparison_service=comparison_service,
         gap_service=gap_service,
+        discovery_service=discovery_service,
         document_pipeline=document_pipeline,
         session_factory=session_factory,
         max_upload_size_bytes=max_upload_size_bytes,
     )
-

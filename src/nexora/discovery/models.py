@@ -188,3 +188,70 @@ class ScholarlySearchResult:
             "limit": self.limit,
             "papers": [p.to_dict() for p in self.papers],
         }
+
+
+@dataclass(frozen=True)
+class DiscoveryImportResult:
+    """Structured result of an explicit paper import operation."""
+
+    paper_id: str
+    collection_id: str
+    external_id: str
+    status: str  # "imported", "already_imported", "failed"
+    message: str
+    title: str
+    document_id: str | None = None
+    chunks_count: int = 0
+    indexed_chunks_count: int = 0
+    doi: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.paper_id, str) or not self.paper_id.strip():
+            raise TypeError("paper_id must be a non-empty string")
+        if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+            raise TypeError("collection_id must be a non-empty string")
+        if not isinstance(self.external_id, str) or not self.external_id.strip():
+            raise TypeError("external_id must be a non-empty string")
+        if self.status not in ("imported", "already_imported", "failed"):
+            raise ValueError(
+                f"status must be one of ('imported', 'already_imported', 'failed'), got {self.status!r}"
+            )
+        if not isinstance(self.message, str):
+            raise TypeError("message must be a string")
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise TypeError("title must be a non-empty string")
+        if self.document_id is not None and not isinstance(self.document_id, str):
+            raise TypeError("document_id must be a string or None")
+        if (
+            isinstance(self.chunks_count, bool)
+            or not isinstance(self.chunks_count, int)
+            or self.chunks_count < 0
+        ):
+            raise ValueError("chunks_count must be a non-negative integer")
+        if (
+            isinstance(self.indexed_chunks_count, bool)
+            or not isinstance(self.indexed_chunks_count, int)
+            or self.indexed_chunks_count < 0
+        ):
+            raise ValueError("indexed_chunks_count must be a non-negative integer")
+        if not isinstance(self.metadata, dict):
+            raise TypeError("metadata must be a dictionary")
+
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize import result to a JSON-compatible dictionary."""
+        return {
+            "paper_id": self.paper_id,
+            "collection_id": self.collection_id,
+            "external_id": self.external_id,
+            "status": self.status,
+            "message": self.message,
+            "title": self.title,
+            "document_id": self.document_id,
+            "chunks_count": self.chunks_count,
+            "indexed_chunks_count": self.indexed_chunks_count,
+            "doi": self.doi,
+            "metadata": dict(self.metadata),
+        }

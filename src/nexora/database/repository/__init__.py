@@ -8,6 +8,7 @@ from nexora.database.repository.base import (
     RecordNotFoundError,
     RepositoryError,
 )
+from nexora.database.repository.collection import CollectionRepository
 from nexora.database.repository.document import DocumentRepository
 from nexora.database.repository.document_chunk import DocumentChunkRepository
 from nexora.database.repository.paper import PaperRepository
@@ -19,6 +20,7 @@ from nexora.database.repository.workspace import WorkspaceRepository
 __all__ = [
     "AuthorRepository",
     "BaseRepository",
+    "CollectionRepository",
     "ConstraintError",
     "DocumentChunkRepository",
     "DocumentRepository",

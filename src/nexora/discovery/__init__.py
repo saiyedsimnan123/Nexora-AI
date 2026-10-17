@@ -39,13 +39,17 @@ from nexora.discovery.errors import (
     SSRFProtectionError,
 )
 from nexora.discovery.models import (
+    DiscoveryImportResult,
     ScholarlyPaperMetadata,
     ScholarlySearchQuery,
     ScholarlySearchResult,
 )
 from nexora.discovery.provider import ScholarlySourceProvider
+from nexora.discovery.service import DiscoveryService
 
 __all__ = [
+    "DiscoveryImportResult",
+    "DiscoveryService",
     "ScholarlyPaperMetadata",
     "ScholarlySearchQuery",
     "ScholarlySearchResult",

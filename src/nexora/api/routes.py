@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexora.api.errors import (
@@ -294,6 +294,69 @@ class RAGQueryResponseBody(BaseModel):
     evidence_count: int = Field(..., description="Number of evidence chunks retrieved.")
 
 
+class DiscoveryPaperResponseBody(BaseModel):
+    """Wire format of discovered paper metadata."""
+
+    model_config = ConfigDict(strict=False)
+
+    external_id: str = Field(..., description="Canonical arXiv identifier.")
+    title: str = Field(..., description="Paper title.")
+    authors: list[str] = Field(default_factory=list, description="Paper authors.")
+    abstract: str = Field(default="", description="Paper abstract.")
+    publication_date: str | None = Field(default=None, description="Publication date.")
+    doi: str | None = Field(default=None, description="Digital Object Identifier.")
+    categories: list[str] = Field(default_factory=list, description="Subject categories.")
+    primary_category: str | None = Field(default=None, description="Primary subject category.")
+    abstract_url: str | None = Field(default=None, description="Canonical abstract URL.")
+    pdf_url: str | None = Field(default=None, description="Canonical PDF download URL.")
+    license: str | None = Field(default=None, description="License URI.")
+    source: str = Field(default="arxiv", description="Discovery provider name.")
+    comment: str | None = Field(default=None, description="Author comments.")
+    journal_ref: str | None = Field(default=None, description="Journal reference.")
+
+
+class DiscoverySearchResponseBody(BaseModel):
+    """Wire format of discovery search result."""
+
+    model_config = ConfigDict(strict=False)
+
+    provider: str = Field(..., description="Provider name, e.g. 'arxiv'.")
+    query: str = Field(..., description="Search query string.")
+    total_results: int = Field(..., ge=0, description="Total matching results found.")
+    offset: int = Field(..., ge=0, description="Pagination offset.")
+    limit: int = Field(..., ge=1, description="Pagination limit.")
+    papers: list[DiscoveryPaperResponseBody] = Field(
+        default_factory=list, description="List of paper metadata results."
+    )
+
+
+class DiscoveryImportRequestBody(BaseModel):
+    """Wire format of explicit paper import request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the destination collection.")
+    external_id: str = Field(..., description="arXiv paper identifier to import.")
+    durable: bool = Field(default=False, description="Whether to use durable indexing mode.")
+
+
+class DiscoveryImportResponseBody(BaseModel):
+    """Wire format of explicit paper import response."""
+
+    model_config = ConfigDict(strict=False)
+
+    paper_id: str = Field(..., description="UUID of the research paper.")
+    collection_id: str = Field(..., description="UUID of the owning collection.")
+    external_id: str = Field(..., description="Normalized external paper identifier.")
+    status: str = Field(..., description="Import status: 'imported', 'already_imported', or 'failed'.")
+    message: str = Field(..., description="Human-readable status message.")
+    title: str = Field(..., description="Paper title.")
+    document_id: str | None = Field(default=None, description="UUID of the persisted document if available.")
+    chunks_count: int = Field(default=0, ge=0, description="Total chunks persisted.")
+    indexed_chunks_count: int = Field(default=0, ge=0, description="Total chunks indexed.")
+    doi: str | None = Field(default=None, description="Paper DOI if available.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Paper metadata.")
+
 
 def get_research_service(request: Request) -> ResearchApplicationService:
     """Dependency: the research service injected into the app by create_app()."""
@@ -346,11 +409,31 @@ def get_rag_pipeline(request: Request) -> Any:
     return pipeline
 
 
+def get_discovery_service(request: Request) -> Any:
+    """Dependency: the scholarly discovery service injected into the app."""
+    service = getattr(request.app.state, "discovery_service", None)
+    if service is None:
+        from nexora.discovery.service import DiscoveryService
 
+        service = DiscoveryService(
+            session_factory=getattr(request.app.state, "session_factory", None),
+            ingestion_service=getattr(request.app.state, "ingestion_service", None),
+            document_pipeline=getattr(request.app.state, "document_pipeline", None),
+        )
+        request.app.state.discovery_service = service
+    else:
+        if getattr(service, "_session_factory", None) is None:
+            service._session_factory = getattr(request.app.state, "session_factory", None)
+        if getattr(service, "_ingestion_service", None) is None:
+            service._ingestion_service = getattr(request.app.state, "ingestion_service", None)
+        if getattr(service, "_document_pipeline", None) is None:
+            service._document_pipeline = getattr(request.app.state, "document_pipeline", None)
+    return service
 
 
 health_router = APIRouter()
 v1_router = APIRouter(prefix="/api/v1")
+
 
 
 @health_router.get("/health")
@@ -777,3 +860,125 @@ async def ingest_document(
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+@v1_router.get(
+    "/discovery/search",
+    response_model=DiscoverySearchResponseBody,
+    status_code=200,
+    summary="Search scholarly papers on arXiv",
+    description=(
+        "Searches external scholarly repositories (arXiv) for papers matching query "
+        "and optional category filters. Returns normalized metadata and pagination details. "
+        "Does not download PDFs during search."
+    ),
+    responses={
+        200: {"description": "Search results returned successfully.", "model": DiscoverySearchResponseBody},
+        400: {"description": "Invalid query or search parameters."},
+        422: {"description": "Validation error on request parameters."},
+        429: {"description": "Upstream rate limit exceeded."},
+        502: {"description": "Upstream provider error or connection failure."},
+        504: {"description": "Upstream request timed out."},
+    },
+)
+def search_scholarly_papers(
+    query: str = Query(..., description="Search query string"),
+    categories: list[str] | None = Query(default=None, description="Optional arXiv categories"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    limit: int = Query(default=10, ge=1, le=100, description="Pagination limit"),
+    sort_by: str = Query(default="relevance", description="Sort by: relevance, submitted_date, last_updated"),
+    sort_order: str = Query(default="descending", description="Sort order: descending, ascending"),
+    service: Any = Depends(get_discovery_service),
+) -> DiscoverySearchResponseBody:
+    """Search external scholarly papers with pagination and filters."""
+    if not isinstance(query, str) or not query.strip():
+        raise InvalidRequestError("query must not be empty or whitespace-only")
+    if sort_by not in ("relevance", "submitted_date", "last_updated"):
+        raise InvalidRequestError(
+            f"sort_by must be one of ('relevance', 'submitted_date', 'last_updated'), got {sort_by!r}"
+        )
+    if sort_order not in ("descending", "ascending"):
+        raise InvalidRequestError(
+            f"sort_order must be one of ('descending', 'ascending'), got {sort_order!r}"
+        )
+
+    cleaned_categories: list[str] = []
+    if categories:
+        for cat in categories:
+            for part in cat.split(","):
+                if part.strip():
+                    cleaned_categories.append(part.strip())
+
+    from nexora.discovery.models import ScholarlySearchQuery
+
+    search_query = ScholarlySearchQuery(
+        query=query.strip(),
+        categories=tuple(cleaned_categories),
+        offset=offset,
+        limit=limit,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    result = service.search(search_query)
+    return DiscoverySearchResponseBody(**result.to_dict())
+
+
+@v1_router.get(
+    "/discovery/paper/{external_id:path}",
+    response_model=DiscoveryPaperResponseBody,
+    status_code=200,
+    summary="Get normalized metadata for a single external scholarly paper",
+    description="Retrieves metadata for an arXiv paper by identifier. Rejects arbitrary URLs.",
+    responses={
+        200: {"description": "Paper metadata found.", "model": DiscoveryPaperResponseBody},
+        400: {"description": "Malformed or unpermitted external identifier."},
+        404: {"description": "Paper was not found on arXiv."},
+        429: {"description": "Upstream rate limit exceeded."},
+        502: {"description": "Upstream provider error or connection failure."},
+        504: {"description": "Upstream request timed out."},
+    },
+)
+def get_scholarly_paper_details(
+    external_id: str,
+    service: Any = Depends(get_discovery_service),
+) -> DiscoveryPaperResponseBody:
+    """Retrieve metadata for an arXiv paper by identifier."""
+    paper = service.get_paper(external_id)
+    return DiscoveryPaperResponseBody(**paper.to_dict())
+
+
+@v1_router.post(
+    "/discovery/import",
+    response_model=DiscoveryImportResponseBody,
+    status_code=200,
+    summary="Explicitly download, deduplicate, and ingest a scholarly paper",
+    description=(
+        "Explicitly imports a paper from an external provider (arXiv) into a target collection. "
+        "Performs deduplication: if already imported and indexed, returns early without re-downloading. "
+        "Safely downloads the PDF via SafePDFDownloader, persists the paper record, and executes "
+        "the document ingestion pipeline."
+    ),
+    responses={
+        200: {"description": "Import result (imported or already_imported).", "model": DiscoveryImportResponseBody},
+        400: {"description": "Invalid collection ID, malformed paper ID, or invalid PDF."},
+        404: {"description": "Collection or paper not found."},
+        409: {"description": "Duplicate document conflict."},
+        413: {"description": "PDF exceeds maximum allowed download size."},
+        422: {"description": "Request validation failed."},
+        429: {"description": "Upstream rate limit exceeded."},
+        500: {"description": "Ingestion failed or internal server error."},
+        502: {"description": "Upstream provider error or connection failure."},
+        504: {"description": "Upstream request timed out."},
+    },
+)
+def import_scholarly_paper(
+    body: DiscoveryImportRequestBody,
+    service: Any = Depends(get_discovery_service),
+) -> DiscoveryImportResponseBody:
+    """Explicitly import, deduplicate, and ingest an arXiv paper into a collection."""
+    result = service.import_paper(
+        collection_id=body.collection_id,
+        external_id=body.external_id,
+        durable=body.durable,
+    )
+    return DiscoveryImportResponseBody(**result.to_dict())

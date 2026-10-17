@@ -491,3 +491,7 @@ class ArxivSourceProvider:
                 return paper
 
         return papers[0]
+
+
+# Alias for convenience
+ArxivClient = ArxivSourceProvider

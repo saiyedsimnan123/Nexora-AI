@@ -553,11 +553,124 @@ class ResearchGapsResponse:
         }
 
 
+@dataclass(frozen=True)
+class DiscoverySearchRequest:
+    """Request query parameters for searching scholarly research papers."""
+
+    query: str
+    categories: tuple[str, ...] = ()
+    offset: int = 0
+    limit: int = 10
+    sort_by: str = "relevance"
+    sort_order: str = "descending"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.query, str) or not self.query.strip():
+            raise InvalidRequestError("query must not be empty or whitespace-only")
+        if not isinstance(self.categories, (list, tuple)):
+            raise InvalidRequestError("categories must be a list or tuple of strings")
+        if isinstance(self.offset, bool) or not isinstance(self.offset, int) or self.offset < 0:
+            raise InvalidRequestError("offset must be a non-negative integer")
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or self.limit < 1
+            or self.limit > 100
+        ):
+            raise InvalidRequestError("limit must be an integer between 1 and 100")
+        if self.sort_by not in ("relevance", "submitted_date", "last_updated"):
+            raise InvalidRequestError(
+                f"sort_by must be one of ('relevance', 'submitted_date', 'last_updated'), got {self.sort_by!r}"
+            )
+        if self.sort_order not in ("descending", "ascending"):
+            raise InvalidRequestError(
+                f"sort_order must be one of ('descending', 'ascending'), got {self.sort_order!r}"
+            )
+        object.__setattr__(self, "categories", tuple(str(c).strip() for c in self.categories if str(c).strip()))
+
+
+@dataclass(frozen=True)
+class DiscoverySearchResponse:
+    """Public view of scholarly search results."""
+
+    provider: str
+    query: str
+    total_results: int
+    offset: int
+    limit: int
+    papers: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "query": self.query,
+            "total_results": self.total_results,
+            "offset": self.offset,
+            "limit": self.limit,
+            "papers": copy.deepcopy(self.papers),
+        }
+
+
+@dataclass(frozen=True)
+class DiscoveryImportRequest:
+    """Request for explicitly importing and ingesting a paper."""
+
+    collection_id: str
+    external_id: str
+    durable: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+            raise InvalidRequestError("collection_id is required")
+        if not isinstance(self.external_id, str) or not self.external_id.strip():
+            raise InvalidRequestError("external_id is required")
+
+
+@dataclass(frozen=True)
+class DiscoveryImportResponse:
+    """Public view of explicit paper import result."""
+
+    paper_id: str
+    collection_id: str
+    external_id: str
+    status: str
+    message: str
+    title: str
+    document_id: str | None = None
+    chunks_count: int = 0
+    indexed_chunks_count: int = 0
+    doi: str | None = None
+    metadata: dict[str, Any] = None  # type: ignore
+
+    def __post_init__(self) -> None:
+        if self.metadata is None:
+            object.__setattr__(self, "metadata", {})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "paper_id": self.paper_id,
+            "collection_id": self.collection_id,
+            "external_id": self.external_id,
+            "status": self.status,
+            "message": self.message,
+            "title": self.title,
+            "document_id": self.document_id,
+            "chunks_count": self.chunks_count,
+            "indexed_chunks_count": self.indexed_chunks_count,
+            "doi": self.doi,
+            "metadata": dict(self.metadata),
+        }
+
+
 # Re-export RAG contracts for external consumers of the API package
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
 
 __all__ = [
     "AttributedSource",
+    "DiscoveryImportRequest",
+    "DiscoveryImportResponse",
+    "DiscoverySearchRequest",
+    "DiscoverySearchResponse",
     "DocumentIngestResponse",
     "PaperAnalysisRequest",
     "PaperAnalysisResponse",

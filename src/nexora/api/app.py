@@ -25,6 +25,19 @@ from nexora.database.repository.base import (
     DuplicateRecordError,
     RecordNotFoundError,
 )
+from nexora.discovery.errors import (
+    DiscoveryConnectionError,
+    DiscoveryError,
+    DiscoveryRateLimitError,
+    DiscoveryResponseError,
+    DiscoveryTimeoutError,
+    InvalidIdentifierError,
+    InvalidPDFError,
+    OversizedPDFError,
+    PDFNotFoundError,
+    PaperNotFoundError,
+    SSRFProtectionError,
+)
 from nexora.document.ingestion import VectorIndexingError
 
 
@@ -103,6 +116,26 @@ async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "internal_error", "An internal error occurred.")
 
 
+async def _rate_limited(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(
+        429, "rate_limited", "Upstream discovery provider rate limit exceeded. Please retry later."
+    )
+
+
+async def _gateway_timeout(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(504, "gateway_timeout", "Upstream discovery provider request timed out.")
+
+
+async def _bad_gateway(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(502, "bad_gateway", "Upstream discovery provider error or unreachable.")
+
+
+async def _discovery_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(
+        500, "discovery_failed", "The scholarly discovery request could not be completed."
+    )
+
+
 def create_app(
     research_service: Any,
     *,
@@ -111,11 +144,12 @@ def create_app(
     analysis_service: Any = None,
     comparison_service: Any = None,
     gap_service: Any = None,
+    discovery_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
 ) -> FastAPI:
-    """Build the app around injected research, ingestion, analysis, comparison, and gap services."""
+    """Build the app around injected research, ingestion, analysis, comparison, gap, and discovery services."""
     if not callable(getattr(research_service, "ask", None)):
         raise InvalidConfigurationError("research_service must provide ask(request)")
 
@@ -133,6 +167,7 @@ def create_app(
     app.state.analysis_service = analysis_service
     app.state.comparison_service = comparison_service
     app.state.gap_service = gap_service
+    app.state.discovery_service = discovery_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
     app.state.max_upload_size_bytes = max_upload_size_bytes
@@ -141,11 +176,22 @@ def create_app(
     app.include_router(v1_router)
 
     app.add_exception_handler(FileTooLargeError, _file_too_large)
+    app.add_exception_handler(OversizedPDFError, _file_too_large)
     app.add_exception_handler(DocumentNotFoundError, _not_found)
     app.add_exception_handler(RecordNotFoundError, _not_found)
+    app.add_exception_handler(PaperNotFoundError, _not_found)
+    app.add_exception_handler(PDFNotFoundError, _not_found)
     app.add_exception_handler(DuplicateRecordError, _conflict)
     app.add_exception_handler(VectorIndexingError, _indexing_failed)
     app.add_exception_handler(InvalidRequestError, _invalid_request)
+    app.add_exception_handler(InvalidIdentifierError, _invalid_request)
+    app.add_exception_handler(InvalidPDFError, _invalid_request)
+    app.add_exception_handler(SSRFProtectionError, _invalid_request)
+    app.add_exception_handler(DiscoveryRateLimitError, _rate_limited)
+    app.add_exception_handler(DiscoveryTimeoutError, _gateway_timeout)
+    app.add_exception_handler(DiscoveryConnectionError, _bad_gateway)
+    app.add_exception_handler(DiscoveryResponseError, _bad_gateway)
+    app.add_exception_handler(DiscoveryError, _discovery_failed)
     app.add_exception_handler(ResearchServiceError, _research_failed)
     app.add_exception_handler(AnalysisServiceError, _analysis_failed)
     app.add_exception_handler(ComparisonServiceError, _comparison_failed)
