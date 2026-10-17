@@ -133,3 +133,9 @@ class PaperComparisonPromptBuilder:
             LLMMessage(role="system", content=self._system_instruction),
             LLMMessage(role="user", content=user_content),
         ]
+
+
+from nexora.research.cross_paper_prompt import (
+    CROSS_PAPER_COMPARISON_SYSTEM_INSTRUCTION,
+    CrossPaperComparisonPromptBuilder,
+)

@@ -85,6 +85,7 @@ def _parse_field_dict(
                 "document_id": item.document_id,
                 "chunk_id": item.chunk_id,
                 "paper_id": item.paper_id,
+                "page_number": item.page_number,
                 "filename": item.metadata.get("filename"),
                 "score": item.score,
                 "text": item.text,
@@ -319,6 +320,10 @@ class PaperComparisonService:
         *,
         prompt_builder: PaperComparisonPromptBuilder | None = None,
         max_papers: int = 5,
+        session_factory: Any = None,
+        vector_store: Any = None,
+        retrieval_service: Any = None,
+        cross_paper_service: Any = None,
     ) -> None:
         if not isinstance(analysis_service, PaperAnalysisService):
             raise TypeError("analysis_service must be a PaperAnalysisService")
@@ -331,6 +336,43 @@ class PaperComparisonService:
         self._llm = llm_service
         self._prompt_builder = prompt_builder or PaperComparisonPromptBuilder()
         self._max_papers = max_papers
+
+        if cross_paper_service is not None:
+            self._cross_paper_service = cross_paper_service
+        else:
+            from nexora.research.cross_paper_service import CrossPaperComparisonService
+
+            sf = session_factory if session_factory is not None else getattr(analysis_service, "_session_factory", None)
+            vs = vector_store if vector_store is not None else getattr(analysis_service, "_vector_store", None)
+            mc = getattr(analysis_service, "_max_chars", None)
+            fc = getattr(analysis_service, "_filter_citations", True)
+            self._cross_paper_service = CrossPaperComparisonService(
+                llm_service,
+                session_factory=sf,
+                vector_store=vs,
+                retrieval_service=retrieval_service,
+                max_evidence_characters=mc,
+                max_papers=max_papers,
+                filter_invalid_citations=fc,
+            )
+
+    def compare_cross_paper(
+        self,
+        paper_ids: list[str],
+        *,
+        query: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> Any:
+        """Compare papers and produce structured 7-dimension matrix with conclusion classification."""
+        return self._cross_paper_service.compare(
+            paper_ids,
+            query=query,
+            model=model,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
 
     def compare_papers(
         self,

@@ -214,6 +214,7 @@ def build_comparison_service(
     session_factory: Any = None,
     vector_store: VectorStore | None = None,
     max_papers: int = 5,
+    retrieval_service: Any = None,
 ) -> Any:
     """Assemble PaperComparisonService using settings and injected dependencies."""
     from nexora.research.analysis_service import PaperComparisonService
@@ -237,6 +238,9 @@ def build_comparison_service(
         analysis_service,
         llm_service,
         max_papers=max_papers,
+        session_factory=session_factory,
+        vector_store=vector_store,
+        retrieval_service=retrieval_service,
     )
 
 
@@ -353,6 +357,7 @@ def build_http_app(
             llm_provider=llm_provider,
             session_factory=session_factory,
             vector_store=vector_store,
+            retrieval_service=dependencies.get("retrieval_service"),
         )
 
     if gap_service is None:

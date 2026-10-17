@@ -24,6 +24,8 @@ from nexora.api.models import (
     PaperAnalysisResponse,
     PaperComparisonRequest,
     PaperComparisonResponse,
+    ResearchCompareRequest,
+    ResearchCompareResponse,
     ResearchGapsRequest,
     ResearchGapsResponse,
     ResearchRequest,
@@ -157,6 +159,34 @@ class PaperComparisonResponseBody(BaseModel):
 
     paper_ids: list[str]
     dimensions: dict[str, Any]
+    overall_summary: str
+    model: str
+    usage: dict[str, int] | None = None
+
+
+class ResearchCompareRequestBody(BaseModel):
+    """Wire format of cross-paper comparison request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    paper_ids: list[str] = Field(..., min_length=2, max_length=5, description="UUIDs of the papers to compare.")
+    query: str | None = Field(default=None, description="Optional comparison query or focus area.")
+    model: str | None = Field(default=None, description="Model identifier for synthesis.")
+    temperature: float | None = Field(default=None, description="Generation temperature (0.0 to 2.0).")
+    max_output_tokens: int | None = Field(default=None, description="Maximum output tokens for synthesis.")
+
+
+class ResearchCompareResponseBody(BaseModel):
+    """Wire format of cross-paper comparison response."""
+
+    model_config = ConfigDict(strict=False)
+
+    paper_ids: list[str]
+    paper_titles: dict[str, str | None]
+    matrix: dict[str, Any]
+    conclusion: str
+    conclusion_reasoning: str
+    comparability_status: str
     overall_summary: str
     model: str
     usage: dict[str, int] | None = None
@@ -491,6 +521,51 @@ def compare_papers_endpoint(
     )
     resp = PaperComparisonResponse.from_comparison(result)
     return PaperComparisonResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/research/compare",
+    response_model=ResearchCompareResponseBody,
+    status_code=200,
+    summary="Compare research papers across 7-dimension matrix with evidence synthesis",
+    description=(
+        "Retrieves evidence separately for each paper with strict provenance and isolation. "
+        "Constructs a structured comparison matrix for methods, datasets, baselines, metrics, "
+        "results, limitations, and comparability. Classifies conclusion as Demonstrated improvement, "
+        "Limited evidence, Conflicting evidence, or Insufficient evidence."
+    ),
+)
+def research_compare_endpoint(
+    body: ResearchCompareRequestBody,
+    service: Any = Depends(get_comparison_service),
+) -> ResearchCompareResponseBody:
+    req = ResearchCompareRequest(
+        paper_ids=body.paper_ids,
+        query=body.query,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    if hasattr(service, "compare_cross_paper"):
+        result = service.compare_cross_paper(
+            req.paper_ids,
+            query=req.query,
+            model=req.model,
+            temperature=req.temperature,
+            max_output_tokens=req.max_output_tokens,
+        )
+    elif hasattr(service, "compare"):
+        result = service.compare(
+            req.paper_ids,
+            query=req.query,
+            model=req.model,
+            temperature=req.temperature,
+            max_output_tokens=req.max_output_tokens,
+        )
+    else:
+        raise InvalidConfigurationError("comparison_service does not support cross-paper comparison")
+    resp = ResearchCompareResponse.from_result(result)
+    return ResearchCompareResponseBody(**resp.to_dict())
 
 
 @v1_router.post(

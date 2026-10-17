@@ -272,6 +272,107 @@ class PaperComparisonResponse:
 
 
 @dataclass(frozen=True)
+class ResearchCompareRequest:
+    """Request to compare research papers across 7 dimensions with evidence synthesis."""
+
+    paper_ids: list[str]
+    query: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.paper_ids, (list, tuple)):
+            raise InvalidRequestError("paper_ids must be a list of strings")
+        if len(self.paper_ids) < 2:
+            raise InvalidRequestError("At least 2 paper IDs are required for comparison.")
+        if len(self.paper_ids) > 5:
+            raise InvalidRequestError("Comparison exceeds maximum of 5 papers.")
+
+        from uuid import UUID
+
+        cleaned: list[str] = []
+        for idx, pid in enumerate(self.paper_ids):
+            if not isinstance(pid, str) or not pid.strip():
+                raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+            try:
+                UUID(pid.strip())
+            except (ValueError, AttributeError):
+                raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
+            cleaned.append(str(UUID(pid.strip())))
+        if len(set(cleaned)) != len(cleaned):
+            raise InvalidRequestError("paper_ids must be unique with no duplicates.")
+        object.__setattr__(self, "paper_ids", cleaned)
+
+        if self.query is not None:
+            if not isinstance(self.query, str):
+                raise InvalidRequestError("query must be a string or None")
+
+        if self.model is not None:
+            if not isinstance(self.model, str):
+                raise InvalidRequestError("model must be a string")
+            if not self.model.strip():
+                raise InvalidRequestError("model must not be empty")
+
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class ResearchCompareResponse:
+    """Public view of CrossPaperComparisonResult (provider raw data deliberately omitted)."""
+
+    paper_ids: list[str]
+    paper_titles: dict[str, str | None]
+    matrix: dict[str, Any]
+    conclusion: str
+    conclusion_reasoning: str
+    comparability_status: str
+    overall_summary: str
+    model: str
+    usage: dict[str, int] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paper_ids", list(self.paper_ids))
+        object.__setattr__(self, "paper_titles", dict(self.paper_titles))
+        object.__setattr__(self, "matrix", copy.deepcopy(dict(self.matrix)))
+        if self.usage is not None:
+            object.__setattr__(self, "usage", dict(self.usage))
+
+    @classmethod
+    def from_result(cls, result: Any) -> ResearchCompareResponse:
+        d = result.to_dict()
+        return cls(
+            paper_ids=d["paper_ids"],
+            paper_titles=d["paper_titles"],
+            matrix=d["matrix"],
+            conclusion=d["conclusion"],
+            conclusion_reasoning=d["conclusion_reasoning"],
+            comparability_status=d["comparability_status"],
+            overall_summary=d["overall_summary"],
+            model=d["model"],
+            usage=d.get("usage"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "paper_ids": list(self.paper_ids),
+            "paper_titles": dict(self.paper_titles),
+            "matrix": copy.deepcopy(self.matrix),
+            "conclusion": self.conclusion,
+            "conclusion_reasoning": self.conclusion_reasoning,
+            "comparability_status": self.comparability_status,
+            "overall_summary": self.overall_summary,
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }
+
+
+@dataclass(frozen=True)
 class ResearchVerifyRequest:
     """A research question to answer and verify, or an answer to verify against retrieved evidence."""
 
@@ -464,6 +565,8 @@ __all__ = [
     "PaperComparisonResponse",
     "RAGRequest",
     "RAGResponse",
+    "ResearchCompareRequest",
+    "ResearchCompareResponse",
     "ResearchGapsRequest",
     "ResearchGapsResponse",
     "ResearchRequest",
