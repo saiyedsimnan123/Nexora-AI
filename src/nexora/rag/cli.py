@@ -11,8 +11,12 @@ import json
 import sys
 from typing import Sequence
 
+from nexora.config.settings import ConfigurationError
 from nexora.rag.models import RAGResponse
-from nexora.rag.pipeline import create_offline_rag_pipeline
+from nexora.rag.pipeline import (
+    create_configured_rag_pipeline,
+    create_offline_rag_pipeline,
+)
 
 SAMPLE_QUESTIONS: list[str] = [
     "What BLEU score did the Transformer achieve on WMT 2014 English-to-German translation?",
@@ -33,10 +37,11 @@ def format_rag_response(response: RAGResponse) -> str:
     lines.append(f"Question:       {response.query}")
     lines.append(f"Retrieval Mode: {response.retrieval_mode}")
     lines.append(f"Status:         {response.status.upper()}")
-    mock_str = "Yes (Offline Deterministic Mock)" if response.is_mock else "No (Live LLM Model)"
+    mock_str = "Yes (Offline Deterministic Mock)" if response.is_mock else f"No (Live LLM Model: {response.model})"
     lines.append(f"Mock Answer:    {mock_str}")
     lines.append(f"Model:          {response.model}")
     lines.append("-" * 78)
+
 
     if response.status == "error":
         lines.append(f"ERROR: {response.error}")
@@ -112,6 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to custom JSON/JSONL dataset file (default: curated pilot benchmark).",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use real LLM answer generation (requires NEXORA_LLM_API_KEY or OPENAI_API_KEY).",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Force offline deterministic mock generation (default when no API key).",
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=None,
+        help="Model name for answer generation (e.g. 'gpt-4o-mini').",
+    )
+    parser.add_argument(
         "--sample-questions",
         action="store_true",
         help="Display curated sample research questions and exit.",
@@ -148,15 +170,28 @@ def run_rag_cli(argv: Sequence[str] | None = None) -> int:
         print(f"Error: --top-k must be a positive integer, got {args.top_k}", file=sys.stderr)
         return 2
 
-    # Initialize offline pipeline
+    # Determine generator mode from flags
+    generator_mode = None
+    if args.live:
+        generator_mode = "live"
+    elif args.offline:
+        generator_mode = "offline"
+
+    # Initialize RAG pipeline (live or offline based on configuration)
     try:
-        pipeline = create_offline_rag_pipeline(
+        pipeline = create_configured_rag_pipeline(
             dataset_path=args.dataset,
             default_mode=args.retriever,
+            generator_mode=generator_mode,
+            model=args.model,
         )
+    except ConfigurationError as exc:
+        print(f"Configuration Error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"Error initializing RAG pipeline: {exc}", file=sys.stderr)
         return 1
+
 
     query = args.query or args.question
 

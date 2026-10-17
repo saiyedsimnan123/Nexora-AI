@@ -13,7 +13,8 @@ Chains retrieval, evidence formatting, answer generation, and citation verificat
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+from typing import Any, Mapping
 
 from nexora.embedding.hash_provider import HashEmbeddingProvider
 from nexora.embedding.service import EmbeddingService
@@ -21,6 +22,7 @@ from nexora.rag.generator import (
     AnswerGenerator,
     DeterministicMockGenerator,
     GeneratedAnswer,
+    LLMAnswerGenerator,
 )
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
 from nexora.retrieval.bm25 import BM25Index
@@ -42,6 +44,20 @@ logger = logging.getLogger(__name__)
 INSUFFICIENT_EVIDENCE_ANSWER = (
     "I could not find sufficient evidence in the indexed research papers to answer this question."
 )
+
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"bearer\s+[A-Za-z0-9_\-\.]{8,}", re.IGNORECASE),
+    re.compile(r"api[_\-]?key\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}", re.IGNORECASE),
+]
+
+
+def _sanitize_error_message(error: Any) -> str:
+    msg = str(error)
+    for pattern in _SECRET_PATTERNS:
+        msg = pattern.sub("[REDACTED]", msg)
+    return msg
+
 
 
 def _truncate_excerpt(text: str, max_chars: int = 300) -> str:
@@ -229,7 +245,8 @@ class RAGPipeline:
                 max_output_tokens=req.max_output_tokens,
             )
         except Exception as exc:
-            logger.error("Generation failed for query %r: %s", query, exc)
+            clean_error = _sanitize_error_message(exc)
+            logger.error("Generation failed for query %r: %s", query, clean_error)
             return RAGResponse(
                 query=query,
                 answer="",
@@ -239,7 +256,7 @@ class RAGPipeline:
                 is_mock=self._generator.is_mock,
                 model=model or self._generator.model_name,
                 status="error",
-                error=f"Answer generation error: {exc}",
+                error=f"Answer generation error: {clean_error}",
                 retrieval_mode=mode,
                 evidence_count=len(sources),
             )
@@ -255,15 +272,36 @@ class RAGPipeline:
             if lbl in source_by_label
         ]
 
+        # Check if the generated answer truthfully indicates insufficient evidence
+        lower_ans = generated.text.lower()
+        is_insufficient = False
+        if not verification.valid_citations and any(
+            phrase in lower_ans
+            for phrase in (
+                "insufficient evidence",
+                "not enough evidence",
+                "could not find sufficient evidence",
+                "cannot find sufficient evidence",
+                "no sufficient evidence",
+                "evidence is insufficient",
+                "does not contain sufficient evidence",
+                "no evidence was retrieved",
+            )
+        ):
+            is_insufficient = True
+
+        status = "insufficient_evidence" if is_insufficient else "success"
+        is_grounded = True if is_insufficient else verification.is_fully_grounded
+
         return RAGResponse(
             query=query,
             answer=generated.text,
             sources=sources,
             cited_sources=cited_sources,
-            is_grounded=verification.is_fully_grounded,
+            is_grounded=is_grounded,
             is_mock=generated.is_mock,
             model=generated.model,
-            status="success",
+            status=status,
             error=None,
             usage=generated.usage,
             retrieval_mode=mode,
@@ -271,25 +309,10 @@ class RAGPipeline:
         )
 
 
-def create_offline_rag_pipeline(
+def _build_benchmark_retrieval_service(
     dataset_path: str | None = None,
-    *,
-    default_mode: str = "bm25",
-) -> RAGPipeline:
-    """Create a fully functional, 100% offline RAG pipeline.
-
-    Loads the curated research paper benchmark (Attention, LoRA, FlashAttention),
-    indexes it into in-memory BM25 and vector stores, and attaches a deterministic
-    offline generator. Requires zero API keys or external services.
-
-    Args:
-        dataset_path: Optional path to a research dataset file. Defaults to the
-            curated pilot benchmark.
-        default_mode: Default retrieval mode ('bm25', 'vector', or 'hybrid').
-
-    Returns:
-        An initialized, ready-to-use RAGPipeline instance.
-    """
+) -> RetrievalService:
+    """Build and index in-memory BM25 and vector retrieval services from dataset."""
     if dataset_path:
         ds = load_retrieval_dataset(dataset_path)
     else:
@@ -318,14 +341,34 @@ def create_offline_rag_pipeline(
     vector_store.upsert(records)
 
     # 3. Create unified RetrievalService
-    retrieval_service = RetrievalService(
+    return RetrievalService(
         embedding_service=emb_service,
         vector_store=vector_store,
         dimension=dimension,
         bm25_index=bm25_index,
     )
 
-    # 4. Attach deterministic mock generator
+
+def create_offline_rag_pipeline(
+    dataset_path: str | None = None,
+    *,
+    default_mode: str = "bm25",
+) -> RAGPipeline:
+    """Create a fully functional, 100% offline RAG pipeline.
+
+    Loads the curated research paper benchmark (Attention, LoRA, FlashAttention),
+    indexes it into in-memory BM25 and vector stores, and attaches a deterministic
+    offline generator. Requires zero API keys or external services.
+
+    Args:
+        dataset_path: Optional path to a research dataset file. Defaults to the
+            curated pilot benchmark.
+        default_mode: Default retrieval mode ('bm25', 'vector', or 'hybrid').
+
+    Returns:
+        An initialized, ready-to-use RAGPipeline instance.
+    """
+    retrieval_service = _build_benchmark_retrieval_service(dataset_path)
     generator = DeterministicMockGenerator()
 
     return RAGPipeline(
@@ -333,6 +376,152 @@ def create_offline_rag_pipeline(
         generator=generator,
         default_retrieval_mode=default_mode,
     )
+
+
+def create_live_rag_pipeline(
+    llm_service: Any | None = None,
+    *,
+    llm_config: Any | None = None,
+    dataset_path: str | None = None,
+    retrieval_service: Any | None = None,
+    default_mode: str = "hybrid",
+    min_score: float | None = None,
+    model: str | None = None,
+    filter_invalid_citations: bool = True,
+    environ: Mapping[str, str] | None = None,
+) -> RAGPipeline:
+    """Create an end-to-end RAG pipeline backed by a real LLM provider (OpenAI).
+
+    Requires valid LLM configuration (NEXORA_LLM_API_KEY or OPENAI_API_KEY).
+    Raises ConfigurationError if the provider is unconfigured or credentials are missing.
+    """
+    from nexora.config.settings import ConfigurationError
+
+    if llm_service is None:
+        if llm_config is None:
+            from nexora.llm.config import LLMConfig
+
+            if not LLMConfig.has_credentials(environ):
+                raise ConfigurationError(
+                    "Live LLM generation requested, but no API key configured. "
+                    "Set NEXORA_LLM_API_KEY or OPENAI_API_KEY."
+                )
+
+            try:
+                llm_config = LLMConfig.from_env(environ)
+            except Exception as exc:
+                raise ConfigurationError(
+                    f"Invalid LLM configuration for live pipeline: {exc}"
+                ) from exc
+
+        if not getattr(llm_config, "api_key", None):
+            raise ConfigurationError(
+                "Live LLM generation requested, but no API key configured. "
+                "Set NEXORA_LLM_API_KEY or OPENAI_API_KEY."
+            )
+
+
+        from nexora.llm.service import LLMService, create_llm_provider
+
+        provider = create_llm_provider(llm_config)
+        llm_service = LLMService(provider)
+
+    effective_model = model or getattr(llm_config, "model", None) or "gpt-4o-mini"
+    generator = LLMAnswerGenerator(
+        llm_service,
+        model_name=effective_model,
+        filter_invalid_citations=filter_invalid_citations,
+    )
+
+    if retrieval_service is None:
+        retrieval_service = _build_benchmark_retrieval_service(dataset_path)
+
+    return RAGPipeline(
+        retrieval_service=retrieval_service,
+        generator=generator,
+        default_retrieval_mode=default_mode,
+        min_score=min_score,
+    )
+
+
+def create_configured_rag_pipeline(
+    dataset_path: str | None = None,
+    *,
+    default_mode: str = "hybrid",
+    generator_mode: str | None = None,
+    model: str | None = None,
+    llm_service: Any | None = None,
+    llm_config: Any | None = None,
+    retrieval_service: Any | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> RAGPipeline:
+    """Factory creating either a live or offline RAG pipeline based on configuration.
+
+    Mode selection precedence:
+    1. Explicit ``generator_mode`` argument ('live' or 'offline'/'mock').
+    2. Environment variable ``NEXORA_RAG_GENERATOR_MODE`` ('live' or 'offline'/'mock').
+    3. Auto-detection: If live credentials exist (or llm_service injected), uses live generation;
+       otherwise defaults safely to deterministic offline mock mode.
+
+    If live mode is explicitly requested but credentials are missing, raises ConfigurationError
+    instead of silently falling back to mock output.
+    """
+    import os
+    from nexora.config.settings import ConfigurationError
+    from nexora.llm.config import LLMConfig
+
+    env = os.environ if environ is None else environ
+
+    mode = generator_mode
+    if mode is None:
+        mode = env.get("NEXORA_RAG_GENERATOR_MODE")
+    if mode is not None:
+        mode = mode.strip().lower()
+
+    # Explicit live requested
+    if mode == "live":
+        return create_live_rag_pipeline(
+            llm_service=llm_service,
+            llm_config=llm_config,
+            dataset_path=dataset_path,
+            retrieval_service=retrieval_service,
+            default_mode=default_mode,
+            model=model,
+            environ=env,
+        )
+
+    # Explicit offline requested
+    if mode in ("offline", "mock"):
+        retrieval = retrieval_service or _build_benchmark_retrieval_service(dataset_path)
+        generator = DeterministicMockGenerator(model_name=model or "offline-deterministic-mock-v1")
+        return RAGPipeline(
+            retrieval_service=retrieval,
+            generator=generator,
+            default_retrieval_mode=default_mode,
+        )
+
+    # Auto-detection: check if live credentials exist
+    has_live_credentials = (
+        llm_service is not None
+        or (llm_config is not None and getattr(llm_config, "api_key", None))
+        or LLMConfig.has_credentials(env)
+    )
+
+    if has_live_credentials:
+        try:
+            return create_live_rag_pipeline(
+                llm_service=llm_service,
+                llm_config=llm_config,
+                dataset_path=dataset_path,
+                retrieval_service=retrieval_service,
+                default_mode=default_mode,
+                model=model,
+                environ=env,
+            )
+        except ConfigurationError:
+            pass
+
+    return create_offline_rag_pipeline(dataset_path=dataset_path, default_mode=default_mode)
 
 
 def create_rag_pipeline(

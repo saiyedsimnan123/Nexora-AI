@@ -13,6 +13,8 @@ from nexora.rag.models import (
 )
 from nexora.rag.pipeline import (
     RAGPipeline,
+    create_configured_rag_pipeline,
+    create_live_rag_pipeline,
     create_offline_rag_pipeline,
     create_rag_pipeline,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "DeterministicMockGenerator",
     "LLMAnswerGenerator",
     "RAGPipeline",
+    "create_configured_rag_pipeline",
+    "create_live_rag_pipeline",
     "create_offline_rag_pipeline",
     "create_rag_pipeline",
 ]

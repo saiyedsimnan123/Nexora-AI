@@ -308,11 +308,12 @@ def get_rag_pipeline(request: Request) -> Any:
     """Dependency: the RAG pipeline injected into the app by create_app()."""
     pipeline = getattr(request.app.state, "rag_pipeline", None)
     if pipeline is None:
-        from nexora.rag.pipeline import create_offline_rag_pipeline
+        from nexora.rag.pipeline import create_configured_rag_pipeline
 
-        pipeline = create_offline_rag_pipeline()
+        pipeline = create_configured_rag_pipeline()
         request.app.state.rag_pipeline = pipeline
     return pipeline
+
 
 
 

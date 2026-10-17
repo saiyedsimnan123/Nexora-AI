@@ -273,6 +273,65 @@ Run all API test suites:
 
 Run the complete RAG and retrieval verification:
 ```powershell
-.venv\Scripts\pytest.exe tests/test_retrieval_bm25.py tests/test_retrieval_demo.py tests/test_rag_pipeline.py tests/test_api_rag.py -v
+.venv\Scripts\pytest.exe tests/test_retrieval_bm25.py tests/test_retrieval_demo.py tests/test_rag_pipeline.py tests/test_api_rag.py tests/test_rag_llm_generation.py -v
 ```
 
+---
+
+## 7. Real LLM Answer Generation (OpenAI Provider)
+
+Nexora AI connects the grounded RAG pipeline to a live LLM provider using the project's native `OpenAIProvider` and `LLMAnswerGenerator`.
+
+### Supported Provider & Models
+- **Provider**: OpenAI (via the native Responses API client).
+- **Default Model**: `gpt-4o-mini` (or any compatible OpenAI model, e.g. `gpt-4o`).
+
+### Configuration
+Set credentials in your local `.env` file (or export in shell):
+
+```bash
+# Primary API key:
+NEXORA_LLM_API_KEY=sk-your-openai-api-key
+
+# Optional model override (defaults to gpt-4o-mini):
+NEXORA_LLM_MODEL=gpt-4o-mini
+
+# Optional mode enforcement: 'live' (fail if missing key) or 'offline' (deterministic mock)
+NEXORA_RAG_GENERATOR_MODE=live
+```
+
+> [!NOTE]
+> Standard `OPENAI_API_KEY` and `OPENAI_MODEL` environment variables are also automatically supported as fallbacks.
+
+### Running CLI with Live LLM
+Add the `--live` flag:
+```powershell
+$env:PYTHONPATH='src'
+.venv\Scripts\python.exe -m nexora.rag.cli --live "How does Low-Rank Adaptation (LoRA) freeze pre-trained weights?"
+```
+
+Output clearly indicates live model generation:
+```text
+Question:       How does Low-Rank Adaptation (LoRA) freeze pre-trained weights?
+Retrieval Mode: bm25
+Status:         SUCCESS
+Mock Answer:    No (Live LLM Model: gpt-4o-mini)
+Model:          gpt-4o-mini
+```
+
+### Running REST API with Live LLM
+Start the server with your API key set in the environment or `.env`:
+```powershell
+$env:NEXORA_LLM_API_KEY="sk-..."
+$env:PYTHONPATH='src'
+.venv\Scripts\uvicorn.exe nexora.api.app:app --host 127.0.0.1 --port 8000
+```
+
+When queried via `POST /api/v1/research/query`, the response will have:
+- `is_mock: false`
+- `model: "gpt-4o-mini"`
+- `status: "success"` (or `"insufficient_evidence"` if the evidence cannot answer the question)
+- `is_grounded: true` (citations verified against retrieved evidence)
+
+### Offline Mode Preservation
+When no API key is provided, Nexora AI defaults safely to the deterministic offline mock generator (`is_mock: true`). If live mode is explicitly requested (`--live` or `NEXORA_RAG_GENERATOR_MODE=live`) without a key, the system raises an explicit `ConfigurationError` rather than silently faking live output.
