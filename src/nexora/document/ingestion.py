@@ -261,8 +261,15 @@ class DocumentIngestionService:
                             "filename": doc.filename,
                             "source": doc.storage_key,
                         }
+                        chunk_pages = processed_document.metadata.get("chunk_pages")
+                        if isinstance(chunk_pages, (list, tuple)) and 0 <= chunk_rec.chunk_index < len(chunk_pages):
+                            p = chunk_pages[chunk_rec.chunk_index]
+                            if isinstance(p, int) and p > 0:
+                                payload["page_number"] = p
+                                payload["page"] = p
+
                         for k, v in processed_document.metadata.items():
-                            if k not in payload and isinstance(k, str):
+                            if k not in payload and isinstance(k, str) and k != "chunk_pages":
                                 payload[k] = v
 
                         records_to_upsert.append(

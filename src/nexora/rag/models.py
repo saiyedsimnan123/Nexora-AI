@@ -49,9 +49,19 @@ class AttributedSource:
             raise TypeError("metadata must be a dictionary")
         object.__setattr__(self, "metadata", copy.deepcopy(self.metadata))
 
+    @property
+    def page_number(self) -> int | None:
+        """Page number from metadata if present and valid."""
+        val = self.metadata.get("page_number")
+        if val is None:
+            val = self.metadata.get("page")
+        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+            return None
+        return val
+
     def to_dict(self) -> dict[str, Any]:
         """Convert attributed source to a JSON-serializable dictionary."""
-        return {
+        d = {
             "label": self.label,
             "document_id": self.document_id,
             "chunk_id": self.chunk_id,
@@ -62,6 +72,9 @@ class AttributedSource:
             "text_excerpt": self.text_excerpt,
             "metadata": dict(self.metadata),
         }
+        if self.page_number is not None:
+            d["page_number"] = self.page_number
+        return d
 
 
 @dataclass(frozen=True)
@@ -74,6 +87,8 @@ class RAGRequest:
     min_score: float | None = None
     temperature: float | None = None
     max_output_tokens: int | None = None
+    paper_id: str | None = None
+    document_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):

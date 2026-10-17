@@ -114,6 +114,9 @@ class RetrievalService:
         limit: int = 10,
         mode: str = "vector",
         rrf_k: int = 60,
+        paper_id: str | None = None,
+        document_id: str | None = None,
+        filter: dict[str, Any] | None = None,
     ) -> SearchResult:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
@@ -126,10 +129,24 @@ class RetrievalService:
         if mode not in ("vector", "bm25", "hybrid"):
             raise ValueError(f"mode must be 'vector', 'bm25', or 'hybrid', got {mode!r}")
 
+        effective_filter: dict[str, Any] = dict(filter) if filter else {}
+        if paper_id is not None:
+            effective_filter["paper_id"] = str(paper_id)
+        if document_id is not None:
+            effective_filter["document_id"] = str(document_id)
+
+        target_paper_id = effective_filter.get("paper_id")
+        target_doc_id = effective_filter.get("document_id")
+
         if mode == "bm25":
             if self._bm25_index is None:
                 raise ValueError("BM25 retrieval requested but no bm25_index was configured")
-            return self._bm25_index.search(query, limit=limit)
+            return self._bm25_index.search(
+                query,
+                limit=limit,
+                paper_id=target_paper_id,
+                document_id=target_doc_id,
+            )
 
         if self._cache_queries and query in self._query_cache:
             vector = list(self._query_cache[query])
@@ -141,7 +158,19 @@ class RetrievalService:
                     self._evict_oldest()
                 self._query_cache[query] = list(vector)
 
-        raw_result = self._vector_store.search(vector, limit=limit)
+        try:
+            raw_result = self._vector_store.search(
+                vector, limit=limit, filter=effective_filter or None
+            )
+        except TypeError:
+            raw_result = self._vector_store.search(vector, limit=limit)
+            if effective_filter:
+                filtered_chunks = [
+                    c for c in raw_result.results
+                    if all(str(c.metadata.get(k)) == str(v) for k, v in effective_filter.items())
+                ]
+                raw_result = SearchResult(query=raw_result.query, results=filtered_chunks)
+
         if not isinstance(raw_result, SearchResult):
             raise TypeError(
                 f"Vector store search must return a SearchResult, got {type(raw_result).__name__}"
@@ -152,7 +181,12 @@ class RetrievalService:
                 raise ValueError("Hybrid retrieval requested but no bm25_index was configured")
             from nexora.retrieval.bm25 import reciprocal_rank_fusion
 
-            bm25_res = self._bm25_index.search(query, limit=limit)
+            bm25_res = self._bm25_index.search(
+                query,
+                limit=limit,
+                paper_id=target_paper_id,
+                document_id=target_doc_id,
+            )
             return reciprocal_rank_fusion(raw_result, bm25_res, rrf_k=rrf_k, limit=limit)
 
         return raw_result

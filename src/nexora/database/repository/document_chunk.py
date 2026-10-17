@@ -22,13 +22,17 @@ class DocumentChunkRepository(BaseRepository[DocumentChunkRecord]):
         document_id: UUID,
         chunk_index: int,
         text: str,
+        id: UUID | None = None,
     ) -> DocumentChunkRecord:
         """Create a new document chunk record."""
-        return self._create(
-            document_id=document_id,
-            chunk_index=chunk_index,
-            text=text,
-        )
+        kwargs: dict[str, Any] = {
+            "document_id": document_id,
+            "chunk_index": chunk_index,
+            "text": text,
+        }
+        if id is not None:
+            kwargs["id"] = id
+        return self._create(**kwargs)
 
     def get_by_document_and_index(
         self,

@@ -253,6 +253,8 @@ class BM25Index:
         *,
         limit: int = 10,
         min_score: float | None = None,
+        paper_id: str | None = None,
+        document_id: str | None = None,
     ) -> SearchResult:
         """Search the index using Okapi BM25 ranking.
 
@@ -260,6 +262,8 @@ class BM25Index:
             query: The search text query.
             limit: Maximum number of results to return.
             min_score: Optional minimum score threshold.
+            paper_id: Optional paper identifier to restrict search to a specific paper.
+            document_id: Optional document identifier to restrict search to a specific document.
 
         Returns:
             A ``SearchResult`` with chunks ordered by relevance score descending.
@@ -274,9 +278,13 @@ class BM25Index:
         if not query_tokens or not self._documents:
             return SearchResult(query=query, results=[])
 
-        # Score documents that contain at least one query token
+        # Score documents that contain at least one query token and match any filters
         scored_docs: list[tuple[float, BM25Document]] = []
         for doc in self._documents.values():
+            if paper_id is not None and str(doc.metadata.get("paper_id")) != str(paper_id):
+                continue
+            if document_id is not None and doc.document_id != str(document_id):
+                continue
             s = self.score(query_tokens, doc)
             if s > 0.0:
                 if min_score is None or s >= min_score:

@@ -242,6 +242,15 @@ def _validate_chunk(raw: Any, index: int, seen_ids: set[str]) -> dict[str, Any]:
                 f"Chunk '{chunk_id}' (index {index}) has invalid 'publication_year': {pub_year} out of valid range (1000-3000)"
             )
 
+    page_number = raw.get("page_number")
+    if page_number is None and "page" in raw:
+        page_number = raw.get("page")
+    if page_number is not None:
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number <= 0:
+            raise DatasetValidationError(
+                f"Chunk '{chunk_id}' (index {index}) has invalid 'page_number': must be a positive integer"
+            )
+
     return {
         "chunk_id": chunk_id,
         "document_id": doc_id,
@@ -253,6 +262,7 @@ def _validate_chunk(raw: Any, index: int, seen_ids: set[str]) -> dict[str, Any]:
         "doi": doi,
         "url": url,
         "publication_year": pub_year,
+        "page_number": page_number,
     }
 
 

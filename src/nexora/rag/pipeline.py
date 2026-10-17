@@ -106,6 +106,8 @@ class RAGPipeline:
         model: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        paper_id: str | None = None,
+        document_id: str | None = None,
     ) -> RAGResponse:
         """Execute end-to-end RAG workflow for a research question.
 
@@ -117,6 +119,8 @@ class RAGPipeline:
             model: Optional model name override for answer generation.
             temperature: Optional generation temperature.
             max_output_tokens: Optional token generation limit.
+            paper_id: Optional paper UUID to filter evidence to a specific paper.
+            document_id: Optional document identifier to filter evidence.
 
         Returns:
             A RAGResponse containing the grounded answer, attributed sources,
@@ -133,17 +137,29 @@ class RAGPipeline:
                 min_score=min_score if min_score is not None else self._min_score,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
+                paper_id=paper_id,
+                document_id=document_id,
             )
         elif isinstance(request, RAGRequest):
             req = request
-            if retrieval_mode is not None:
+            if (
+                retrieval_mode is not None
+                or top_k is not None
+                or min_score is not None
+                or temperature is not None
+                or max_output_tokens is not None
+                or paper_id is not None
+                or document_id is not None
+            ):
                 req = RAGRequest(
                     query=req.query,
-                    retrieval_mode=retrieval_mode,
+                    retrieval_mode=retrieval_mode if retrieval_mode is not None else req.retrieval_mode,
                     top_k=top_k if top_k is not None else req.top_k,
                     min_score=min_score if min_score is not None else req.min_score,
                     temperature=temperature if temperature is not None else req.temperature,
                     max_output_tokens=max_output_tokens if max_output_tokens is not None else req.max_output_tokens,
+                    paper_id=paper_id if paper_id is not None else req.paper_id,
+                    document_id=document_id if document_id is not None else req.document_id,
                 )
         else:
             raise TypeError(f"request must be a RAGRequest or string, got {type(request).__name__}")
@@ -155,7 +171,16 @@ class RAGPipeline:
 
         # 2. Retrieve candidates from underlying retrieval service
         try:
-            search_result = self._retrieval.retrieve(query, limit=limit, mode=mode)
+            try:
+                search_result = self._retrieval.retrieve(
+                    query,
+                    limit=limit,
+                    mode=mode,
+                    paper_id=req.paper_id,
+                    document_id=req.document_id,
+                )
+            except TypeError:
+                search_result = self._retrieval.retrieve(query, limit=limit, mode=mode)
         except Exception as exc:
             logger.error("Retrieval failed for query %r: %s", query, exc)
             return RAGResponse(

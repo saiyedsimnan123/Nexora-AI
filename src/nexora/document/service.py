@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
+import uuid
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -191,13 +192,15 @@ class DocumentPersistenceService:
                 storage_key=resolved_storage_key,
             )
 
-            # Insert chunks in index order
+            # Insert chunks in index order with deterministic chunk UUIDs
             for chunk in processed_document.chunks:
                 if not isinstance(chunk, DocumentChunk):
                     raise TypeError(
                         f"Expected DocumentChunk, got {type(chunk).__name__}"
                     )
+                chunk_uuid = uuid.uuid5(doc.id, f"chunk:{chunk.index}")
                 self._chunk_repo.create(
+                    id=chunk_uuid,
                     document_id=doc.id,
                     chunk_index=chunk.index,
                     text=chunk.text,

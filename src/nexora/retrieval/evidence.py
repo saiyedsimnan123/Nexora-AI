@@ -61,6 +61,24 @@ class EvidenceItem:
         return str(val) if val is not None else None
 
     @property
+    def page_number(self) -> int | None:
+        """Page number from metadata if present and valid."""
+        val = self.metadata.get("page_number")
+        if val is None:
+            val = self.metadata.get("page")
+        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+            return None
+        return val
+
+    @property
+    def title(self) -> str | None:
+        """Paper or document title from metadata if present."""
+        val = self.metadata.get("title")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        return None
+
+    @property
     def label(self) -> str:
         """Standard citation label, e.g. '[E1]'."""
         return f"[E{self.position + 1}]"

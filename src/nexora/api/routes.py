@@ -204,6 +204,7 @@ class AttributedSourceBody(BaseModel):
     text: str = Field(..., description="Complete text of the chunk.")
     text_excerpt: str = Field(..., description="Clean excerpt of the evidence.")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata key-value pairs.")
+    page_number: int | None = Field(default=None, description="Page number of the source document, if known.")
 
 
 class RAGQueryRequestBody(BaseModel):

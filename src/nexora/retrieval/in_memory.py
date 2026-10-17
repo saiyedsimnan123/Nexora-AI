@@ -163,7 +163,13 @@ class InMemoryVectorStore:
         for record_id in ids:
             self._records.pop(record_id, None)
 
-    def search(self, vector: list[float], *, limit: int = 10) -> SearchResult:
+    def search(
+        self,
+        vector: list[float],
+        *,
+        limit: int = 10,
+        filter: dict[str, object] | None = None,
+    ) -> SearchResult:
         """Return up to ``limit`` records ranked by cosine similarity.
 
         Highest score first; equal scores are ordered by record id. An empty
@@ -183,9 +189,13 @@ class InMemoryVectorStore:
             )
 
         prepared = _scaled(query)
+        candidates = (
+            record for record in self._records.values()
+            if not filter or all(str(record.payload.get(k)) == str(v) for k, v in filter.items())
+        )
         scored = (
             (_cosine(prepared, _scaled(record.vector)), record)
-            for record in self._records.values()
+            for record in candidates
         )
         top = heapq.nsmallest(limit, scored, key=lambda item: (-item[0], item[1].id))
         return SearchResult(query="", results=[_to_chunk(r, s) for s, r in top])
