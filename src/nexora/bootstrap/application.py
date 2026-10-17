@@ -367,8 +367,10 @@ def build_http_app(
                 verifier=verifier,
             )
 
+    rag_pipeline = dependencies.get("rag_pipeline")
     return create_app(
         research_service,
+        rag_pipeline=rag_pipeline,
         ingestion_service=ingestion_service,
         analysis_service=analysis_service,
         comparison_service=comparison_service,

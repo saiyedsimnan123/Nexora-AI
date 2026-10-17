@@ -106,6 +106,7 @@ async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
 def create_app(
     research_service: Any,
     *,
+    rag_pipeline: Any = None,
     ingestion_service: Any = None,
     analysis_service: Any = None,
     comparison_service: Any = None,
@@ -120,10 +121,14 @@ def create_app(
 
     app = FastAPI(
         title="Nexora AI",
-        description="Research intelligence API: evidence-grounded answers to research questions.",
+        description=(
+            "Research intelligence API: evidence-grounded answers to research questions "
+            "with full citation attribution, lexical BM25, and hybrid retrieval."
+        ),
         version=__version__,
     )
     app.state.research_service = research_service
+    app.state.rag_pipeline = rag_pipeline
     app.state.ingestion_service = ingestion_service
     app.state.analysis_service = analysis_service
     app.state.comparison_service = comparison_service
@@ -151,4 +156,68 @@ def create_app(
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(Exception, _unexpected)
     return app
+
+
+def create_offline_app(*, rag_pipeline: Any = None) -> FastAPI:
+    """Convenience factory to create a fully offline FastAPI app.
+
+    Uses an in-memory RAG pipeline backed by the curated research paper benchmark.
+    Requires zero API keys, external servers, or network calls.
+    """
+    from nexora.rag.pipeline import create_offline_rag_pipeline
+
+    if rag_pipeline is None:
+        rag_pipeline = create_offline_rag_pipeline()
+
+    class _OfflineResearchService:
+        def __init__(self, pipeline: Any) -> None:
+            self._pipeline = pipeline
+
+        def ask(self, request: Any) -> Any:
+            from nexora.research.models import ResearchAnswer
+
+            query_text = request.query if hasattr(request, "query") else str(request)
+            resp = self._pipeline.answer(query_text)
+            return ResearchAnswer(
+                text=resp.answer,
+                query=query_text,
+                model=resp.model,
+                usage=resp.usage,
+                evidence_count=resp.evidence_count,
+            )
+
+    return create_app(
+        _OfflineResearchService(rag_pipeline),
+        rag_pipeline=rag_pipeline,
+    )
+
+
+class _LazyASGIApp:
+    """Lazy ASGI application that initializes create_offline_app on first request."""
+
+    def __init__(self) -> None:
+        self._app: FastAPI | None = None
+
+    def _get_app(self) -> FastAPI:
+        if self._app is None:
+            self._app = create_offline_app()
+        return self._app
+
+    @property
+    def state(self) -> Any:
+        return self._get_app().state
+
+    @property
+    def openapi_schema(self) -> Any:
+        return self._get_app().openapi_schema
+
+    def openapi(self) -> dict[str, Any]:
+        return self._get_app().openapi()
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._get_app()(scope, receive, send)
+
+
+app = _LazyASGIApp()
+
 

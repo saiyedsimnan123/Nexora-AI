@@ -112,14 +112,167 @@ for source in response.cited_sources:
 
 ---
 
-## 5. Running Tests
+---
 
-Run the dedicated RAG pipeline test suite:
+## 5. REST API Usage & Startup
+
+The RAG pipeline is exposed via a REST HTTP API with comprehensive request validation, honest source attribution, and OpenAPI documentation.
+
+### Starting the HTTP Server
+
+Run the API server with Uvicorn (zero configuration, runs 100% offline):
+
 ```powershell
-.venv\Scripts\pytest.exe tests/test_rag_pipeline.py -v
+$env:PYTHONPATH='src'
+.venv\Scripts\uvicorn.exe nexora.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-Run the combined retrieval, demo, and RAG suites:
+Alternatively, use the explicit offline app factory:
 ```powershell
-.venv\Scripts\pytest.exe tests/test_retrieval_bm25.py tests/test_retrieval_demo.py tests/test_rag_pipeline.py -v
+$env:PYTHONPATH='src'
+.venv\Scripts\uvicorn.exe "nexora.api.app:create_offline_app()" --factory --host 127.0.0.1 --port 8000
 ```
+
+Once running, interactive OpenAPI / Swagger UI documentation is available at:
+- **Swagger UI**: `http://127.0.0.1:8000/docs`
+- **OpenAPI Schema**: `http://127.0.0.1:8000/openapi.json`
+
+---
+
+### Service Health Check
+
+Check service health (`GET /health`):
+
+```bash
+curl -X GET http://127.0.0.1:8000/health
+```
+
+**Response (`200 OK`)**:
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+### Grounded Research Query (`POST /api/v1/research/query`)
+
+Send a research question with optional retrieval strategy and parameters:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/research/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How does Low-Rank Adaptation (LoRA) freeze pre-trained weights and reduce trainable parameters?",
+    "retrieval_mode": "hybrid",
+    "top_k": 3
+  }'
+```
+
+**Response (`200 OK`)**:
+```json
+{
+  "query": "How does Low-Rank Adaptation (LoRA) freeze pre-trained weights and reduce trainable parameters?",
+  "answer": "Based on the retrieved research evidence, the following findings address your query:\n\nFrom \"LoRA: Low-Rank Adaptation of Large Language Models\" [E1]:\nLoRA freezes the pre-trained model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture, greatly reducing the number of trainable parameters for downstream tasks. Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and GPU memory requirement by 3 times.\n\nSummary of Evidence:\n- [E1] LoRA freezes pre-trained weights and injects trainable rank decomposition matrices, reducing parameters by 10,000x.",
+  "sources": [
+    {
+      "label": "[E1]",
+      "document_id": "arxiv_2106.09685",
+      "chunk_id": "arxiv_2106.09685_chunk_001",
+      "paper_id": "arxiv_2106.09685",
+      "paper_title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "score": 0.032787,
+      "text": "LoRA freezes the pre-trained model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture, greatly reducing the number of trainable parameters for downstream tasks. Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and GPU memory requirement by 3 times.",
+      "text_excerpt": "LoRA freezes the pre-trained model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture, greatly reducing the number of trainable parameters for downstream tasks. Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable...",
+      "metadata": {
+        "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+        "authors": ["Edward J. Hu", "Yelong Shen", "Phillip Wallis"],
+        "year": 2021
+      }
+    }
+  ],
+  "cited_sources": [
+    {
+      "label": "[E1]",
+      "document_id": "arxiv_2106.09685",
+      "chunk_id": "arxiv_2106.09685_chunk_001",
+      "paper_id": "arxiv_2106.09685",
+      "paper_title": "LoRA: Low-Rank Adaptation of Large Language Models",
+      "score": 0.032787,
+      "text": "LoRA freezes the pre-trained model weights...",
+      "text_excerpt": "LoRA freezes the pre-trained model weights...",
+      "metadata": {
+        "title": "LoRA: Low-Rank Adaptation of Large Language Models"
+      }
+    }
+  ],
+  "is_grounded": true,
+  "is_mock": true,
+  "model": "offline-deterministic-mock-v1",
+  "status": "success",
+  "error": null,
+  "usage": {
+    "prompt_tokens": 128,
+    "completion_tokens": 84,
+    "total_tokens": 212
+  },
+  "retrieval_mode": "hybrid",
+  "evidence_count": 1
+}
+```
+
+---
+
+### Unanswerable Queries / Insufficient Evidence
+
+When a query cannot be answered from the corpus:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/research/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the breeding cycle of emperor penguins in Antarctica during winter?",
+    "retrieval_mode": "bm25"
+  }'
+```
+
+**Response (`200 OK`)**:
+```json
+{
+  "query": "What is the breeding cycle of emperor penguins in Antarctica during winter?",
+  "answer": "I could not find sufficient evidence in the indexed research papers to answer this question.",
+  "sources": [],
+  "cited_sources": [],
+  "is_grounded": true,
+  "is_mock": true,
+  "model": "offline-deterministic-mock-v1",
+  "status": "insufficient_evidence",
+  "error": null,
+  "usage": null,
+  "retrieval_mode": "bm25",
+  "evidence_count": 0
+}
+```
+
+No citations are fabricated and no false claims are returned.
+
+---
+
+## 6. Running Tests
+
+Run the dedicated RAG API test suite:
+```powershell
+.venv\Scripts\pytest.exe tests/test_api_rag.py -v
+```
+
+Run all API test suites:
+```powershell
+.venv\Scripts\pytest.exe tests/test_api_app.py tests/test_api_routes.py tests/test_api_rag.py tests/test_api_document_ingest.py -v
+```
+
+Run the complete RAG and retrieval verification:
+```powershell
+.venv\Scripts\pytest.exe tests/test_retrieval_bm25.py tests/test_retrieval_demo.py tests/test_rag_pipeline.py tests/test_api_rag.py -v
+```
+

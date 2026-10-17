@@ -16,6 +16,7 @@ from nexora.api.errors import (
     FileTooLargeError,
     InvalidConfigurationError,
     InvalidRequestError,
+    ResearchServiceError,
 )
 from nexora.api.models import (
     DocumentIngestResponse,
@@ -189,6 +190,79 @@ class ResearchGapsResponseBody(BaseModel):
     usage: dict[str, int] | None = None
 
 
+class AttributedSourceBody(BaseModel):
+    """Wire format of an attributed research evidence source."""
+
+    model_config = ConfigDict(strict=False)
+
+    label: str = Field(..., description="Citation marker, e.g. '[E1]'.")
+    document_id: str = Field(..., description="Identifier of the source document.")
+    chunk_id: str = Field(..., description="Unique chunk identifier.")
+    paper_id: str | None = Field(default=None, description="Research paper UUID if available.")
+    paper_title: str = Field(..., description="Title of the paper.")
+    score: float = Field(..., description="Relevance score.")
+    text: str = Field(..., description="Complete text of the chunk.")
+    text_excerpt: str = Field(..., description="Clean excerpt of the evidence.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata key-value pairs.")
+
+
+class RAGQueryRequestBody(BaseModel):
+    """Wire format for research RAG question query."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    query: str = Field(..., description="The research question to be answered.")
+    retrieval_mode: str = Field(
+        default="hybrid",
+        description="Retrieval strategy: 'bm25', 'vector', or 'hybrid'.",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum number of evidence chunks to retrieve.",
+    )
+    min_score: float | None = Field(
+        default=None,
+        description="Optional minimum relevance score threshold.",
+    )
+    temperature: float | None = Field(
+        default=None,
+        description="Generation temperature (0.0 to 2.0).",
+    )
+    max_output_tokens: int | None = Field(
+        default=None,
+        description="Maximum output tokens for answer generation.",
+    )
+
+
+class RAGQueryResponseBody(BaseModel):
+    """Wire format for grounded RAG answer response."""
+
+    model_config = ConfigDict(strict=False)
+
+    query: str = Field(..., description="Original research question.")
+    answer: str = Field(..., description="Evidence-grounded answer with citations.")
+    sources: list[AttributedSourceBody] = Field(
+        default_factory=list,
+        description="Retrieved evidence chunks with source attribution.",
+    )
+    cited_sources: list[AttributedSourceBody] = Field(
+        default_factory=list,
+        description="Evidence chunks explicitly cited in the answer.",
+    )
+    is_grounded: bool = Field(..., description="Whether the answer is grounded in evidence.")
+    is_mock: bool = Field(..., description="Whether a mock generator produced this answer.")
+    model: str = Field(..., description="Model identifier used for generation.")
+    status: str = Field(
+        ...,
+        description="Execution status: 'success', 'insufficient_evidence', or 'error'.",
+    )
+    error: str | None = Field(default=None, description="Error message if generation failed.")
+    usage: dict[str, int] | None = Field(default=None, description="Token usage statistics.")
+    retrieval_mode: str = Field(..., description="Retrieval mode used ('bm25', 'vector', 'hybrid').")
+    evidence_count: int = Field(..., description="Number of evidence chunks retrieved.")
+
+
 
 def get_research_service(request: Request) -> ResearchApplicationService:
     """Dependency: the research service injected into the app by create_app()."""
@@ -230,6 +304,18 @@ def get_gap_service(request: Request) -> Any:
     return service
 
 
+def get_rag_pipeline(request: Request) -> Any:
+    """Dependency: the RAG pipeline injected into the app by create_app()."""
+    pipeline = getattr(request.app.state, "rag_pipeline", None)
+    if pipeline is None:
+        from nexora.rag.pipeline import create_offline_rag_pipeline
+
+        pipeline = create_offline_rag_pipeline()
+        request.app.state.rag_pipeline = pipeline
+    return pipeline
+
+
+
 
 health_router = APIRouter()
 v1_router = APIRouter(prefix="/api/v1")
@@ -253,6 +339,62 @@ def research(
         max_output_tokens=body.max_output_tokens,
     )
     return ResearchResponseBody(**service.ask(request).to_dict())
+
+
+@v1_router.post(
+    "/research/query",
+    response_model=RAGQueryResponseBody,
+    summary="Query research papers with grounded RAG",
+    description="Retrieve research evidence and generate an attributed answer with verifiable citations.",
+)
+def research_rag_query(
+    body: RAGQueryRequestBody,
+    pipeline: Any = Depends(get_rag_pipeline),
+) -> RAGQueryResponseBody:
+    """Answer a research question using the grounded RAG pipeline."""
+    if not body.query.strip():
+        raise InvalidRequestError("query must not be empty or whitespace-only")
+    if body.retrieval_mode not in ("bm25", "vector", "hybrid"):
+        raise InvalidRequestError(
+            f"retrieval_mode must be 'bm25', 'vector', or 'hybrid', got {body.retrieval_mode!r}"
+        )
+    if body.temperature is not None and (body.temperature < 0.0 or body.temperature > 2.0):
+        raise InvalidRequestError("temperature must be between 0.0 and 2.0")
+    if body.max_output_tokens is not None and body.max_output_tokens <= 0:
+        raise InvalidRequestError("max_output_tokens must be greater than 0")
+
+    try:
+        response = pipeline.answer(
+            request=body.query,
+            retrieval_mode=body.retrieval_mode,
+            top_k=body.top_k,
+            min_score=body.min_score,
+            temperature=body.temperature,
+            max_output_tokens=body.max_output_tokens,
+        )
+    except (InvalidRequestError, ValueError) as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    except Exception as exc:
+        raise ResearchServiceError(str(exc)) from exc
+
+    if getattr(response, "status", None) == "error":
+        raise ResearchServiceError(getattr(response, "error", None) or "RAG pipeline execution failed.")
+
+    return RAGQueryResponseBody(**response.to_dict())
+
+
+@v1_router.post(
+    "/rag/query",
+    response_model=RAGQueryResponseBody,
+    summary="Query research papers with grounded RAG (alias)",
+    description="Alias for /api/v1/research/query.",
+    include_in_schema=False,
+)
+def rag_query_alias(
+    body: RAGQueryRequestBody,
+    pipeline: Any = Depends(get_rag_pipeline),
+) -> RAGQueryResponseBody:
+    return research_rag_query(body, pipeline=pipeline)
 
 
 @v1_router.post(

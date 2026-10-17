@@ -13,11 +13,14 @@ from nexora.api.errors import (
     VerificationServiceError,
 )
 from nexora.api.models import (
+    AttributedSource,
     DocumentIngestResponse,
     PaperAnalysisRequest,
     PaperAnalysisResponse,
     PaperComparisonRequest,
     PaperComparisonResponse,
+    RAGRequest,
+    RAGResponse,
     ResearchGapsRequest,
     ResearchGapsResponse,
     ResearchRequest,
@@ -29,6 +32,7 @@ from nexora.api.service import ResearchApplicationService
 
 __all__ = [
     "AnalysisServiceError",
+    "AttributedSource",
     "ComparisonServiceError",
     "DocumentIngestResponse",
     "DocumentIngestionApiError",
@@ -41,6 +45,8 @@ __all__ = [
     "PaperAnalysisResponse",
     "PaperComparisonRequest",
     "PaperComparisonResponse",
+    "RAGRequest",
+    "RAGResponse",
     "ResearchApplicationService",
     "ResearchGapsRequest",
     "ResearchGapsResponse",

@@ -452,3 +452,25 @@ class ResearchGapsResponse:
         }
 
 
+# Re-export RAG contracts for external consumers of the API package
+from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
+
+__all__ = [
+    "AttributedSource",
+    "DocumentIngestResponse",
+    "PaperAnalysisRequest",
+    "PaperAnalysisResponse",
+    "PaperComparisonRequest",
+    "PaperComparisonResponse",
+    "RAGRequest",
+    "RAGResponse",
+    "ResearchGapsRequest",
+    "ResearchGapsResponse",
+    "ResearchRequest",
+    "ResearchResponse",
+    "ResearchVerifyRequest",
+    "ResearchVerifyResponse",
+]
+
+
+
