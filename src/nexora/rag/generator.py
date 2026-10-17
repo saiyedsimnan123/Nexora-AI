@@ -81,13 +81,30 @@ class DeterministicMockGenerator:
     def model_name(self) -> str:
         return self._model_name
 
-    def _extract_core_sentence(self, text: str) -> str:
-        """Extract the most substantive sentence from evidence text."""
-        # Split on sentence boundaries
+    def _extract_core_sentence(self, text: str, query: str = "") -> str:
+        """Extract the most substantive and query-relevant sentence from evidence text."""
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
         if not sentences:
             return text.strip()
-        # Return first complete sentence that contains substantive research content
+
+        if query:
+            stopwords = {
+                "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
+                "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
+            }
+            query_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
+            if query_words:
+                best_sentence = sentences[0]
+                best_score = -1
+                for s in sentences:
+                    s_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s.lower()))
+                    overlap = len(query_words & s_words)
+                    if overlap > best_score:
+                        best_score = overlap
+                        best_sentence = s
+                if best_score > 0:
+                    return best_sentence
+
         return sentences[0]
 
     def generate(
@@ -114,13 +131,44 @@ class DeterministicMockGenerator:
                 usage={"prompt_tokens": 10, "completion_tokens": 18, "total_tokens": 28},
             )
 
+        # Select active items: always include top retrieved candidate, plus other query-relevant candidates
+        stopwords = {
+            "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
+            "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
+        }
+        query_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
+
+        if query_words and len(context.items) > 1:
+            scored_candidates: list[tuple[int, int, EvidenceItem]] = []
+            for rank, item in enumerate(context.items):
+                item_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", (item.text + " " + (item.metadata.get("title") or "")).lower()))
+                overlap = len(query_words & item_words)
+                scored_candidates.append((overlap, rank, item))
+
+            # Always preserve the top retrieved candidate
+            selected = [context.items[0]]
+            selected_ids = {context.items[0].chunk_id}
+
+            # Append candidates with substantial query overlap
+            max_overlap = max(c[0] for c in scored_candidates)
+            threshold = max(2, max_overlap // 2) if max_overlap >= 2 else 1
+
+            for overlap, rank, item in scored_candidates[1:]:
+                if overlap >= threshold and item.chunk_id not in selected_ids:
+                    selected.append(item)
+                    selected_ids.add(item.chunk_id)
+                if len(selected) >= 3:
+                    break
+
+            active_items = selected
+        else:
+            active_items = context.items[:3]
+
         # Synthesize grounded answer citing retrieved evidence items
         statements: list[str] = []
-        # Use up to top 3 evidence items
-        active_items = context.items[:3]
         for item in active_items:
             paper_title = item.metadata.get("title") or item.document_id
-            core_finding = self._extract_core_sentence(item.text)
+            core_finding = self._extract_core_sentence(item.text, query)
             statements.append(f"According to {paper_title} {item.label}, {core_finding}")
 
         synthesized_text = " ".join(statements)
@@ -136,6 +184,7 @@ class DeterministicMockGenerator:
                 "total_tokens": total_words + 50,
             },
         )
+
 
 
 class LLMAnswerGenerator:

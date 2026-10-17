@@ -305,3 +305,28 @@ def test_openapi_schema_documents_rag_endpoint():
     assert "summary" in operation
     assert "requestBody" in operation
     assert "200" in operation["responses"]
+
+
+def test_rag_query_lora_trainable_parameters(offline_client):
+    """End-to-end verification of 'How does LoRA reduce trainable parameters?'."""
+    payload = {"query": "How does LoRA reduce trainable parameters?"}
+    response = offline_client.post(RAG_URL, json=payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["is_mock"] is True
+    assert data["is_grounded"] is True
+    assert data["model"] == "offline-deterministic-mock-v1"
+    assert "LoRA" in data["answer"]
+    assert "trainable parameters" in data["answer"].lower()
+
+    # Citations must strictly refer to real retrieved sources
+    cited = data["cited_sources"]
+    assert len(cited) >= 1
+    retrieved_chunk_ids = {s["chunk_id"] for s in data["sources"]}
+    for c in cited:
+        assert c["chunk_id"] in retrieved_chunk_ids
+        assert c["label"] in data["answer"]
+        assert "lora" in c["paper_title"].lower()
+
