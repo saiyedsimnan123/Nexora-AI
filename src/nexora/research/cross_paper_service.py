@@ -34,6 +34,21 @@ def _normalize_dataset_tokens(text: str) -> set[str]:
     return tokens - stopwords
 
 
+def _has_unsupported_numerical_claims(summary: str, sources: list[MatrixEvidenceSource]) -> bool:
+    """Detect if specific numerical scores in summary are completely missing from cited sources."""
+    if not sources or not summary:
+        return False
+    claimed_numbers = set(re.findall(r"\b\d+(?:\.\d+)?(?:%|x)?\b", summary.lower()))
+    if not claimed_numbers:
+        return False
+    combined_source_text = " ".join(s.text_excerpt.lower() for s in sources)
+    unsupported = [
+        num for num in claimed_numbers
+        if num.rstrip("%x") not in combined_source_text
+    ]
+    return len(unsupported) > 0 and len(unsupported) == len(claimed_numbers)
+
+
 def evaluate_cross_paper_conclusion(
     parsed_conclusion: str,
     parsed_reasoning: str,
@@ -64,7 +79,7 @@ def evaluate_cross_paper_conclusion(
     # 3. Check results dimension reporting
     results_comp = matrix.get("results")
     if results_comp:
-        reported_results = [pid for pid, fld in results_comp.per_paper.items() if fld.status == "reported"]
+        reported_results = [pid for pid, fld in results_comp.per_paper.items() if fld.status != "not_reported"]
         if not reported_results:
             return (
                 ConclusionClassification.INSUFFICIENT_EVIDENCE.value,
@@ -87,16 +102,24 @@ def evaluate_cross_paper_conclusion(
     if comparability_comp:
         comparability_text += f"{comparability_comp.comparison_summary} " + " ".join(comparability_comp.key_differences)
 
+    incomparable_indicators = (
+        "incomparable",
+        "cannot be directly compared",
+        "disparate benchmark",
+        "non-overlapping",
+        "different evaluation",
+        "completely different",
+        "different protocol",
+        "different metric definition",
+        "incompatible splits",
+        "different prompt format",
+        "disparate datasets",
+        "non-comparable",
+    )
+
     is_explicitly_incomparable = (
         parsed_comparability in ("incomparable", "disparate", "not_comparable")
-        or any(phrase in comparability_text.lower() for phrase in (
-            "incomparable",
-            "cannot be directly compared",
-            "disparate benchmark",
-            "non-overlapping",
-            "different evaluation",
-            "completely different",
-        ))
+        or any(phrase in comparability_text.lower() for phrase in incomparable_indicators)
     )
 
     # Check for disjoint datasets if reported
@@ -127,23 +150,102 @@ def evaluate_cross_paper_conclusion(
                 effective_comparability,
             )
 
-    # 5. Check for conflicting evidence / trade-offs
+    # 5. Check for experimental noise and statistically insignificant marginal improvements
     combined_results_text = ""
     if results_comp:
         combined_results_text += f"{results_comp.comparison_summary} " + " ".join(results_comp.key_differences)
+        for fld in results_comp.per_paper.values():
+            combined_results_text += " " + fld.summary
+
+    # Strip negated conflict and noise phrases to prevent false-positive keyword triggers
+    def _strip_negated_phrases(txt: str) -> str:
+        t = re.sub(
+            r"\b(?:no|without|zero|neither|nor|lack\s+of)\s+[^,.;:]*?\b(?:conflic\w*|contradic\w*|regress\w*|trade-?offs?)(?:\s+(?:conflic\w*|contradic\w*|regress\w*|trade-?offs?))*",
+            "",
+            txt,
+            flags=re.IGNORECASE,
+        )
+        t = re.sub(
+            r"\b(?:beyond|exceeds?|not|no|without)\s+[^,.;:]*?\b(?:experimental\s+noise|margin\s+of\s+error)",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+        return t
+
+    cleaned_results_text = _strip_negated_phrases(combined_results_text).lower()
+    cleaned_reasoning_text = _strip_negated_phrases(parsed_reasoning).lower()
+
+    noise_indicators = (
+        "experimental noise",
+        "margin of error",
+        "statistically insignificant",
+        "statistically insignificant difference",
+        "negligible difference",
+        "marginal difference",
+        "marginal improvement",
+        "marginal gain",
+        "within noise",
+        "no statistical significance",
+        "single run without variance",
+        "insufficient statistical power",
+    )
+    is_noise_level = any(
+        ind in cleaned_results_text or ind in cleaned_reasoning_text for ind in noise_indicators
+    )
+    if is_noise_level and parsed_conclusion == ConclusionClassification.DEMONSTRATED_IMPROVEMENT.value:
+        return (
+            ConclusionClassification.LIMITED_EVIDENCE.value,
+            "Corrected from model output: Reported performance differences are within experimental noise or lack statistical significance; cannot establish demonstrated improvement without verified, significant gains.",
+            effective_comparability,
+        )
+
+    # 6. Check for unsupported numerical claims exceeding cited evidence
+    has_unsupported_claims = False
+    if results_comp:
+        for fld in results_comp.per_paper.values():
+            if fld.details.get("unsupported_numerical_claims"):
+                has_unsupported_claims = True
+                break
+    if has_unsupported_claims and parsed_conclusion == ConclusionClassification.DEMONSTRATED_IMPROVEMENT.value:
+        return (
+            ConclusionClassification.LIMITED_EVIDENCE.value,
+            "Corrected from model output: Quantitative claims exceed the verified evidence in cited excerpts; cannot substantiate demonstrated improvement.",
+            effective_comparability,
+        )
+
+    # 7. Check for conflicting evidence, trade-offs, or split wins across datasets
     conflict_indicators = (
         "conflict",
         "contradict",
+        "contradictory",
+        "opposing",
         "trade-off",
+        "tradeoff",
         "regression",
         "regresses",
         "worse",
         "degradation",
         "discrepancy",
         "mixed result",
+        "mixed performance",
+        "split win",
+        "split result",
+        "wins on",
+        "trails on",
+        "underperforms",
+        "lower accuracy",
+        "latency regression",
+        "latency overhead",
+        "resource overhead",
+        "memory overhead",
+        "compute overhead",
+        "costly",
+        "dataset-dependent",
+        "inconsistent across datasets",
     )
     has_conflict = parsed_conclusion == ConclusionClassification.CONFLICTING_EVIDENCE.value or any(
-        ind in combined_results_text.lower() or ind in parsed_reasoning.lower() for ind in conflict_indicators
+        ind in cleaned_results_text or ind in cleaned_reasoning_text for ind in conflict_indicators
     )
 
     if has_conflict:
@@ -153,7 +255,7 @@ def evaluate_cross_paper_conclusion(
             effective_comparability,
         )
 
-    # 6. Normalize conclusion
+    # 8. Normalize conclusion
     if parsed_conclusion in VALID_CONCLUSIONS:
         return (parsed_conclusion, parsed_reasoning or "Comparative evidence synthesized across reported paper dimensions.", effective_comparability)
 
@@ -384,10 +486,17 @@ class CrossPaperComparisonService:
 
         for pid in cleaned_ids:
             title, items = self._load_paper_evidence(pid, query=query)
-            # Strict isolation check: discard any items belonging to other papers
-            isolated_items = [
-                i for i in items if str(i.metadata.get("paper_id")) == pid
-            ]
+            # Strict isolation and deduplication: discard duplicates and items belonging to other papers
+            seen_chunk_ids: set[str] = set()
+            isolated_items: list[EvidenceItem] = []
+            for i in items:
+                if str(i.metadata.get("paper_id")) != pid:
+                    continue
+                if i.chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(i.chunk_id)
+                isolated_items.append(i)
+
             per_paper_contexts[pid] = EvidenceContext(
                 query=query or f"Comparison of paper {pid}",
                 items=isolated_items,
@@ -537,6 +646,9 @@ class CrossPaperComparisonService:
                         status = "not_reported"
                     elif len(sources) == 0:
                         status = "uncertain"
+                    elif dim in ("results", "metrics") and _has_unsupported_numerical_claims(summary, sources):
+                        status = "uncertain"
+                        details["unsupported_numerical_claims"] = True
 
                 per_paper_findings[pid] = MatrixPaperFinding(
                     paper_id=pid,
