@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import io
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -67,7 +68,122 @@ VALID_PDF_BYTES = b"%PDF-1.5\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<
 
 class FakeResearchService:
     def ask(self, request: Any) -> Any:
-        return {}
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "text": "Fake research answer",
+                "query": request.query if hasattr(request, "query") else "test",
+                "model": "fake-model",
+                "evidence_count": 1,
+            }
+        )
+
+    def verify(self, request: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "query": request.query,
+                "text": request.text,
+                "model": "fake-model",
+                "evidence_count": 1,
+                "verification": {"status": "verified"},
+            }
+        )
+
+
+class FakeAnalysisService:
+    def analyze_paper(self, paper_id: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "paper_id": str(paper_id),
+                "title": "Fake Paper Title",
+                "problem_and_objectives": {"summary": "Objectives"},
+                "methodology_and_algorithms": {"summary": "Methodology"},
+                "models_and_datasets": {"summary": "Dataset"},
+                "experiments_and_metrics": {"summary": "Experiments"},
+                "results_and_findings": {"summary": "Results"},
+                "limitations": {"summary": "Limitations"},
+                "future_work": {"summary": "Future work"},
+                "evidence_count": 1,
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+
+class FakeComparisonService:
+    def compare_papers(self, paper_ids: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "paper_ids": [str(p) for p in paper_ids],
+                "dimensions": {"methods": {"claim": "c"}},
+                "overall_summary": "Comparison summary",
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+    def compare_cross_paper(self, paper_ids: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "paper_ids": [str(p) for p in paper_ids],
+                "paper_titles": {str(p): f"Title {p}" for p in paper_ids},
+                "matrix": {"methods": {}},
+                "conclusion": "Demonstrated improvement",
+                "conclusion_reasoning": "Strong evidence",
+                "comparability_status": "Comparable",
+                "overall_summary": "Overall summary",
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+
+class FakeGapService:
+    def discover_gaps_for_collection(self, collection_id: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "paper_ids": [],
+                "collection_id": str(collection_id),
+                "documented_gaps": [],
+                "inferred_gaps": [],
+                "total_gaps_count": 0,
+                "summary": "Gaps summary",
+                "limitations": [],
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+    def discover_gaps_for_papers(self, paper_ids: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "paper_ids": [str(p) for p in paper_ids],
+                "collection_id": None,
+                "documented_gaps": [],
+                "inferred_gaps": [],
+                "total_gaps_count": 0,
+                "summary": "Gaps summary",
+                "limitations": [],
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+
+class FakeRAGPipeline:
+    def answer(self, request: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "answer": "Grounded RAG answer",
+                "query": request,
+                "model": "fake-rag",
+                "evidence_count": 1,
+                "sources": [],
+                "retrieval_mode": "hybrid",
+                "is_grounded": True,
+                "is_mock": False,
+                "status": "success",
+            }
+        )
 
 
 class FakeProvider:
@@ -239,7 +355,15 @@ def auth_test_db():
     return context
 
 
-def _build_auth_app(context, provider=None, downloader=None):
+def _build_auth_app(
+    context,
+    provider=None,
+    downloader=None,
+    analysis_service=None,
+    comparison_service=None,
+    gap_service=None,
+    rag_pipeline=None,
+):
     sf = context["session_factory"]
     paper_meta = ScholarlyPaperMetadata(
         external_id="2106.09685",
@@ -264,8 +388,12 @@ def _build_auth_app(context, provider=None, downloader=None):
 
     app = create_app(
         FakeResearchService(),
+        rag_pipeline=rag_pipeline or FakeRAGPipeline(),
         discovery_service=discovery_service,
         ingestion_service=ingestion,
+        analysis_service=analysis_service or FakeAnalysisService(),
+        comparison_service=comparison_service or FakeComparisonService(),
+        gap_service=gap_service or FakeGapService(),
         session_factory=sf,
         auth_service=auth_service,
         enforce_auth=True,
@@ -694,3 +822,339 @@ def test_api_keys_table_crud(auth_test_db):
 
         # Unrevoked query returns None
         assert repo.get_active_by_raw_key(raw_key) is None
+
+
+# ---------------------------------------------------------------------------
+# 6. Audit Regression Tests: Analysis, Comparison, Gaps, Verify & Key Security
+# ---------------------------------------------------------------------------
+
+def test_cross_user_paper_analyze_rejected_with_403(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    paper_a_id = auth_test_db["paper_a1_id"]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post("/api/v1/papers/analyze", json={"paper_id": str(paper_a_id)})
+    assert resp_unauth.status_code == 401
+
+    # 2. User B tries to analyze User A's paper via body endpoint -> 403 Forbidden
+    resp_cross = client.post(
+        "/api/v1/papers/analyze",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"paper_id": str(paper_a_id)},
+    )
+    assert resp_cross.status_code == 403
+    assert resp_cross.json()["error"]["code"] == "forbidden"
+
+    # 3. User B tries to analyze User A's paper via path endpoint -> 403 Forbidden
+    resp_cross_path = client.post(
+        f"/api/v1/papers/{paper_a_id}/analyze",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp_cross_path.status_code == 403
+    assert resp_cross_path.json()["error"]["code"] == "forbidden"
+
+    # 4. User A (owner) analyzes their paper -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/papers/analyze",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"paper_id": str(paper_a_id)},
+    )
+    assert resp_owner.status_code == 200
+    assert resp_owner.json()["paper_id"] == str(paper_a_id)
+
+
+def test_cross_user_paper_compare_rejected_with_403(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    sf = auth_test_db["session_factory"]
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    col_a_id = auth_test_db["col_a1_id"]
+    paper_a1_id = auth_test_db["paper_a1_id"]
+
+    # Create second paper for User A so multi-paper comparison has >= 2 papers
+    with sf() as session:
+        paper_repo = PaperRepository(session)
+        paper_a2 = paper_repo.create(
+            collection_id=col_a_id,
+            title="Paper A2 Title",
+            external_id="seeded-paper-002",
+        )
+        session.commit()
+        paper_a2_id = paper_a2.id
+
+    paper_pair = [str(paper_a1_id), str(paper_a2_id)]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post("/api/v1/papers/compare", json={"paper_ids": paper_pair})
+    assert resp_unauth.status_code == 401
+
+    resp_unauth_research = client.post(
+        "/api/v1/research/compare", json={"paper_ids": paper_pair, "query": "compare"}
+    )
+    assert resp_unauth_research.status_code == 401
+
+    # 2. User B tries to compare User A's papers -> 403 Forbidden
+    resp_cross = client.post(
+        "/api/v1/papers/compare",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"paper_ids": paper_pair},
+    )
+    assert resp_cross.status_code == 403
+    assert resp_cross.json()["error"]["code"] == "forbidden"
+
+    # 3. User B tries to compare User A's papers via research/compare -> 403 Forbidden
+    resp_cross_research = client.post(
+        "/api/v1/research/compare",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"paper_ids": paper_pair, "query": "compare models"},
+    )
+    assert resp_cross_research.status_code == 403
+    assert resp_cross_research.json()["error"]["code"] == "forbidden"
+
+    # 4. User A compares own papers -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/papers/compare",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"paper_ids": paper_pair},
+    )
+    assert resp_owner.status_code == 200
+
+    resp_owner_research = client.post(
+        "/api/v1/research/compare",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"paper_ids": paper_pair, "query": "compare models"},
+    )
+    assert resp_owner_research.status_code == 200
+
+
+def test_cross_user_research_gaps_rejected_with_403(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    col_a_id = auth_test_db["col_a1_id"]
+    paper_a_id = auth_test_db["paper_a1_id"]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post("/api/v1/research/gaps", json={"collection_id": str(col_a_id)})
+    assert resp_unauth.status_code == 401
+
+    # 2. User B tries to discover gaps for User A's collection -> 403 Forbidden
+    resp_cross_col = client.post(
+        "/api/v1/research/gaps",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_cross_col.status_code == 403
+    assert resp_cross_col.json()["error"]["code"] == "forbidden"
+
+    # 3. User B tries to discover gaps for User A's paper -> 403 Forbidden
+    resp_cross_paper = client.post(
+        "/api/v1/research/gaps",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"paper_ids": [str(paper_a_id)]},
+    )
+    assert resp_cross_paper.status_code == 403
+    assert resp_cross_paper.json()["error"]["code"] == "forbidden"
+
+    # 4. User B tries via path endpoint /papers/{paper_id}/gaps -> 403 Forbidden
+    resp_cross_path = client.post(
+        f"/api/v1/papers/{paper_a_id}/gaps",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp_cross_path.status_code == 403
+
+    # 5. User A (owner) succeeds -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/research/gaps",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_owner.status_code == 200
+
+
+def test_cross_user_research_verify_rejected_with_403(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    paper_a_id = auth_test_db["paper_a1_id"]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post(
+        "/api/v1/research/verify",
+        json={"query": "test query", "text": "test text", "expected_paper_id": str(paper_a_id)},
+    )
+    assert resp_unauth.status_code == 401
+
+    # 2. User B verifies with User A's paper as expected_paper_id -> 403 Forbidden
+    resp_cross = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"query": "test query", "text": "test text", "expected_paper_id": str(paper_a_id)},
+    )
+    assert resp_cross.status_code == 403
+    assert resp_cross.json()["error"]["code"] == "forbidden"
+
+    # 3. User A verifies own paper -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"query": "test query", "text": "test text", "expected_paper_id": str(paper_a_id)},
+    )
+    assert resp_owner.status_code == 200
+
+
+def test_research_and_rag_query_require_auth_when_enforced(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+
+    # 1. /research requires auth
+    resp_unauth_res = client.post("/api/v1/research", json={"query": "test query"})
+    assert resp_unauth_res.status_code == 401
+
+    resp_auth_res = client.post(
+        "/api/v1/research",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"query": "test query"},
+    )
+    assert resp_auth_res.status_code == 200
+
+    # 2. /research/query requires auth
+    resp_unauth_rag = client.post("/api/v1/research/query", json={"query": "test query"})
+    assert resp_unauth_rag.status_code == 401
+
+    resp_auth_rag = client.post(
+        "/api/v1/research/query",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"query": "test query"},
+    )
+    assert resp_auth_rag.status_code == 200
+
+    # 3. /rag/query alias requires auth
+    resp_unauth_alias = client.post("/api/v1/rag/query", json={"query": "test query"})
+    assert resp_unauth_alias.status_code == 401
+
+    resp_auth_alias = client.post(
+        "/api/v1/rag/query",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"query": "test query"},
+    )
+    assert resp_auth_alias.status_code == 200
+
+
+def test_immediate_revocation_takes_effect_on_next_request(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    sf = auth_test_db["session_factory"]
+    token_a = auth_test_db["token_a"]
+    key_a_id = auth_test_db["key_a_id"]
+    col_a_id = auth_test_db["col_a1_id"]
+
+    # First request works
+    resp_ok = client.get(
+        f"/api/v1/collections/{col_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp_ok.status_code == 200
+
+    # Revoke key immediately in database
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        assert repo.revoke(key_a_id) is True
+        session.commit()
+
+    # Next immediate request with same key is rejected with 401
+    resp_revoked = client.get(
+        f"/api/v1/collections/{col_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp_revoked.status_code == 401
+    assert resp_revoked.json()["error"]["code"] == "unauthorized"
+
+
+def test_touch_last_used_throttling_avoids_unnecessary_db_writes(auth_test_db):
+    client, _ = _build_auth_app(auth_test_db)
+    sf = auth_test_db["session_factory"]
+    token_a = auth_test_db["token_a"]
+    key_a_id = auth_test_db["key_a_id"]
+    col_a_id = auth_test_db["col_a1_id"]
+
+    # 1. First request touches last_used_at
+    resp1 = client.get(
+        f"/api/v1/collections/{col_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp1.status_code == 200
+
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        key1 = repo.get_by_id(key_a_id)
+        assert key1.last_used_at is not None
+        first_timestamp = key1.last_used_at
+
+    # 2. Immediate second request within 60s does NOT rewrite/commit timestamp
+    resp2 = client.get(
+        f"/api/v1/collections/{col_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp2.status_code == 200
+
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        key2 = repo.get_by_id(key_a_id)
+        assert key2.last_used_at == first_timestamp
+
+    # 3. Simulate passage of time (> 60 seconds)
+    two_minutes_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120)
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        repo._update(key_a_id, last_used_at=two_minutes_ago)
+        session.commit()
+
+    # Next request touches last_used_at because > 60 seconds elapsed
+    resp3 = client.get(
+        f"/api/v1/collections/{col_a_id}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp3.status_code == 200
+
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        key3 = repo.get_by_id(key_a_id)
+        assert key3 is not None
+        last_val = key3.last_used_at
+        if last_val.tzinfo is None:
+            last_val = last_val.replace(tzinfo=datetime.timezone.utc)
+        assert last_val > two_minutes_ago
+
+
+def test_bootstrap_safety_against_accidental_duplicate_keys(auth_test_db):
+    sf = auth_test_db["session_factory"]
+    email = "operator_safety@example.com"
+
+    # 1. Initial bootstrap succeeds
+    user, ws, key1, token1 = bootstrap_user_and_key(sf, email=email)
+    assert token1.startswith("nx_live_")
+
+    # 2. Repeated bootstrap without --rotate or --allow-existing raises ValueError
+    with pytest.raises(ValueError, match="already exists with 1 active API key"):
+        bootstrap_user_and_key(sf, email=email)
+
+    # 3. Repeated bootstrap with allow_existing=True provisions a second key without revoking
+    user, ws, key2, token2 = bootstrap_user_and_key(sf, email=email, allow_existing=True)
+    assert token2 != token1
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        assert repo.get_active_by_raw_key(token1) is not None
+        assert repo.get_active_by_raw_key(token2) is not None
+
+    # 4. Repeated bootstrap with rotate=True revokes all previous keys and issues fresh one
+    user, ws, key3, token3 = bootstrap_user_and_key(sf, email=email, rotate=True)
+    assert token3 != token2
+    with sf() as session:
+        repo = ApiKeyRepository(session)
+        # Previous keys revoked
+        assert repo.get_active_by_raw_key(token1) is None
+        assert repo.get_active_by_raw_key(token2) is None
+        # New key active
+        assert repo.get_active_by_raw_key(token3) is not None

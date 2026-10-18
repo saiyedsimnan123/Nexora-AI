@@ -28,8 +28,15 @@ def bootstrap_user_and_key(
     workspace_name: str = "Default Workspace",
     key_name: str = "Initial API Key",
     expires_at: datetime.datetime | None = None,
+    rotate: bool = False,
+    allow_existing: bool = False,
 ) -> tuple[User, Workspace, ApiKey, str]:
     """Bootstrap a user, their primary workspace, and a new API key.
+
+    Safety:
+        If user already exists and has active keys, this function refuses to silently
+        generate additional keys unless `rotate=True` (revokes previous keys) or
+        `allow_existing=True` (keeps existing keys and adds a new one).
 
     Returns:
         tuple of (User, Workspace, ApiKey, raw_secret_token).
@@ -42,7 +49,30 @@ def bootstrap_user_and_key(
     with session_factory() as session:
         user_repo = UserRepository(session)
         user = user_repo.get_by_email(clean_email)
-        if user is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        key_repo = ApiKeyRepository(session)
+
+        if user is not None:
+            existing_keys = key_repo.list_by_user_id(user.id)
+            active_keys = [
+                k for k in existing_keys
+                if k.revoked_at is None
+                and (
+                    k.expires_at is None
+                    or (k.expires_at.replace(tzinfo=datetime.timezone.utc) if k.expires_at.tzinfo is None else k.expires_at) > now
+                )
+            ]
+            if active_keys and not rotate and not allow_existing:
+                raise ValueError(
+                    f"User '{clean_email}' already exists with {len(active_keys)} active API key(s). "
+                    "Specify rotate=True (--rotate) to revoke existing keys and issue a fresh one, "
+                    "or allow_existing=True (--allow-existing) to provision an additional key."
+                )
+            if rotate and active_keys:
+                for old_key in active_keys:
+                    key_repo.revoke(old_key.id)
+                session.flush()
+        else:
             user = user_repo.create(email=clean_email)
             session.flush()
 
@@ -54,7 +84,6 @@ def bootstrap_user_and_key(
             workspace = ws_repo.create(user_id=user.id, name=workspace_name)
             session.flush()
 
-        key_repo = ApiKeyRepository(session)
         api_key, raw_secret = key_repo.generate_key(
             user_id=user.id,
             name=key_name,
@@ -76,6 +105,16 @@ def main(args: list[str] | None = None) -> int:
     parser.add_argument("--email", required=True, help="User email address")
     parser.add_argument("--workspace", default="Default Workspace", help="Workspace name")
     parser.add_argument("--key-name", default="Admin API Key", help="API key descriptor")
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Revoke existing active keys and issue a fresh one",
+    )
+    parser.add_argument(
+        "--allow-existing",
+        action="store_true",
+        help="Allow provisioning an additional key for an existing user without revoking old keys",
+    )
     parsed = parser.parse_args(args)
 
     db_config = DatabaseConfig.from_env()
@@ -88,6 +127,8 @@ def main(args: list[str] | None = None) -> int:
             email=parsed.email,
             workspace_name=parsed.workspace,
             key_name=parsed.key_name,
+            rotate=parsed.rotate,
+            allow_existing=parsed.allow_existing,
         )
         print("=" * 60)
         print("Nexora AI Credential Bootstrapped Successfully")

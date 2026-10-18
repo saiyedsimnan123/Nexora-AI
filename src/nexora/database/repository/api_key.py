@@ -59,6 +59,10 @@ class ApiKeyRepository(BaseRepository[ApiKey]):
         if record is None:
             return None
 
+        # Timing-safe double check against hash
+        if not secrets.compare_digest(record.key_hash, key_hash):
+            return None
+
         # Check revocation
         if record.revoked_at is not None:
             return None

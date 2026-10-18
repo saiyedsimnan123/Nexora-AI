@@ -515,15 +515,17 @@ def health() -> dict[str, str]:
 @v1_router.post("/research", response_model=ResearchResponseBody)
 def research(
     body: ResearchRequestBody,
+    request: Request,
     service: ResearchApplicationService = Depends(get_research_service),
+    current_user: Any = Depends(get_current_user),
 ) -> ResearchResponseBody:
-    request = ResearchRequest(
+    request_obj = ResearchRequest(
         query=body.query,
         model=body.model,
         temperature=body.temperature,
         max_output_tokens=body.max_output_tokens,
     )
-    return ResearchResponseBody(**service.ask(request).to_dict())
+    return ResearchResponseBody(**service.ask(request_obj).to_dict())
 
 
 @v1_router.post(
@@ -534,7 +536,9 @@ def research(
 )
 def research_rag_query(
     body: RAGQueryRequestBody,
+    request: Request,
     pipeline: Any = Depends(get_rag_pipeline),
+    current_user: Any = Depends(get_current_user),
 ) -> RAGQueryResponseBody:
     """Answer a research question using the grounded RAG pipeline."""
     if not body.query.strip():
@@ -577,9 +581,11 @@ def research_rag_query(
 )
 def rag_query_alias(
     body: RAGQueryRequestBody,
+    request: Request,
     pipeline: Any = Depends(get_rag_pipeline),
+    current_user: Any = Depends(get_current_user),
 ) -> RAGQueryResponseBody:
-    return research_rag_query(body, pipeline=pipeline)
+    return research_rag_query(body, request=request, pipeline=pipeline, current_user=current_user)
 
 
 @v1_router.post(
@@ -591,8 +597,14 @@ def rag_query_alias(
 )
 def research_verify_endpoint(
     body: ResearchVerifyRequestBody,
+    request: Request,
     service: ResearchApplicationService = Depends(get_research_service),
+    current_user: Any = Depends(get_current_user),
 ) -> ResearchVerifyResponseBody:
+    if current_user is not None and body.expected_paper_id is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(body.expected_paper_id, current_user.id)
     req = ResearchVerifyRequest(
         query=body.query,
         text=body.text,
@@ -614,8 +626,14 @@ def research_verify_endpoint(
 )
 def analyze_paper_endpoint(
     body: PaperAnalysisRequestBody,
+    request: Request,
     service: Any = Depends(get_analysis_service),
+    current_user: Any = Depends(get_current_user),
 ) -> PaperAnalysisResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(body.paper_id, current_user.id)
     req = PaperAnalysisRequest(
         paper_id=body.paper_id,
         model=body.model,
@@ -664,8 +682,15 @@ def analyze_paper_by_id_endpoint(
 )
 def compare_papers_endpoint(
     body: PaperComparisonRequestBody,
+    request: Request,
     service: Any = Depends(get_comparison_service),
+    current_user: Any = Depends(get_current_user),
 ) -> PaperComparisonResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            for pid in body.paper_ids:
+                auth_service.verify_paper_ownership(pid, current_user.id)
     req = PaperComparisonRequest(
         paper_ids=body.paper_ids,
         model=body.model,
@@ -696,8 +721,15 @@ def compare_papers_endpoint(
 )
 def research_compare_endpoint(
     body: ResearchCompareRequestBody,
+    request: Request,
     service: Any = Depends(get_comparison_service),
+    current_user: Any = Depends(get_current_user),
 ) -> ResearchCompareResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            for pid in body.paper_ids:
+                auth_service.verify_paper_ownership(pid, current_user.id)
     req = ResearchCompareRequest(
         paper_ids=body.paper_ids,
         query=body.query,
@@ -736,8 +768,18 @@ def research_compare_endpoint(
 )
 def discover_research_gaps_endpoint(
     body: ResearchGapsRequestBody,
+    request: Request,
     service: Any = Depends(get_gap_service),
+    current_user: Any = Depends(get_current_user),
 ) -> ResearchGapsResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            if body.collection_id is not None:
+                auth_service.verify_collection_ownership(body.collection_id, current_user.id)
+            if body.paper_ids:
+                for pid in body.paper_ids:
+                    auth_service.verify_paper_ownership(pid, current_user.id)
     req = ResearchGapsRequest(
         paper_ids=body.paper_ids,
         collection_id=body.collection_id,

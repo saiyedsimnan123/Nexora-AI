@@ -7,6 +7,7 @@ ownership on protected operations.
 
 from __future__ import annotations
 
+import datetime
 from typing import Any
 from uuid import UUID
 
@@ -65,9 +66,16 @@ class AuthenticationService:
             if user is None:
                 raise AuthenticationError("User associated with this credential no longer exists.")
 
-            # Touch last_used_at timestamp
-            key_repo.touch_last_used(api_key.id)
-            session.commit()
+            # Avoid unnecessary database writes on every request:
+            # Only update last_used_at if it is None or hasn't been updated in >= 60 seconds.
+            now = datetime.datetime.now(datetime.timezone.utc)
+            last_used = api_key.last_used_at
+            if last_used is not None and last_used.tzinfo is None:
+                last_used = last_used.replace(tzinfo=datetime.timezone.utc)
+
+            if last_used is None or (now - last_used).total_seconds() >= 60:
+                key_repo.touch_last_used(api_key.id)
+                session.commit()
 
             return AuthenticatedUser(
                 id=user.id,
@@ -113,6 +121,7 @@ class AuthenticationService:
         self,
         collection_id: UUID | str,
         user_id: UUID,
+        session: Any = None,
     ) -> tuple[Collection, Workspace]:
         """Verify that collection_id exists and is owned by user_id through its workspace.
 
@@ -126,25 +135,30 @@ class AuthenticationService:
         except (ValueError, AttributeError):
             raise InvalidRequestError("Invalid collection_id: must be a valid UUID.")
 
-        with self._session_factory() as session:
-            col_repo = CollectionRepository(session)
+        def _verify(sess: Any) -> tuple[Collection, Workspace]:
+            col_repo = CollectionRepository(sess)
             collection = col_repo.get_by_id(col_uuid)
             if collection is None:
                 raise DocumentNotFoundError(f"Collection with id {col_uuid} not found.")
 
-            ws_repo = WorkspaceRepository(session)
+            ws_repo = WorkspaceRepository(sess)
             workspace = ws_repo.get_by_id(collection.workspace_id)
             if workspace is None or workspace.user_id != user_id:
-                raise ForbiddenError(
-                    f"Access to collection {col_uuid} is forbidden."
-                )
+                raise ForbiddenError(f"Access to collection {col_uuid} is forbidden.")
 
             return collection, workspace
+
+        if session is not None:
+            return _verify(session)
+
+        with self._session_factory() as sess:
+            return _verify(sess)
 
     def verify_paper_ownership(
         self,
         paper_id: UUID | str,
         user_id: UUID,
+        session: Any = None,
     ) -> tuple[Paper, Collection, Workspace]:
         """Verify that paper_id exists and is owned by user_id.
 
@@ -158,19 +172,26 @@ class AuthenticationService:
         except (ValueError, AttributeError):
             raise InvalidRequestError("Invalid paper_id: must be a valid UUID.")
 
-        with self._session_factory() as session:
-            paper_repo = PaperRepository(session)
+        def _verify(sess: Any) -> tuple[Paper, Collection, Workspace]:
+            paper_repo = PaperRepository(sess)
             paper = paper_repo.get_by_id(paper_uuid)
             if paper is None:
                 raise DocumentNotFoundError(f"Paper with id {paper_uuid} not found.")
 
-            collection, workspace = self.verify_collection_ownership(paper.collection_id, user_id)
+            collection, workspace = self.verify_collection_ownership(paper.collection_id, user_id, session=sess)
             return paper, collection, workspace
+
+        if session is not None:
+            return _verify(session)
+
+        with self._session_factory() as sess:
+            return _verify(sess)
 
     def verify_document_ownership(
         self,
         document_id: UUID | str,
         user_id: UUID,
+        session: Any = None,
     ) -> tuple[Document, Paper, Collection, Workspace]:
         """Verify that document_id exists and is owned by user_id.
 
@@ -184,19 +205,26 @@ class AuthenticationService:
         except (ValueError, AttributeError):
             raise InvalidRequestError("Invalid document_id: must be a valid UUID.")
 
-        with self._session_factory() as session:
-            doc_repo = DocumentRepository(session)
+        def _verify(sess: Any) -> tuple[Document, Paper, Collection, Workspace]:
+            doc_repo = DocumentRepository(sess)
             document = doc_repo.get_by_id(doc_uuid)
             if document is None:
                 raise DocumentNotFoundError(f"Document with id {doc_uuid} not found.")
 
-            paper, collection, workspace = self.verify_paper_ownership(document.paper_id, user_id)
+            paper, collection, workspace = self.verify_paper_ownership(document.paper_id, user_id, session=sess)
             return document, paper, collection, workspace
+
+        if session is not None:
+            return _verify(session)
+
+        with self._session_factory() as sess:
+            return _verify(sess)
 
     def verify_workspace_ownership(
         self,
         workspace_id: UUID | str,
         user_id: UUID,
+        session: Any = None,
     ) -> Workspace:
         """Verify that workspace_id exists and is owned by user_id.
 
@@ -210,8 +238,8 @@ class AuthenticationService:
         except (ValueError, AttributeError):
             raise InvalidRequestError("Invalid workspace_id: must be a valid UUID.")
 
-        with self._session_factory() as session:
-            ws_repo = WorkspaceRepository(session)
+        def _verify(sess: Any) -> Workspace:
+            ws_repo = WorkspaceRepository(sess)
             workspace = ws_repo.get_by_id(ws_uuid)
             if workspace is None:
                 raise DocumentNotFoundError(f"Workspace with id {ws_uuid} not found.")
@@ -220,3 +248,9 @@ class AuthenticationService:
                 raise ForbiddenError(f"Access to workspace {ws_uuid} is forbidden.")
 
             return workspace
+
+        if session is not None:
+            return _verify(session)
+
+        with self._session_factory() as sess:
+            return _verify(sess)
