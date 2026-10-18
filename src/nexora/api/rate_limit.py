@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from nexora.config.rate_limit import RateLimitConfig
+from nexora.config.rate_limit import RateLimitConfig, RateLimitConfigurationError
 
 
 class RateLimitStorage(Protocol):
@@ -186,6 +186,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     ) -> None:
         super().__init__(app)
         self.config = config
+        if config.enabled and config.backend == "redis" and storage is None:
+            raise RateLimitConfigurationError(
+                "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
+                "Pass a custom RateLimitStorage instance or set backend to 'memory'."
+            )
         self.storage = storage or InMemoryRateLimitStorage()
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Any]) -> Response:

@@ -5,7 +5,14 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from nexora.api.app import create_app
-from nexora.api.rate_limit import InMemoryRateLimitStorage, get_caller_identity, categorize_route
+from nexora.api.errors import InvalidConfigurationError
+from nexora.api.rate_limit import (
+    InMemoryRateLimitStorage,
+    RateLimitMiddleware,
+    RateLimitStorage,
+    categorize_route,
+    get_caller_identity,
+)
 from nexora.config.rate_limit import RateLimitConfig, RateLimitConfigurationError
 
 
@@ -327,3 +334,53 @@ def test_rate_limit_config_from_env():
     assert cfg.heavy_analysis_limit == 5
     assert cfg.discovery_search_limit == 15
     assert cfg.trusted_proxies == ("10.0.0.1", "10.0.0.2")
+
+
+def test_redis_backend_without_storage_fails_fast_in_middleware():
+    """Verify that instantiating RateLimitMiddleware with backend='redis' and no storage fails fast."""
+    cfg = RateLimitConfig(enabled=True, backend="redis")
+    with pytest.raises(RateLimitConfigurationError) as exc_info:
+        RateLimitMiddleware(app=lambda scope, rec, send: None, config=cfg, storage=None)
+
+    assert "no distributed ratelimitstorage backend was provided" in str(exc_info.value).lower()
+
+
+def test_redis_backend_without_storage_fails_fast_in_create_app():
+    """Verify that create_app with backend='redis' and no rate_limit_storage fails fast."""
+    cfg = RateLimitConfig(enabled=True, backend="redis")
+    with pytest.raises(InvalidConfigurationError) as exc_info:
+        create_app(
+            FakeResearchService(),
+            enforce_auth=False,
+            rate_limit_config=cfg,
+            rate_limit_storage=None,
+        )
+
+    assert "no distributed ratelimitstorage backend was provided" in str(exc_info.value).lower()
+
+
+def test_redis_backend_with_custom_storage_succeeds():
+    """Verify that configuring backend='redis' with a supplied RateLimitStorage succeeds."""
+    class CustomDistributedStorage:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def check_and_increment(self, key: str, limit: int, window_seconds: int):
+            self.calls.append((key, limit, window_seconds))
+            return True, limit - len(self.calls), 0
+
+    storage = CustomDistributedStorage()
+    cfg = RateLimitConfig(enabled=True, backend="redis", research_query_limit=10)
+    app = create_app(
+        FakeResearchService(),
+        enforce_auth=False,
+        rate_limit_config=cfg,
+        rate_limit_storage=storage,
+    )
+    client = TestClient(app)
+
+    resp = client.post("/api/v1/research", json={"query": "quantum computing"})
+    assert resp.status_code == 200
+    assert len(storage.calls) == 1
+    assert "research_query:" in storage.calls[0][0]
+    assert resp.headers.get("x-ratelimit-limit") == "10"

@@ -46,6 +46,12 @@ class RateLimitConfig:
       - discovery_import_limit: safe PDF downloading, parsing, and collection import.
       - document_ingest_limit: direct document file upload, parsing, and vector indexing.
       - default_limit: standard read/metadata queries.
+
+    Backends:
+      - "memory" (default): In-process sliding-window rate limiting. Note: In multi-worker
+        deployments, each worker tracks its own memory counters.
+      - "redis": Distributed rate limiting. Requires injecting an explicit RateLimitStorage
+        implementation into create_app or build_http_app.
     """
 
     enabled: bool = False

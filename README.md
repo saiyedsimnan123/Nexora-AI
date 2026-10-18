@@ -812,10 +812,56 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
 
 ### Error Handling & Safeguards
 - **`400 Bad Request`**: Returned for invalid UUIDs, less than 2 papers or duplicate paper IDs in comparison requests, or bounds violations (`code: "invalid_request"`).
-- **`404 Not Found`**: Returned if a requested paper UUID does not exist in relational persistence (`code: "not_found"`).
+- **`401 Unauthorized`**: Returned when `enforce_auth=True` and caller provides missing or invalid credentials (`code: "unauthorized"`).
+- **`403 Forbidden`**: Returned when attempting to access a workspace, collection, paper, or document owned by another user (`code: "forbidden"`).
+- **`404 Not Found`**: Returned if a requested paper or document UUID does not exist in relational persistence (`code: "not_found"`).
+- **`413 Payload Too Large`**: Returned when uploaded files or remote PDFs exceed the 50 MB size limit (`code: "file_too_large"`).
 - **`422 Unprocessable Entity`**: Returned by FastAPI validation for malformed JSON bodies or unsupported parameter types.
-- **`500 Internal Server Error`**: Wrapped application error envelopes (`analysis_failed`, `comparison_failed`) returned when an LLM provider fails, without exposing credentials, tracebacks, or private internal state.
+- **`429 Too Many Requests`**: Returned when inbound rate limits are exceeded, providing `Retry-After` and `X-RateLimit-*` headers (`code: "rate_limited"`).
+- **`500 Internal Server Error`**: Wrapped application error envelopes (`analysis_failed`, `comparison_failed`, `discovery_failed`) returned when upstream services fail, without exposing credentials, tracebacks, or private internal state.
+- **`502 Bad Gateway` / `504 Gateway Timeout`**: Returned for upstream scholarly provider network dropped connections or request timeouts.
 - **Prompt Injection Containment**: Ingested document chunks are framed inside demarcated untrusted data blocks within the prompt to prevent instructions in scientific texts from hijacking the LLM extraction logic.
+
+---
+
+### Security, Authentication & Production Deployment Configuration
+
+#### 1. API Authentication & Multi-Tenant Authorization
+- **Credential Transport**: Pass credentials via `Authorization: Bearer <api_key>` or `X-API-Key: <api_key>`.
+- **Hashed Storage**: Only cryptographic SHA-256 digests of API keys are stored in the database. Raw keys are never stored, logged, or exposed.
+- **Ownership Verification**: All collection, workspace, document, paper, analysis, comparison, and verification endpoints strictly verify ownership before executing any reads or writes.
+- **Production Default**: Production composition roots (`AppSettings.from_env()`) enforce authentication by default (`NEXORA_ENFORCE_AUTH=true`). Startup fails closed with `InvalidConfigurationError` if auth is enforced without database session or auth service infrastructure.
+- **Offline / Local Mode**: Offline RAG pipelines (`create_offline_app`) run with `enforce_auth=False`, requiring zero credentials, external servers, or network access for testing.
+
+#### 2. Scholarly Discovery & Safe Remote Ingestion
+- **Endpoints**:
+  - `GET /api/v1/discovery/search`: Query external scholarly literature (arXiv) with metadata normalization and category filtering.
+  - `POST /api/v1/discovery/import`: Explicit import into a verified user-owned collection.
+- **Defense-in-Depth Protections**:
+  - **Scheme Enforcement**: HTTPS strictly enforced.
+  - **Host Allowlisting**: Only verified scholarly hosts (`arxiv.org`, `export.arxiv.org`) permitted.
+  - **SSRF & DNS Rebinding**: Resolves IP addresses before connecting and validates against loopback (`127.0.0.0/8`, `::1`), private networks (RFC 1918), link-local cloud metadata endpoints (`169.254.169.254`), and RFC 6052 NAT64 prefixes.
+  - **Redirect Destination Validation**: Every 3xx redirect destination is re-validated before following (maximum 3 hops).
+  - **Streaming Cap**: Preflights `Content-Length` and streams chunks with an absolute 50 MB cutoff.
+  - **Content Validation**: Rejects HTML error/captcha responses; verifies `%PDF-` magic byte signatures.
+  - **Lifecycle Cleanup**: Temporary download files are guaranteed to be cleaned up on disk on all success and failure paths.
+
+#### 3. Inbound Rate Limiting & Abuse Prevention
+- **Configurable Tiers**: Inbound rate limits (`NEXORA_RATE_LIMIT_*`) enforce sliding-window quotas based on endpoint cost:
+  - `heavy_analysis` (10 req/min): Multi-paper comparisons, structured analysis, research gaps, claim verification.
+  - `research_query` (30 req/min): Grounded hybrid RAG queries.
+  - `discovery_search` (20 req/min): External arXiv search queries.
+  - `discovery_import` (10 req/min): Safe PDF download, parsing, and collection import.
+  - `document_ingest` (10 req/min): Direct document upload, parsing, and vector indexing.
+  - `default` (120 req/min): Standard metadata reads.
+  - Unmetered: `/health`, `/docs`.
+- **Tamper-Resistant Caller Tracking**: Authenticated requests are keyed by a 16-character SHA-256 digest prefix of their API key (raw secrets are never logged or stored in counter keys). Unauthenticated requests fall back to client IP, with anti-spoofing protection (`X-Forwarded-For` only trusted from explicitly configured `NEXORA_RATE_LIMIT_TRUSTED_PROXIES`).
+- **Multi-Worker Note**: Built-in `memory` backend maintains local sliding-window counters per process. For multi-worker deployments (e.g. Uvicorn `--workers N` or distributed containers), an explicit `RateLimitStorage` implementation (e.g. Redis) can be passed to `create_app` or `build_http_app`. If `backend="redis"` is configured without storage, startup fails closed immediately.
+
+#### 4. CORS Security
+- **Secure by Default**: CORS is disabled by default (`NEXORA_CORS_ENABLED=false`).
+- **No Wildcard with Credentials**: The wildcard origin `*` is strictly forbidden when `NEXORA_CORS_ALLOW_CREDENTIALS=true`.
+- **Origin Validation**: Permitted origins must explicitly specify `http://` or `https://` schemes.
 
 ---
 

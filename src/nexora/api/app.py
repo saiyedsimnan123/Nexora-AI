@@ -214,6 +214,11 @@ def create_app(
 
     # 1. Rate Limit Middleware (runs after CORS, before endpoints)
     if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
+        if getattr(rate_limit_config, "backend", "memory") == "redis" and rate_limit_storage is None:
+            raise InvalidConfigurationError(
+                "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
+                "Pass rate_limit_storage to create_app or use backend='memory'."
+            )
         from nexora.api.rate_limit import RateLimitMiddleware
 
         app.add_middleware(

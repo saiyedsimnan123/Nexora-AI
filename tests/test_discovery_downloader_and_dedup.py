@@ -129,6 +129,60 @@ def test_validate_url_safety_rejects_private_and_loopback_ips():
             validate_url_safety(target)
 
 
+def test_validate_url_safety_rejects_dns_resolved_private_ips(monkeypatch):
+    """Verify that if an allowed host resolves via DNS to a private IP, it is strictly blocked."""
+    import socket
+
+    # Simulate arxiv.org resolving to loopback 127.0.0.1
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
+    )
+    with pytest.raises(SSRFProtectionError) as exc_info:
+        validate_url_safety("https://arxiv.org/pdf/2106.09685.pdf")
+
+    assert "resolves to private/internal ip" in str(exc_info.value).lower()
+
+    # Simulate export.arxiv.org resolving to link-local cloud metadata IP
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("169.254.169.254", 443))],
+    )
+    with pytest.raises(SSRFProtectionError) as exc_info:
+        validate_url_safety("https://export.arxiv.org/pdf/2106.09685.pdf")
+
+    assert "resolves to private/internal ip" in str(exc_info.value).lower()
+
+
+def test_validate_url_safety_rejects_dns_resolved_ipv6_mapped_private_ips(monkeypatch):
+    """Verify that IPv6 and IPv4-mapped IPv6 loopback/private addresses are blocked."""
+    import socket
+
+    # Simulate resolving to IPv6 loopback ::1
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(10, 1, 6, "", ("::1", 443, 0, 0))],
+    )
+    with pytest.raises(SSRFProtectionError) as exc_info:
+        validate_url_safety("https://arxiv.org/pdf/2106.09685.pdf")
+
+    assert "resolves to private/internal ip" in str(exc_info.value).lower()
+
+    # Simulate resolving to IPv4-mapped loopback ::ffff:127.0.0.1
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(10, 1, 6, "", ("::ffff:127.0.0.1", 443, 0, 0))],
+    )
+    with pytest.raises(SSRFProtectionError) as exc_info:
+        validate_url_safety("https://arxiv.org/pdf/2106.09685.pdf")
+
+    assert "resolves to private/internal ip" in str(exc_info.value).lower()
+
+
 # ---------------------------------------------------------------------------
 # Downloader Tests: Streaming & PDF Signature Validation
 # ---------------------------------------------------------------------------
@@ -388,6 +442,50 @@ def test_download_connection_error():
     downloader = SafePDFDownloader(client=httpx.Client(transport=httpx.MockTransport(handler)))
     with pytest.raises(DiscoveryConnectionError):
         downloader.download_arxiv_pdf("2106.09685")
+
+
+def test_download_streaming_timeout_and_tempfile_cleanup(tmp_path):
+    class TimeoutByteStream(httpx.ByteStream):
+        def __iter__(self):
+            yield b"%PDF-1.4\n"
+            raise httpx.ReadTimeout("Timeout mid-stream")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=TimeoutByteStream(b""),
+            headers={"Content-Type": "application/pdf"},
+        )
+
+    downloader = SafePDFDownloader(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(DiscoveryTimeoutError) as exc_info:
+        downloader.download_arxiv_pdf("2106.09685", destination_dir=tmp_path)
+
+    assert "timed out while streaming" in str(exc_info.value).lower()
+    # Confirm temp files are cleaned up
+    assert list(tmp_path.glob("*.pdf")) == []
+
+
+def test_download_streaming_connection_error_and_tempfile_cleanup(tmp_path):
+    class DisconnectByteStream(httpx.ByteStream):
+        def __iter__(self):
+            yield b"%PDF-1.4\n"
+            raise httpx.ReadError("Connection severed mid-stream")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=DisconnectByteStream(b""),
+            headers={"Content-Type": "application/pdf"},
+        )
+
+    downloader = SafePDFDownloader(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(DiscoveryConnectionError) as exc_info:
+        downloader.download_arxiv_pdf("2106.09685", destination_dir=tmp_path)
+
+    assert "streaming" in str(exc_info.value).lower()
+    # Confirm temp files are cleaned up
+    assert list(tmp_path.glob("*.pdf")) == []
 
 
 # ---------------------------------------------------------------------------

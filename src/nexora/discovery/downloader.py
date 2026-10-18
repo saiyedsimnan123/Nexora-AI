@@ -46,16 +46,40 @@ ALLOWED_ARXIV_HOSTS = ("arxiv.org", "export.arxiv.org")
 PDF_MAGIC_BYTES = b"%PDF-"
 
 
+_NAT64_WKP_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+
+
 def is_ip_private_or_reserved(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return True if IP is private, loopback, link-local, multicast, or reserved."""
-    return (
+    """Return True if IP is private, loopback, link-local, multicast, or reserved.
+
+    Handles standard IPv4/IPv6 private ranges, IPv4-mapped IPv6 (::ffff:0:0/96),
+    and RFC 6052 Well-Known Prefix NAT64 (64:ff9b::/96) by inspecting the embedded
+    IPv4 destination.
+    """
+    if (
         ip.is_private
         or ip.is_loopback
         or ip.is_link_local
-        or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
-    )
+    ):
+        return True
+
+    # Check for IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None and is_ip_private_or_reserved(mapped):
+        return True
+
+    # Check for RFC 6052 Well-Known Prefix NAT64 translation (64:ff9b::/96)
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_WKP_NETWORK:
+        embedded_v4 = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        return is_ip_private_or_reserved(embedded_v4)
+
+    # For general addresses, check reserved status
+    if ip.is_reserved:
+        return True
+
+    return False
 
 
 def validate_url_safety(
@@ -104,20 +128,27 @@ def validate_url_safety(
     if host in ("localhost", "localhost.localdomain", "broadcasthost"):
         raise SSRFProtectionError(f"Prohibited target host: {host}")
 
-    # DNS check: In online environments, resolve host to ensure it does not map to private IPs
+    # DNS check: In online environments, resolve host to ensure it does not map to private IPs.
+    # We resolve inside the try/except block, but validate addresses OUTSIDE to prevent
+    # SSRFProtectionError (which inherits from PermissionError -> OSError) from being swallowed.
+    addr_infos: list[Any] = []
     try:
         addr_infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-        for _, _, _, _, sockaddr in addr_infos:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            if is_ip_private_or_reserved(ip):
-                raise SSRFProtectionError(
-                    f"Host '{host}' resolves to private/internal IP {ip_str}"
-                )
     except (socket.gaierror, socket.herror, OSError):
         # In offline/mock test environments, DNS resolution might fail.
         # Since host was already verified against allowed_hosts, proceed safely.
-        pass
+        addr_infos = []
+
+    for _, _, _, _, sockaddr in addr_infos:
+        ip_str = sockaddr[0]
+        try:
+            resolved_ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if is_ip_private_or_reserved(resolved_ip):
+            raise SSRFProtectionError(
+                f"Host '{host}' resolves to private/internal IP {ip_str}"
+            )
 
     return url
 
@@ -349,6 +380,26 @@ class SafePDFDownloader:
                     arxiv_id=clean_id,
                     source_url=final_url,
                 )
+            except httpx.TimeoutException as exc:
+                tmp_file.close()
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                raise DiscoveryTimeoutError(
+                    f"Remote PDF download timed out while streaming for paper {clean_id!r}: {exc}"
+                ) from exc
+            except httpx.RequestError as exc:
+                tmp_file.close()
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                raise DiscoveryConnectionError(
+                    f"Connection failed while streaming remote PDF for paper {clean_id!r}: {exc}"
+                ) from exc
             except Exception:
                 tmp_file.close()
                 if tmp_path.exists():
