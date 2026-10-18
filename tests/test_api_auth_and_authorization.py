@@ -1158,3 +1158,25 @@ def test_bootstrap_safety_against_accidental_duplicate_keys(auth_test_db):
         assert repo.get_active_by_raw_key(token2) is None
         # New key active
         assert repo.get_active_by_raw_key(token3) is not None
+
+
+def test_startup_fails_closed_when_auth_enforced_without_services():
+    """Verify that create_app refuses to start up if auth is enforced but no session_factory or auth_service exists."""
+    from nexora.api.errors import InvalidConfigurationError
+
+    with pytest.raises(InvalidConfigurationError) as exc:
+        create_app(
+            FakeResearchService(),
+            enforce_auth=True,
+            session_factory=None,
+            auth_service=None,
+        )
+    assert "Authentication is enforced but no session_factory or auth_service is configured." in str(exc.value)
+
+
+def test_create_offline_app_bypasses_auth_by_design():
+    """Verify that create_offline_app intentionally sets enforce_auth=False."""
+    from nexora.api.app import create_offline_app
+
+    offline_app = create_offline_app()
+    assert getattr(offline_app.state, "enforce_auth", None) is False

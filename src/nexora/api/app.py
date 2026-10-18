@@ -181,6 +181,11 @@ def create_app(
         from nexora.auth.service import AuthenticationService
         auth_service = AuthenticationService(session_factory)
 
+    if enforce_auth and auth_service is None and session_factory is None:
+        raise InvalidConfigurationError(
+            "Authentication is enforced but no session_factory or auth_service is configured."
+        )
+
     app = FastAPI(
         title="Nexora AI",
         description=(
@@ -267,6 +272,7 @@ def create_offline_app(*, rag_pipeline: Any = None) -> FastAPI:
     return create_app(
         _OfflineResearchService(rag_pipeline),
         rag_pipeline=rag_pipeline,
+        enforce_auth=False,
     )
 
 

@@ -18,6 +18,22 @@ class ConfigurationError(ValueError):
     """Invalid application configuration. Messages never contain secret values."""
 
 
+_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
+_FALSE_VALUES = frozenset({"false", "0", "no", "off"})
+
+
+def _env_bool(env: Mapping[str, str], name: str, default: bool = True) -> bool:
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default
+    lowered = raw.strip().lower()
+    if lowered in _TRUE_VALUES:
+        return True
+    if lowered in _FALSE_VALUES:
+        return False
+    raise ConfigurationError(f"{name} must be one of true/false, 1/0, yes/no, on/off")
+
+
 def _env_number(env: Mapping[str, str], name: str, convert: Any) -> Any:
     raw = env.get(name)
     if raw is None or not raw.strip():
@@ -43,6 +59,7 @@ class AppSettings:
     qdrant: QdrantConfig | None = None
     retrieval: RetrievalQualityPolicy = field(default_factory=RetrievalQualityPolicy)
     max_evidence_characters: int | None = None
+    enforce_auth: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.llm, LLMConfig):
@@ -67,6 +84,8 @@ class AppSettings:
         limit = self.max_evidence_characters
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
             raise ConfigurationError("max_evidence_characters must be a non-negative integer or None")
+        if not isinstance(self.enforce_auth, bool):
+            raise ConfigurationError("enforce_auth must be a boolean")
 
     @property
     def embedding_dimension(self) -> int:
@@ -96,7 +115,8 @@ class AppSettings:
         Variables: NEXORA_LLM_*, NEXORA_VECTOR_STORE (memory|qdrant),
         NEXORA_RETRIEVAL_MIN_SCORE, NEXORA_RETRIEVAL_MAX_RESULTS,
         NEXORA_RETRIEVAL_MAX_RESULTS_PER_DOCUMENT,
-        NEXORA_RETRIEVAL_CANDIDATE_LIMIT, NEXORA_MAX_EVIDENCE_CHARACTERS.
+        NEXORA_RETRIEVAL_CANDIDATE_LIMIT, NEXORA_MAX_EVIDENCE_CHARACTERS,
+        NEXORA_ENFORCE_AUTH (defaults to True in from_env).
         """
         env = os.environ if environ is None else environ
         try:
@@ -120,6 +140,7 @@ class AppSettings:
             raise ConfigurationError(f"invalid retrieval settings: {exc}") from None
 
         backend = (env.get("NEXORA_VECTOR_STORE") or "memory").strip().lower() or "memory"
+        auth_enforced = _env_bool(env, "NEXORA_ENFORCE_AUTH", default=True)
         return cls(
             llm=llm,
             embedding=embedding,
@@ -127,4 +148,5 @@ class AppSettings:
             qdrant=qdrant,
             retrieval=policy,
             max_evidence_characters=_env_number(env, "NEXORA_MAX_EVIDENCE_CHARACTERS", int),
+            enforce_auth=auth_enforced,
         )

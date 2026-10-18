@@ -115,3 +115,33 @@ def test_from_env_reads_only_the_supplied_mapping(monkeypatch=None):
     # A different, empty mapping must not pick up values from the real environment.
     with pytest.raises(ConfigurationError):
         AppSettings.from_env({}, embedding=EMBEDDING)
+
+
+def test_defaults_from_env_enforces_auth_by_default():
+    s = AppSettings.from_env(BASE_ENV, embedding=EMBEDDING)
+    assert s.enforce_auth is True
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("false", False), ("0", False), ("no", False), ("off", False), (" False ", False),
+    ("true", True), ("1", True), ("yes", True), ("on", True), (" TRUE ", True),
+])
+def test_env_loading_of_enforce_auth(raw, expected):
+    env = dict(BASE_ENV, NEXORA_ENFORCE_AUTH=raw)
+    s = AppSettings.from_env(env, embedding=EMBEDDING)
+    assert s.enforce_auth is expected
+
+
+@pytest.mark.parametrize("bad_val", ["not_a_bool", "maybe", "2", "-1", "enabled", "disabled"])
+def test_env_loading_of_invalid_enforce_auth_fails(bad_val):
+    env = dict(BASE_ENV, NEXORA_ENFORCE_AUTH=bad_val)
+    with pytest.raises(ConfigurationError) as exc:
+        AppSettings.from_env(env, embedding=EMBEDDING)
+    assert "NEXORA_ENFORCE_AUTH must be one of" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad_type", ["true", 1, 0, None, [True]])
+def test_explicit_non_bool_enforce_auth_fails(bad_type):
+    with pytest.raises(ConfigurationError) as exc:
+        AppSettings(llm=llm(), embedding=EMBEDDING, enforce_auth=bad_type)
+    assert "enforce_auth must be a boolean" in str(exc.value)

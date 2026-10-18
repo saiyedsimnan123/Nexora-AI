@@ -404,7 +404,9 @@ def build_http_app(
 
     enforce_auth = dependencies.get("enforce_auth")
     if enforce_auth is None:
-        enforce_auth = getattr(settings, "enforce_auth", False)
+        enforce_auth = getattr(settings, "enforce_auth", None)
+    if enforce_auth is None:
+        enforce_auth = auth_service is not None
 
     return create_app(
         research_service,
