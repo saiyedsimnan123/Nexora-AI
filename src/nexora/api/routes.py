@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexora.api.errors import (
@@ -510,6 +510,91 @@ v1_router = APIRouter(prefix="/api/v1")
 def health() -> dict[str, str]:
     """Liveness only; touches no dependency."""
     return {"status": "ok"}
+
+
+@health_router.get("/ready")
+@health_router.get("/health/ready")
+def readiness(request: Request, response: Response) -> dict[str, Any]:
+    """Readiness probe: validates availability of required backend dependencies.
+
+    Checks:
+    - database: verifies connectivity via session_factory if configured.
+    - auth: checks authentication service readiness when enforce_auth is True.
+    - research: checks research service availability.
+
+    Returns HTTP 200 with status='ready' when all required components are operational.
+    Returns HTTP 503 with status='unavailable' when any required component is failing.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    research_service = getattr(request.app.state, "research_service", None)
+    auth_service = getattr(request.app.state, "auth_service", None)
+
+    checks: dict[str, Any] = {}
+    is_ready = True
+
+    # 1. Database check
+    if session_factory is not None:
+        try:
+            from sqlalchemy import text
+
+            with session_factory() as sess:
+                sess.execute(text("SELECT 1"))
+            checks["database"] = {"status": "ready"}
+        except Exception as exc:
+            checks["database"] = {
+                "status": "unavailable",
+                "error": type(exc).__name__,
+            }
+            is_ready = False
+    else:
+        if enforce_auth:
+            checks["database"] = {
+                "status": "unavailable",
+                "error": "database_not_configured_for_enforced_auth",
+            }
+            is_ready = False
+        else:
+            checks["database"] = {"status": "not_configured"}
+
+    # 2. Authentication check
+    if enforce_auth:
+        if auth_service is None and session_factory is not None and is_ready:
+            from nexora.auth.service import AuthenticationService
+
+            try:
+                auth_service = AuthenticationService(session_factory)
+                request.app.state.auth_service = auth_service
+            except Exception:
+                pass
+
+        if auth_service is not None and checks.get("database", {}).get("status") == "ready":
+            checks["auth"] = {"status": "ready", "enforced": True}
+        else:
+            checks["auth"] = {"status": "unavailable", "enforced": True}
+            is_ready = False
+    else:
+        checks["auth"] = {"status": "ready", "enforced": False}
+
+    # 3. Research Service check
+    if research_service is not None and callable(getattr(research_service, "ask", None)):
+        checks["research"] = {"status": "ready"}
+    else:
+        checks["research"] = {"status": "unavailable"}
+        is_ready = False
+
+    # 4. Vector store / Ingestion check
+    ingestion_service = getattr(request.app.state, "ingestion_service", None)
+    rag_pipeline = getattr(request.app.state, "rag_pipeline", None)
+    vector_store = getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
+    if vector_store is not None:
+        checks["vector_store"] = {"status": "ready"}
+
+    if not is_ready:
+        response.status_code = 503
+        return {"status": "unavailable", "checks": checks}
+
+    return {"status": "ready", "checks": checks}
 
 
 @v1_router.post("/research", response_model=ResearchResponseBody)

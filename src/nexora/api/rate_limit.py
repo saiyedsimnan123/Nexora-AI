@@ -133,7 +133,7 @@ def categorize_route(path: str, method: str) -> str | None:
     clean_path = path.rstrip("/")
 
     # Exclude system and documentation routes
-    if clean_path in ("/health", "/docs", "/openapi.json", "/redoc") or clean_path.startswith("/docs/"):
+    if clean_path in ("/health", "/ready", "/health/ready", "/docs", "/openapi.json", "/redoc") or clean_path.startswith("/docs/"):
         return None
 
     # Heavy analysis & synthesis operations

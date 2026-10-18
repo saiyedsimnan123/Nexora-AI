@@ -375,6 +375,10 @@ class DocumentIngestionService:
                         doc_id = doc.id
                         doc_filename = doc.filename
                         doc_storage_key = doc.storage_key
+                        chunk_data = [
+                            (str(c.id), c.chunk_index, c.text)
+                            for c in chunk_records
+                        ]
                 else:
                     session = self._persistence_service._session
                     doc = self._persistence_service.persist_processed_document(
@@ -394,27 +398,37 @@ class DocumentIngestionService:
                     doc_id = doc.id
                     doc_filename = doc.filename
                     doc_storage_key = doc.storage_key
+                    chunk_data = [
+                        (str(c.id), c.chunk_index, c.text)
+                        for c in chunk_records
+                    ]
 
                 vector_ids: list[str] = []
-                if chunk_records:
+                if chunk_data:
                     records_to_upsert: list[VectorRecord] = []
-                    for chunk_rec, vector in zip(chunk_records, resolved_vectors):
+                    for (rec_id, chunk_index, chunk_text), vector in zip(chunk_data, resolved_vectors):
                         if not vector:
                             raise ValueError(
-                                f"Empty embedding vector for chunk index {chunk_rec.chunk_index}"
+                                f"Empty embedding vector for chunk index {chunk_index}"
                             )
-                        rec_id = str(chunk_rec.id)
                         payload: dict[str, object] = {
                             "document_id": str(doc_id),
                             "chunk_id": rec_id,
                             "paper_id": str(paper_id),
-                            "chunk_index": chunk_rec.chunk_index,
-                            "text": chunk_rec.text,
+                            "chunk_index": chunk_index,
+                            "text": chunk_text,
                             "filename": doc_filename,
                             "source": doc_storage_key,
                         }
+                        chunk_pages = processed_document.metadata.get("chunk_pages")
+                        if isinstance(chunk_pages, (list, tuple)) and 0 <= chunk_index < len(chunk_pages):
+                            p = chunk_pages[chunk_index]
+                            if isinstance(p, int) and p > 0:
+                                payload["page_number"] = p
+                                payload["page"] = p
+
                         for k, v in processed_document.metadata.items():
-                            if k not in payload and isinstance(k, str):
+                            if k not in payload and isinstance(k, str) and k != "chunk_pages":
                                 payload[k] = v
 
                         records_to_upsert.append(
@@ -466,7 +480,7 @@ class DocumentIngestionService:
                     session.commit()
 
                 return IngestionResult(
-                    document_id=doc.id,
+                    document_id=doc_id,
                     paper_id=paper_id,
                     chunks_count=len(chunk_records),
                     indexed_chunks_count=len(vector_ids),
@@ -495,6 +509,7 @@ class DocumentIngestionService:
                         storage_key=storage_key,
                         allow_duplicate=allow_duplicate,
                     )
+                    doc_id = doc.id
             else:
                 session = self._persistence_service._session
                 doc, chunk_records, vector_ids = self._persist_and_index_records(
@@ -510,9 +525,10 @@ class DocumentIngestionService:
                     storage_key=storage_key,
                     allow_duplicate=allow_duplicate,
                 )
+                doc_id = doc.id
 
             return IngestionResult(
-                document_id=doc.id,
+                document_id=doc_id,
                 paper_id=paper_id,
                 chunks_count=len(chunk_records),
                 indexed_chunks_count=len(vector_ids),
