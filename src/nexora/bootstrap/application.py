@@ -408,6 +408,16 @@ def build_http_app(
     if enforce_auth is None:
         enforce_auth = auth_service is not None
 
+    cors_config = dependencies.get("cors_config")
+    if cors_config is None:
+        cors_config = getattr(settings, "cors", None)
+
+    rate_limit_config = dependencies.get("rate_limit_config")
+    if rate_limit_config is None:
+        rate_limit_config = getattr(settings, "rate_limit", None)
+
+    rate_limit_storage = dependencies.get("rate_limit_storage")
+
     return create_app(
         research_service,
         rag_pipeline=rag_pipeline,
@@ -420,5 +430,8 @@ def build_http_app(
         session_factory=session_factory,
         auth_service=auth_service,
         enforce_auth=enforce_auth,
+        cors_config=cors_config,
+        rate_limit_config=rate_limit_config,
+        rate_limit_storage=rate_limit_storage,
         max_upload_size_bytes=max_upload_size_bytes,
     )

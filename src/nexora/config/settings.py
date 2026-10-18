@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from nexora.config.cors import CORSConfig, CORSConfigurationError
+from nexora.config.rate_limit import RateLimitConfig, RateLimitConfigurationError
 from nexora.llm.config import LLMConfig
 from nexora.retrieval.qdrant_config import QdrantConfig
 from nexora.retrieval.quality import RetrievalQualityPolicy
@@ -60,6 +62,8 @@ class AppSettings:
     retrieval: RetrievalQualityPolicy = field(default_factory=RetrievalQualityPolicy)
     max_evidence_characters: int | None = None
     enforce_auth: bool = False
+    cors: CORSConfig = field(default_factory=CORSConfig)
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.llm, LLMConfig):
@@ -86,6 +90,10 @@ class AppSettings:
             raise ConfigurationError("max_evidence_characters must be a non-negative integer or None")
         if not isinstance(self.enforce_auth, bool):
             raise ConfigurationError("enforce_auth must be a boolean")
+        if not isinstance(self.cors, CORSConfig):
+            raise ConfigurationError("cors must be a CORSConfig")
+        if not isinstance(self.rate_limit, RateLimitConfig):
+            raise ConfigurationError("rate_limit must be a RateLimitConfig")
 
     @property
     def embedding_dimension(self) -> int:
@@ -141,6 +149,17 @@ class AppSettings:
 
         backend = (env.get("NEXORA_VECTOR_STORE") or "memory").strip().lower() or "memory"
         auth_enforced = _env_bool(env, "NEXORA_ENFORCE_AUTH", default=True)
+
+        try:
+            cors = CORSConfig.from_env(env)
+        except CORSConfigurationError as exc:
+            raise ConfigurationError(str(exc)) from exc
+
+        try:
+            rate_limit = RateLimitConfig.from_env(env)
+        except RateLimitConfigurationError as exc:
+            raise ConfigurationError(str(exc)) from exc
+
         return cls(
             llm=llm,
             embedding=embedding,
@@ -149,4 +168,6 @@ class AppSettings:
             retrieval=policy,
             max_evidence_characters=_env_number(env, "NEXORA_MAX_EVIDENCE_CHARACTERS", int),
             enforce_auth=auth_enforced,
+            cors=cors,
+            rate_limit=rate_limit,
         )

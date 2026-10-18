@@ -168,6 +168,9 @@ def create_app(
     session_factory: Any = None,
     auth_service: Any = None,
     enforce_auth: bool | None = None,
+    cors_config: Any = None,
+    rate_limit_config: Any = None,
+    rate_limit_storage: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
 ) -> FastAPI:
     """Build the app around injected research, ingestion, analysis, comparison, gap, discovery, and auth services."""
@@ -205,7 +208,36 @@ def create_app(
     app.state.session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.enforce_auth = enforce_auth
+    app.state.cors_config = cors_config
+    app.state.rate_limit_config = rate_limit_config
     app.state.max_upload_size_bytes = max_upload_size_bytes
+
+    # 1. Rate Limit Middleware (runs after CORS, before endpoints)
+    if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
+        from nexora.api.rate_limit import RateLimitMiddleware
+
+        app.add_middleware(
+            RateLimitMiddleware,
+            config=rate_limit_config,
+            storage=rate_limit_storage,
+        )
+
+    # 2. CORS Middleware (outermost: handles preflight OPTIONS and adds CORS headers to all responses)
+    if (
+        cors_config is not None
+        and getattr(cors_config, "enabled", False)
+        and getattr(cors_config, "allow_origins", None)
+    ):
+        from starlette.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(cors_config.allow_origins),
+            allow_credentials=cors_config.allow_credentials,
+            allow_methods=list(cors_config.allow_methods),
+            allow_headers=list(cors_config.allow_headers),
+            max_age=cors_config.max_age,
+        )
 
     app.include_router(health_router)
     app.include_router(v1_router)

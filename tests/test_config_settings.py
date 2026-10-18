@@ -145,3 +145,42 @@ def test_explicit_non_bool_enforce_auth_fails(bad_type):
     with pytest.raises(ConfigurationError) as exc:
         AppSettings(llm=llm(), embedding=EMBEDDING, enforce_auth=bad_type)
     assert "enforce_auth must be a boolean" in str(exc.value)
+
+
+def test_cors_and_rate_limit_defaults_on_app_settings():
+    from nexora.config.cors import CORSConfig
+    from nexora.config.rate_limit import RateLimitConfig
+
+    s = AppSettings(llm=llm(), embedding=EMBEDDING)
+    assert isinstance(s.cors, CORSConfig)
+    assert s.cors.enabled is False
+    assert s.cors.allow_origins == ()
+
+    assert isinstance(s.rate_limit, RateLimitConfig)
+    assert s.rate_limit.enabled is False
+    assert s.rate_limit.heavy_analysis_limit == 10
+
+
+def test_cors_and_rate_limit_invalid_types_raise_configuration_error():
+    with pytest.raises(ConfigurationError) as exc:
+        AppSettings(llm=llm(), embedding=EMBEDDING, cors="not_a_cors_config")
+    assert "cors must be a CORSConfig" in str(exc.value)
+
+    with pytest.raises(ConfigurationError) as exc:
+        AppSettings(llm=llm(), embedding=EMBEDDING, rate_limit="not_a_rate_limit_config")
+    assert "rate_limit must be a RateLimitConfig" in str(exc.value)
+
+
+def test_env_loading_of_cors_and_rate_limit():
+    env = dict(
+        BASE_ENV,
+        NEXORA_CORS_ALLOWED_ORIGINS="http://localhost:3000",
+        NEXORA_CORS_ALLOW_CREDENTIALS="false",
+        NEXORA_RATE_LIMIT_ENABLED="true",
+        NEXORA_RATE_LIMIT_HEAVY_ANALYSIS="7",
+    )
+    s = AppSettings.from_env(env, embedding=EMBEDDING)
+    assert s.cors.enabled is True
+    assert s.cors.allow_origins == ("http://localhost:3000",)
+    assert s.rate_limit.enabled is True
+    assert s.rate_limit.heavy_analysis_limit == 7
