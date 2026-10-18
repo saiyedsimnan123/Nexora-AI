@@ -108,6 +108,8 @@ class RAGPipeline:
         max_output_tokens: int | None = None,
         paper_id: str | None = None,
         document_id: str | None = None,
+        collection_id: str | None = None,
+        collection_ids: list[str] | None = None,
     ) -> RAGResponse:
         """Execute end-to-end RAG workflow for a research question.
 
@@ -121,6 +123,8 @@ class RAGPipeline:
             max_output_tokens: Optional token generation limit.
             paper_id: Optional paper UUID to filter evidence to a specific paper.
             document_id: Optional document identifier to filter evidence.
+            collection_id: Optional collection UUID to filter evidence to a specific collection.
+            collection_ids: Optional list of collection UUIDs to restrict evidence.
 
         Returns:
             A RAGResponse containing the grounded answer, attributed sources,
@@ -139,6 +143,8 @@ class RAGPipeline:
                 max_output_tokens=max_output_tokens,
                 paper_id=paper_id,
                 document_id=document_id,
+                collection_id=collection_id,
+                collection_ids=collection_ids,
             )
         elif isinstance(request, RAGRequest):
             req = request
@@ -150,6 +156,8 @@ class RAGPipeline:
                 or max_output_tokens is not None
                 or paper_id is not None
                 or document_id is not None
+                or collection_id is not None
+                or collection_ids is not None
             ):
                 req = RAGRequest(
                     query=req.query,
@@ -160,6 +168,8 @@ class RAGPipeline:
                     max_output_tokens=max_output_tokens if max_output_tokens is not None else req.max_output_tokens,
                     paper_id=paper_id if paper_id is not None else req.paper_id,
                     document_id=document_id if document_id is not None else req.document_id,
+                    collection_id=collection_id if collection_id is not None else req.collection_id,
+                    collection_ids=collection_ids if collection_ids is not None else req.collection_ids,
                 )
         else:
             raise TypeError(f"request must be a RAGRequest or string, got {type(request).__name__}")
@@ -168,6 +178,25 @@ class RAGPipeline:
         mode = req.retrieval_mode
         limit = req.top_k
         score_thresh = req.min_score
+
+        # If authorized scope is explicitly empty, fail closed immediately
+        if req.collection_ids is not None and len(req.collection_ids) == 0:
+            return RAGResponse(
+                query=query,
+                answer=INSUFFICIENT_EVIDENCE_ANSWER,
+                sources=[],
+                cited_sources=[],
+                is_grounded=True,
+                is_mock=self._generator.is_mock,
+                model=model or self._generator.model_name,
+                status="insufficient_evidence",
+                retrieval_mode=mode,
+                evidence_count=0,
+            )
+
+        # Graceful fallback: If hybrid retrieval requested but BM25 is unconfigured, fall back to vector
+        if mode == "hybrid" and getattr(self._retrieval, "_bm25_index", None) is None:
+            mode = "vector"
 
         # 2. Retrieve candidates from underlying retrieval service
         try:
@@ -178,6 +207,8 @@ class RAGPipeline:
                     mode=mode,
                     paper_id=req.paper_id,
                     document_id=req.document_id,
+                    collection_id=req.collection_id,
+                    collection_ids=req.collection_ids,
                 )
             except TypeError:
                 search_result = self._retrieval.retrieve(query, limit=limit, mode=mode)
@@ -199,13 +230,24 @@ class RAGPipeline:
 
         raw_chunks: list[RetrievedChunk] = search_result.results if hasattr(search_result, "results") else getattr(search_result, "chunks", [])
 
-        # Filter out chunks with zero relevance or below min_score threshold
+        # Filter out chunks with zero relevance or below min_score threshold, and enforce defense-in-depth scoping
         valid_chunks: list[RetrievedChunk] = []
+        allowed_cols = {str(c) for c in req.collection_ids} if req.collection_ids is not None else None
+        target_col = str(req.collection_id) if req.collection_id is not None else None
+
         for c in raw_chunks:
             if c.score <= 0.0:
                 continue
             if score_thresh is not None and c.score < score_thresh:
                 continue
+            if allowed_cols is not None:
+                c_col = c.metadata.get("collection_id")
+                if c_col is None or str(c_col) not in allowed_cols:
+                    continue
+            elif target_col is not None:
+                c_col = c.metadata.get("collection_id")
+                if c_col is None or str(c_col) != target_col:
+                    continue
             valid_chunks.append(c)
 
         # 3. Handle empty retrieval truthfully

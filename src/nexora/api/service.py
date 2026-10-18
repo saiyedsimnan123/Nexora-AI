@@ -32,16 +32,34 @@ class ResearchApplicationService:
         self._query_service = query_service
         self._verifier = verifier
 
-    def ask(self, request: ResearchRequest) -> ResearchResponse:
+    def ask(
+        self,
+        request: ResearchRequest,
+        *,
+        collection_ids: list[str] | None = None,
+        collection_id: str | None = None,
+    ) -> ResearchResponse:
         if not isinstance(request, ResearchRequest):
             raise InvalidRequestError("request must be a ResearchRequest")
         try:
-            answer = self._query_service.ask(
-                request.query,
-                model=request.model,
-                temperature=request.temperature,
-                max_output_tokens=request.max_output_tokens,
-            )
+            ask_kwargs: dict[str, Any] = {
+                "model": request.model,
+                "temperature": request.temperature,
+                "max_output_tokens": request.max_output_tokens,
+            }
+            if collection_ids is not None:
+                ask_kwargs["collection_ids"] = collection_ids
+            if collection_id is not None:
+                ask_kwargs["collection_id"] = collection_id
+            try:
+                answer = self._query_service.ask(request.query, **ask_kwargs)
+            except TypeError:
+                answer = self._query_service.ask(
+                    request.query,
+                    model=request.model,
+                    temperature=request.temperature,
+                    max_output_tokens=request.max_output_tokens,
+                )
         except Exception as exc:
             raise ResearchServiceError(
                 f"Research request failed ({type(exc).__name__})"

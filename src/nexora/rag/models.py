@@ -89,6 +89,8 @@ class RAGRequest:
     max_output_tokens: int | None = None
     paper_id: str | None = None
     document_id: str | None = None
+    collection_id: str | None = None
+    collection_ids: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
@@ -102,6 +104,14 @@ class RAGRequest:
         if self.min_score is not None:
             if isinstance(self.min_score, bool) or not isinstance(self.min_score, (int, float)):
                 raise TypeError("min_score must be a number or None")
+        if self.collection_id is not None and not isinstance(self.collection_id, str):
+            raise TypeError("collection_id must be a string or None")
+        if self.collection_ids is not None:
+            if not isinstance(self.collection_ids, (list, tuple)):
+                raise TypeError("collection_ids must be a list or tuple of strings or None")
+            for cid in self.collection_ids:
+                if not isinstance(cid, str):
+                    raise TypeError("collection_ids items must be strings")
         validate_temperature(self.temperature)
         validate_max_output_tokens(self.max_output_tokens)
 

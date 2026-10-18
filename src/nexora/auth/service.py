@@ -254,3 +254,23 @@ class AuthenticationService:
 
         with self._session_factory() as sess:
             return _verify(sess)
+
+    def get_user_collection_ids(
+        self,
+        user_id: UUID,
+        session: Any = None,
+    ) -> list[UUID]:
+        """Retrieve all collection IDs owned by user_id across all their workspaces."""
+        def _get_ids(sess: Any) -> list[UUID]:
+            stmt = (
+                select(Collection.id)
+                .join(Workspace, Collection.workspace_id == Workspace.id)
+                .where(Workspace.user_id == user_id)
+            )
+            return list(sess.scalars(stmt).all())
+
+        if session is not None:
+            return _get_ids(session)
+
+        with self._session_factory() as sess:
+            return _get_ids(sess)

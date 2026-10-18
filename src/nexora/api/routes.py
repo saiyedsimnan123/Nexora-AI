@@ -46,6 +46,7 @@ class ResearchRequestBody(BaseModel):
     model: str | None = None
     temperature: float | None = None
     max_output_tokens: int | None = None
+    collection_id: str | None = None
 
 
 class ResearchResponseBody(BaseModel):
@@ -265,6 +266,14 @@ class RAGQueryRequestBody(BaseModel):
     max_output_tokens: int | None = Field(
         default=None,
         description="Maximum output tokens for answer generation.",
+    )
+    collection_id: str | None = Field(
+        default=None,
+        description="Optional collection UUID to restrict retrieval to an authorized collection.",
+    )
+    paper_id: str | None = Field(
+        default=None,
+        description="Optional paper UUID to restrict retrieval to a specific paper.",
     )
 
 
@@ -488,12 +497,14 @@ def get_auth_service(request: Request) -> Any:
 
 
 def get_current_user(request: Request) -> Any:
-    """Dependency: authenticates the caller if authentication is enforced."""
+    """Dependency: authenticates the caller if authentication is enforced or credentials are provided."""
+    auth_service = get_auth_service(request)
     enforce_auth = getattr(request.app.state, "enforce_auth", False)
     if not enforce_auth:
+        if auth_service is not None and (request.headers.get("Authorization") or request.headers.get("X-API-Key")):
+            return auth_service.authenticate_request(request)
         return None
 
-    auth_service = get_auth_service(request)
     if auth_service is None:
         raise InvalidConfigurationError(
             "Authentication is enforced but no session_factory or auth_service is configured."
@@ -616,13 +627,39 @@ def research(
     service: ResearchApplicationService = Depends(get_research_service),
     current_user: Any = Depends(get_current_user),
 ) -> ResearchResponseBody:
+    scoped_col_ids: list[str] | None = None
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            if body.collection_id is not None:
+                col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
+                scoped_col_ids = [str(col.id)]
+            else:
+                user_cols = auth_service.get_user_collection_ids(current_user.id)
+                scoped_col_ids = [str(c) for c in user_cols]
+    elif body.collection_id is not None:
+        scoped_col_ids = [body.collection_id]
+
+    if scoped_col_ids is not None and len(scoped_col_ids) == 0:
+        return ResearchResponseBody(
+            text="No evidence found in authorized research collections.",
+            query=body.query,
+            model=body.model or "unknown",
+            evidence_count=0,
+        )
+
     request_obj = ResearchRequest(
         query=body.query,
         model=body.model,
         temperature=body.temperature,
         max_output_tokens=body.max_output_tokens,
+        collection_id=body.collection_id,
     )
-    return ResearchResponseBody(**service.ask(request_obj).to_dict())
+    try:
+        ans = service.ask(request_obj, collection_ids=scoped_col_ids)
+    except TypeError:
+        ans = service.ask(request_obj)
+    return ResearchResponseBody(**ans.to_dict())
 
 
 @v1_router.post(
@@ -649,6 +686,47 @@ def research_rag_query(
     if body.max_output_tokens is not None and body.max_output_tokens <= 0:
         raise InvalidRequestError("max_output_tokens must be greater than 0")
 
+    scoped_collection_ids: list[str] | None = None
+    scoped_paper_id: str | None = None
+    auth_service = get_auth_service(request)
+
+    if current_user is not None and auth_service is not None:
+        if body.collection_id is not None:
+            col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
+            scoped_collection_ids = [str(col.id)]
+        if body.paper_id is not None:
+            paper, col, _ = auth_service.verify_paper_ownership(body.paper_id, current_user.id)
+            scoped_paper_id = str(paper.id)
+            if scoped_collection_ids is None:
+                scoped_collection_ids = [str(col.id)]
+            elif str(col.id) not in scoped_collection_ids:
+                raise ForbiddenError("Specified paper does not belong to the specified collection.")
+        if scoped_collection_ids is None and scoped_paper_id is None:
+            user_cols = auth_service.get_user_collection_ids(current_user.id)
+            scoped_collection_ids = [str(c) for c in user_cols]
+    else:
+        if body.collection_id is not None:
+            scoped_collection_ids = [body.collection_id]
+        if body.paper_id is not None:
+            scoped_paper_id = body.paper_id
+
+    # Fail closed if caller is scoped but has no authorized collections
+    if scoped_collection_ids is not None and len(scoped_collection_ids) == 0:
+        from nexora.rag.pipeline import INSUFFICIENT_EVIDENCE_ANSWER
+        model_name = getattr(pipeline.generator, "model_name", "unknown") if hasattr(pipeline, "generator") else "unknown"
+        return RAGQueryResponseBody(
+            query=body.query,
+            answer=INSUFFICIENT_EVIDENCE_ANSWER,
+            sources=[],
+            cited_sources=[],
+            is_grounded=True,
+            is_mock=getattr(pipeline, "is_mock", True),
+            model=model_name,
+            status="insufficient_evidence",
+            retrieval_mode=body.retrieval_mode,
+            evidence_count=0,
+        )
+
     try:
         response = pipeline.answer(
             request=body.query,
@@ -657,6 +735,8 @@ def research_rag_query(
             min_score=body.min_score,
             temperature=body.temperature,
             max_output_tokens=body.max_output_tokens,
+            paper_id=scoped_paper_id,
+            collection_ids=scoped_collection_ids,
         )
     except (InvalidRequestError, ValueError) as exc:
         raise InvalidRequestError(str(exc)) from exc

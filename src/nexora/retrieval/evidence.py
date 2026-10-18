@@ -10,7 +10,7 @@ import copy
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 
 def _non_empty_str(name: str, value: Any) -> None:
@@ -132,13 +132,32 @@ class EvidenceContextBuilder:
         self._retrieval = retrieval_service
         self._max_chars = max_total_characters
 
-    def build(self, query: str) -> EvidenceContext:
+    def build(
+        self,
+        query: str,
+        *,
+        collection_ids: Sequence[str] | None = None,
+        collection_id: str | None = None,
+        paper_id: str | None = None,
+    ) -> EvidenceContext:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
         if not query.strip():
             raise ValueError("query must not be empty or whitespace-only")
 
-        chunks = self._retrieval.retrieve(query).results
+        retrieve_kwargs: dict[str, Any] = {}
+        if collection_ids is not None:
+            retrieve_kwargs["collection_ids"] = collection_ids
+        if collection_id is not None:
+            retrieve_kwargs["collection_id"] = collection_id
+        if paper_id is not None:
+            retrieve_kwargs["paper_id"] = paper_id
+
+        try:
+            search_res = self._retrieval.retrieve(query, **retrieve_kwargs)
+        except TypeError:
+            search_res = self._retrieval.retrieve(query)
+        chunks = getattr(search_res, "results", getattr(search_res, "chunks", []))
         items: list[EvidenceItem] = []
         used = 0
         for chunk in chunks:

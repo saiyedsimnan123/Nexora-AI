@@ -139,6 +139,9 @@ class DocumentRecoveryService:
                 )
             filename = doc.filename
             storage_key = doc.storage_key
+            paper_repo = getattr(persistence, "_paper_repo", None)
+            paper_rec = paper_repo.get_by_id(paper_id) if paper_repo and hasattr(paper_repo, "get_by_id") else None
+            recovery_col_id = str(paper_rec.collection_id) if paper_rec and getattr(paper_rec, "collection_id", None) else None
             raw_chunks = list(persistence.list_chunks_for_document(doc_id))
             chunk_data = [
                 (str(c.id), c.chunk_index, c.text)
@@ -196,6 +199,8 @@ class DocumentRecoveryService:
                     "filename": filename,
                     "source": storage_key,
                 }
+                if recovery_col_id:
+                    payload["collection_id"] = recovery_col_id
                 records_to_upsert.append(
                     VectorRecord(id=rec_id, vector=vector, payload=payload)
                 )
@@ -401,3 +406,16 @@ class DocumentRecoveryService:
         with database_transaction(self._session_factory) as session:
             persistence = DocumentPersistenceService(session)
             return persistence.count_indexing_status()
+
+    def reindex_document(self, doc_id: UUID) -> RecoveryItemResult:
+        """Manually trigger reindexing of an existing document to ensure vector payloads have collection_id."""
+        with database_transaction(self._session_factory) as session:
+            persistence = DocumentPersistenceService(session)
+            doc = persistence.get_document(doc_id)
+            if doc is None:
+                raise RecordNotFoundError(f"Document {doc_id} not found")
+            paper_id = doc.paper_id
+            attempts = doc.indexing_attempts or 0
+        claim_token = f"manual-reindex-{uuid4()}"
+        with get_paper_ingestion_lock(paper_id):
+            return self._execute_document_indexing(doc_id, paper_id, claim_token, attempts)

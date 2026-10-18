@@ -116,6 +116,8 @@ class RetrievalService:
         rrf_k: int = 60,
         paper_id: str | None = None,
         document_id: str | None = None,
+        collection_id: str | None = None,
+        collection_ids: Sequence[str] | None = None,
         filter: dict[str, Any] | None = None,
     ) -> SearchResult:
         if not isinstance(query, str):
@@ -129,14 +131,24 @@ class RetrievalService:
         if mode not in ("vector", "bm25", "hybrid"):
             raise ValueError(f"mode must be 'vector', 'bm25', or 'hybrid', got {mode!r}")
 
+        # If collection_ids is explicitly provided as empty, fail closed immediately
+        if collection_ids is not None and len(collection_ids) == 0:
+            return SearchResult(query=query, results=[])
+
         effective_filter: dict[str, Any] = dict(filter) if filter else {}
         if paper_id is not None:
             effective_filter["paper_id"] = str(paper_id)
         if document_id is not None:
             effective_filter["document_id"] = str(document_id)
+        if collection_ids is not None:
+            effective_filter["collection_id"] = [str(c) for c in collection_ids]
+        elif collection_id is not None:
+            effective_filter["collection_id"] = str(collection_id)
 
         target_paper_id = effective_filter.get("paper_id")
         target_doc_id = effective_filter.get("document_id")
+        target_col_id = str(collection_id) if collection_id is not None else None
+        target_col_ids = [str(c) for c in collection_ids] if collection_ids is not None else None
 
         if mode == "bm25":
             if self._bm25_index is None:
@@ -146,6 +158,8 @@ class RetrievalService:
                 limit=limit,
                 paper_id=target_paper_id,
                 document_id=target_doc_id,
+                collection_id=target_col_id,
+                collection_ids=target_col_ids,
             )
 
         if self._cache_queries and query in self._query_cache:
@@ -165,9 +179,21 @@ class RetrievalService:
         except TypeError:
             raw_result = self._vector_store.search(vector, limit=limit)
             if effective_filter:
+                def _matches(meta: dict[str, Any]) -> bool:
+                    for k, v in effective_filter.items():
+                        val = meta.get(k)
+                        if val is None:
+                            return False
+                        if isinstance(v, (list, tuple, set)):
+                            if str(val) not in {str(x) for x in v}:
+                                return False
+                        elif str(val) != str(v):
+                            return False
+                    return True
+
                 filtered_chunks = [
                     c for c in raw_result.results
-                    if all(str(c.metadata.get(k)) == str(v) for k, v in effective_filter.items())
+                    if _matches(c.metadata)
                 ]
                 raw_result = SearchResult(query=raw_result.query, results=filtered_chunks)
 
@@ -186,6 +212,8 @@ class RetrievalService:
                 limit=limit,
                 paper_id=target_paper_id,
                 document_id=target_doc_id,
+                collection_id=target_col_id,
+                collection_ids=target_col_ids,
             )
             return reciprocal_rank_fusion(raw_result, bm25_res, rrf_k=rrf_k, limit=limit)
 

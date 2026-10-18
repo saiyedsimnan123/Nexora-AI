@@ -123,15 +123,42 @@ class QdrantVectorStore:
             points_selector=models.PointIdsList(points=valid),
         )
 
-    def search(self, vector: list[float], *, limit: int = 10) -> SearchResult:
+    def search(
+        self,
+        vector: list[float],
+        *,
+        limit: int = 10,
+        filter: dict[str, Any] | None = None,
+    ) -> SearchResult:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         query = self._check_vector(vector)
+        query_filter = None
+        if filter:
+            conditions = []
+            for k, v in filter.items():
+                if isinstance(v, (list, tuple, set)):
+                    conditions.append(
+                        models.FieldCondition(
+                            key=k,
+                            match=models.MatchAny(any=[str(item) for item in v]),
+                        )
+                    )
+                else:
+                    conditions.append(
+                        models.FieldCondition(
+                            key=k,
+                            match=models.MatchValue(value=str(v)),
+                        )
+                    )
+            query_filter = models.Filter(must=conditions)
+
         response = self._call(
             "search",
             self._client.query_points,
             self._collection,
             query=query,
+            query_filter=query_filter,
             limit=limit,
             with_payload=True,
         )

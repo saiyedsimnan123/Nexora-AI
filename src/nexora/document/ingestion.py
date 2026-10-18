@@ -244,6 +244,13 @@ class DocumentIngestionService:
                     persistence_service.list_chunks_for_document(doc.id)
                 )
 
+                paper_repo = getattr(persistence_service, "_paper_repo", None)
+                paper_rec = paper_repo.get_by_id(paper_id) if paper_repo and hasattr(paper_repo, "get_by_id") else None
+                resolved_col_id = (
+                    str(paper_rec.collection_id) if paper_rec and getattr(paper_rec, "collection_id", None)
+                    else (str(processed_document.metadata["collection_id"]) if "collection_id" in processed_document.metadata else None)
+                )
+
                 if chunk_records:
                     records_to_upsert: list[VectorRecord] = []
                     for chunk_rec, vector in zip(chunk_records, resolved_vectors):
@@ -261,6 +268,8 @@ class DocumentIngestionService:
                             "filename": doc.filename,
                             "source": doc.storage_key,
                         }
+                        if resolved_col_id:
+                            payload["collection_id"] = resolved_col_id
                         chunk_pages = processed_document.metadata.get("chunk_pages")
                         if isinstance(chunk_pages, (list, tuple)) and 0 <= chunk_rec.chunk_index < len(chunk_pages):
                             p = chunk_pages[chunk_rec.chunk_index]
@@ -379,6 +388,12 @@ class DocumentIngestionService:
                             (str(c.id), c.chunk_index, c.text)
                             for c in chunk_records
                         ]
+                        paper_repo = getattr(persistence, "_paper_repo", None)
+                        paper_rec = paper_repo.get_by_id(paper_id) if paper_repo and hasattr(paper_repo, "get_by_id") else None
+                        durable_col_id = (
+                            str(paper_rec.collection_id) if paper_rec and getattr(paper_rec, "collection_id", None)
+                            else (str(processed_document.metadata["collection_id"]) if "collection_id" in processed_document.metadata else None)
+                        )
                 else:
                     session = self._persistence_service._session
                     doc = self._persistence_service.persist_processed_document(
@@ -402,6 +417,12 @@ class DocumentIngestionService:
                         (str(c.id), c.chunk_index, c.text)
                         for c in chunk_records
                     ]
+                    paper_repo = getattr(self._persistence_service, "_paper_repo", None)
+                    paper_rec = paper_repo.get_by_id(paper_id) if paper_repo and hasattr(paper_repo, "get_by_id") else None
+                    durable_col_id = (
+                        str(paper_rec.collection_id) if paper_rec and getattr(paper_rec, "collection_id", None)
+                        else (str(processed_document.metadata["collection_id"]) if "collection_id" in processed_document.metadata else None)
+                    )
 
                 vector_ids: list[str] = []
                 if chunk_data:
@@ -420,6 +441,8 @@ class DocumentIngestionService:
                             "filename": doc_filename,
                             "source": doc_storage_key,
                         }
+                        if durable_col_id:
+                            payload["collection_id"] = durable_col_id
                         chunk_pages = processed_document.metadata.get("chunk_pages")
                         if isinstance(chunk_pages, (list, tuple)) and 0 <= chunk_index < len(chunk_pages):
                             p = chunk_pages[chunk_index]

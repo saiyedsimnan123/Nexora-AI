@@ -82,6 +82,23 @@ def _to_chunk(record: VectorRecord, score: float) -> RetrievedChunk:
     )
 
 
+def _record_matches_filter(payload: dict[str, object], filt: dict[str, object] | None) -> bool:
+    if not filt:
+        return True
+    for k, v in filt.items():
+        val = payload.get(k)
+        if val is None:
+            return False
+        if isinstance(v, (list, tuple, set)):
+            allowed = {str(item) for item in v}
+            if str(val) not in allowed:
+                return False
+        else:
+            if str(val) != str(v):
+                return False
+    return True
+
+
 class InMemoryVectorStore:
     """Dictionary-backed vector store using cosine similarity.
 
@@ -191,7 +208,7 @@ class InMemoryVectorStore:
         prepared = _scaled(query)
         candidates = (
             record for record in self._records.values()
-            if not filter or all(str(record.payload.get(k)) == str(v) for k, v in filter.items())
+            if _record_matches_filter(record.payload, filter)
         )
         scored = (
             (_cosine(prepared, _scaled(record.vector)), record)

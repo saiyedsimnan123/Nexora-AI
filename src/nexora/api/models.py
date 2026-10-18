@@ -23,6 +23,7 @@ class ResearchRequest:
     model: str | None = None
     temperature: float | None = None
     max_output_tokens: int | None = None
+    collection_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):

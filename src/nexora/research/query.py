@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 from nexora.research.models import ResearchAnswer
 
@@ -32,13 +32,27 @@ class ResearchQueryService:
         model: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        collection_ids: Sequence[str] | None = None,
+        collection_id: str | None = None,
+        paper_id: str | None = None,
     ) -> ResearchAnswer:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
         if not query.strip():
             raise ValueError("query must not be empty or whitespace-only")
 
-        context = self._evidence_builder.build(query)
+        builder_kwargs: dict[str, Any] = {}
+        if collection_ids is not None:
+            builder_kwargs["collection_ids"] = collection_ids
+        if collection_id is not None:
+            builder_kwargs["collection_id"] = collection_id
+        if paper_id is not None:
+            builder_kwargs["paper_id"] = paper_id
+        try:
+            context = self._evidence_builder.build(query, **builder_kwargs)
+        except TypeError:
+            context = self._evidence_builder.build(query)
+
         return self._answer_service.answer(
             query,
             context,
@@ -54,6 +68,9 @@ class ResearchQueryService:
         model: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        collection_ids: Sequence[str] | None = None,
+        collection_id: str | None = None,
+        paper_id: str | None = None,
     ) -> tuple[ResearchAnswer, Any]:
         """Execute research query and return both the ResearchAnswer and the EvidenceContext."""
         if not isinstance(query, str):
@@ -61,7 +78,17 @@ class ResearchQueryService:
         if not query.strip():
             raise ValueError("query must not be empty or whitespace-only")
 
-        context = self._evidence_builder.build(query)
+        builder_kwargs: dict[str, Any] = {}
+        if collection_ids is not None:
+            builder_kwargs["collection_ids"] = collection_ids
+        if collection_id is not None:
+            builder_kwargs["collection_id"] = collection_id
+        if paper_id is not None:
+            builder_kwargs["paper_id"] = paper_id
+        try:
+            context = self._evidence_builder.build(query, **builder_kwargs)
+        except TypeError:
+            context = self._evidence_builder.build(query)
         answer = self._answer_service.answer(
             query,
             context,

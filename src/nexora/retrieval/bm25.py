@@ -255,6 +255,8 @@ class BM25Index:
         min_score: float | None = None,
         paper_id: str | None = None,
         document_id: str | None = None,
+        collection_id: str | None = None,
+        collection_ids: Sequence[str] | None = None,
     ) -> SearchResult:
         """Search the index using Okapi BM25 ranking.
 
@@ -264,6 +266,8 @@ class BM25Index:
             min_score: Optional minimum score threshold.
             paper_id: Optional paper identifier to restrict search to a specific paper.
             document_id: Optional document identifier to restrict search to a specific document.
+            collection_id: Optional collection identifier to restrict search to a single collection.
+            collection_ids: Optional list of collection identifiers to restrict search.
 
         Returns:
             A ``SearchResult`` with chunks ordered by relevance score descending.
@@ -278,6 +282,10 @@ class BM25Index:
         if not query_tokens or not self._documents:
             return SearchResult(query=query, results=[])
 
+        # If collection_ids is provided as an empty list, fail closed
+        if collection_ids is not None and len(collection_ids) == 0:
+            return SearchResult(query=query, results=[])
+
         # Score documents that contain at least one query token and match any filters
         scored_docs: list[tuple[float, BM25Document]] = []
         for doc in self._documents.values():
@@ -285,6 +293,15 @@ class BM25Index:
                 continue
             if document_id is not None and doc.document_id != str(document_id):
                 continue
+            if collection_ids is not None:
+                allowed = {str(c) for c in collection_ids}
+                doc_col = doc.metadata.get("collection_id")
+                if doc_col is None or str(doc_col) not in allowed:
+                    continue
+            elif collection_id is not None:
+                doc_col = doc.metadata.get("collection_id")
+                if doc_col is None or str(doc_col) != str(collection_id):
+                    continue
             s = self.score(query_tokens, doc)
             if s > 0.0:
                 if min_score is None or s >= min_score:
