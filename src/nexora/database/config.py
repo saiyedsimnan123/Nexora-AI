@@ -107,6 +107,8 @@ class DatabaseConfig:
         env = os.environ if environ is None else environ
         url = env.get("NEXORA_DATABASE_URL")
         if url is None or not url.strip():
+            url = env.get("DATABASE_URL")
+        if url is None or not url.strip():
             raise DatabaseConfigurationError("NEXORA_DATABASE_URL is required")
 
         kwargs: dict[str, Any] = {}
@@ -118,6 +120,9 @@ class DatabaseConfig:
             ("NEXORA_DATABASE_ECHO", "echo", _parse_bool),
         ):
             raw = env.get(name)
+            if raw is None or not raw.strip():
+                alt_name = name.removeprefix("NEXORA_")
+                raw = env.get(alt_name)
             if raw is not None and raw.strip():
                 kwargs[key] = parse(name, raw.strip())
         return cls(url=url.strip(), **kwargs)

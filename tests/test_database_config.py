@@ -177,3 +177,42 @@ def test_module_has_no_driver_imports_or_connection_code():
     assert not imported & {"sqlalchemy", "psycopg", "psycopg2", "asyncpg", "dotenv"}
     source = inspect.getsource(config_module)
     assert "create_engine" not in source and ".connect(" not in source
+
+
+def test_from_env_fallback_to_database_url():
+    c = DatabaseConfig.from_env({"DATABASE_URL": URL})
+    assert c == DatabaseConfig(url=URL)
+
+
+def test_from_env_prefers_nexora_database_url_over_database_url():
+    other_url = "postgresql://localhost:5432/otherdb"
+    c = DatabaseConfig.from_env({"NEXORA_DATABASE_URL": URL, "DATABASE_URL": other_url})
+    assert c.url == URL
+
+
+def test_from_env_unprefixed_pool_variables():
+    env = {
+        "DATABASE_URL": URL,
+        "DATABASE_POOL_SIZE": "15",
+        "DATABASE_MAX_OVERFLOW": "5",
+        "DATABASE_POOL_TIMEOUT": "45.0",
+        "DATABASE_POOL_RECYCLE": "3600",
+        "DATABASE_ECHO": "1",
+    }
+    c = DatabaseConfig.from_env(env)
+    assert c.url == URL
+    assert (c.pool_size, c.max_overflow, c.pool_timeout, c.pool_recycle, c.echo) == (15, 5, 45.0, 3600, True)
+
+
+def test_from_env_prefers_prefixed_pool_variables():
+    env = {
+        "DATABASE_URL": URL,
+        "NEXORA_DATABASE_POOL_SIZE": "20",
+        "DATABASE_POOL_SIZE": "10",
+        "NEXORA_DATABASE_MAX_OVERFLOW": "8",
+        "DATABASE_MAX_OVERFLOW": "2",
+    }
+    c = DatabaseConfig.from_env(env)
+    assert c.pool_size == 20
+    assert c.max_overflow == 8
+

@@ -64,6 +64,7 @@ class AppSettings:
     enforce_auth: bool = False
     cors: CORSConfig = field(default_factory=CORSConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    database: Any | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.llm, LLMConfig):
@@ -94,6 +95,11 @@ class AppSettings:
             raise ConfigurationError("cors must be a CORSConfig")
         if not isinstance(self.rate_limit, RateLimitConfig):
             raise ConfigurationError("rate_limit must be a RateLimitConfig")
+        if self.database is not None:
+            from nexora.database.config import DatabaseConfig
+
+            if not isinstance(self.database, DatabaseConfig):
+                raise ConfigurationError("database must be a DatabaseConfig")
 
     @property
     def embedding_dimension(self) -> int:
@@ -160,6 +166,16 @@ class AppSettings:
         except RateLimitConfigurationError as exc:
             raise ConfigurationError(str(exc)) from exc
 
+        db_config = None
+        db_url = env.get("NEXORA_DATABASE_URL") or env.get("DATABASE_URL")
+        if db_url and db_url.strip():
+            from nexora.database.config import DatabaseConfig, DatabaseConfigurationError
+
+            try:
+                db_config = DatabaseConfig.from_env(env)
+            except DatabaseConfigurationError as exc:
+                raise ConfigurationError(str(exc)) from exc
+
         return cls(
             llm=llm,
             embedding=embedding,
@@ -170,4 +186,5 @@ class AppSettings:
             enforce_auth=auth_enforced,
             cors=cors,
             rate_limit=rate_limit,
+            database=db_config,
         )

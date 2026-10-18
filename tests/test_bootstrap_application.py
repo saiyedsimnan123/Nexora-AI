@@ -218,3 +218,31 @@ def test_http_app_composition_is_compatible_with_create_app():
     assert client.get("/health").json() == {"status": "ok"}
     body = client.post("/api/v1/research", json={"query": "q"}).json()
     assert body["text"] == "composed answer" and "raw" not in body
+
+
+def test_build_http_app_auto_wires_database_when_configured(monkeypatch):
+    from nexora.database.config import DatabaseConfig
+
+    mock_engine = SimpleNamespace()
+    mock_factory = lambda: None
+
+    monkeypatch.setattr(
+        "nexora.database.connection.create_database_engine",
+        lambda cfg: mock_engine,
+    )
+    monkeypatch.setattr(
+        "nexora.database.session.create_session_factory",
+        lambda eng: mock_factory,
+    )
+
+    db_cfg = DatabaseConfig(url="postgresql://localhost/testdb")
+    app_settings = settings(database=db_cfg)
+
+    app = build_http_app(
+        app_settings,
+        embedding_service=FakeEmbedding(),
+        vector_store=FakeStore(),
+        llm_provider=FakeProvider(),
+    )
+    assert app.state.session_factory is mock_factory
+

@@ -329,6 +329,13 @@ def build_http_app(
         verifier=verifier,
     )
 
+    if session_factory is None and getattr(settings, "database", None) is not None:
+        from nexora.database.connection import create_database_engine
+        from nexora.database.session import create_session_factory
+
+        engine = create_database_engine(settings.database)
+        session_factory = create_session_factory(engine)
+
     if ingestion_service is None:
         session = dependencies.get("session")
         if session_factory is not None or persistence_service is not None or session is not None:

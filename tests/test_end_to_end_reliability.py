@@ -679,3 +679,21 @@ def test_readiness_probe_operational_and_failure_reporting(test_environment, mon
     res_live = client.get("/health")
     assert res_live.status_code == 200
     assert res_live.json() == {"status": "ok"}
+
+    # 4. Vector store outage state
+    class BrokenVectorStore:
+        def count(self):
+            raise ConnectionError("Qdrant cluster unreachable")
+
+    # restore working session factory
+    test_environment.app.state.session_factory = test_environment.sqlite_db_factory
+    test_environment.app.state.ingestion_service._vector_store = BrokenVectorStore()
+
+    res_broken_vector = client.get("/ready")
+    assert res_broken_vector.status_code == 503
+    broken_vector_body = res_broken_vector.json()
+    assert broken_vector_body["status"] == "unavailable"
+    assert broken_vector_body["checks"]["vector_store"]["status"] == "unavailable"
+    assert broken_vector_body["checks"]["vector_store"]["error"] == "ConnectionError"
+    # Liveness remains 200 OK
+    assert client.get("/health").status_code == 200

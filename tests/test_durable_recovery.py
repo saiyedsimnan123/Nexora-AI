@@ -1402,3 +1402,32 @@ def test_postgresql_concurrent_workers_claim_distinct_documents_and_exhaust_safe
 
     assert vector_store.count() == 6
 
+
+def test_recovery_batch_bounds_validation(session_factory):
+    """DocumentRecoveryService.recover_batch enforces 1 <= batch_size <= MAX_BATCH_SIZE (100)."""
+    store = InMemoryVectorStore(dimension=4)
+    service = DocumentRecoveryService(
+        session_factory=session_factory,
+        vector_store=store,
+        embedding_service=DummyEmbeddingService(4),
+    )
+
+    with pytest.raises(ValueError, match="cannot exceed maximum allowed limit of 100"):
+        service.recover_batch(batch_size=101)
+
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        service.recover_batch(batch_size=0)
+
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        service.recover_batch(batch_size=-5)
+
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        service.recover_batch(batch_size="10")  # type: ignore[arg-type]
+
+    # Valid boundary batch_size=100 succeeds
+    res = service.recover_batch(batch_size=100)
+    assert res.scanned_count == 0
+    assert res.recovered_count == 0
+    assert res.failed_count == 0
+
+

@@ -137,11 +137,15 @@ class DocumentRecoveryService:
                     error="Document not found during processing",
                     attempts=attempts,
                 )
-            chunk_records = list(persistence.list_chunks_for_document(doc_id))
             filename = doc.filename
             storage_key = doc.storage_key
+            raw_chunks = list(persistence.list_chunks_for_document(doc_id))
+            chunk_data = [
+                (str(c.id), c.chunk_index, c.text)
+                for c in raw_chunks
+            ]
 
-        chunks_count = len(chunk_records)
+        chunks_count = len(chunk_data)
         if chunks_count == 0:
             with database_transaction(self._session_factory) as session:
                 persistence = DocumentPersistenceService(session)
@@ -178,18 +182,17 @@ class DocumentRecoveryService:
 
         # 2. Embedding generation and vector store upsert (OUTSIDE ANY DB TRANSACTION)
         try:
-            texts = [c.text for c in chunk_records]
+            texts = [c[2] for c in chunk_data]
             vectors = self._resolve_vectors(texts)
 
             records_to_upsert: list[VectorRecord] = []
-            for chunk_rec, vector in zip(chunk_records, vectors):
-                rec_id = str(chunk_rec.id)
+            for (rec_id, chunk_index, chunk_text), vector in zip(chunk_data, vectors):
                 payload: dict[str, object] = {
                     "document_id": str(doc_id),
                     "chunk_id": rec_id,
                     "paper_id": str(paper_id),
-                    "chunk_index": chunk_rec.chunk_index,
-                    "text": chunk_rec.text,
+                    "chunk_index": chunk_index,
+                    "text": chunk_text,
                     "filename": filename,
                     "source": storage_key,
                 }
@@ -331,6 +334,8 @@ class DocumentRecoveryService:
 
             return self._execute_document_indexing(document_id, paper_id, claim_token, attempts)
 
+    MAX_BATCH_SIZE: int = 100
+
     def recover_batch(
         self,
         batch_size: int = 10,
@@ -345,6 +350,10 @@ class DocumentRecoveryService:
         """
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
+        if batch_size > self.MAX_BATCH_SIZE:
+            raise ValueError(
+                f"batch_size cannot exceed maximum allowed limit of {self.MAX_BATCH_SIZE}"
+            )
 
         timeout = (
             claim_timeout_seconds

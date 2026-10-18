@@ -184,3 +184,42 @@ def test_env_loading_of_cors_and_rate_limit():
     assert s.cors.allow_origins == ("http://localhost:3000",)
     assert s.rate_limit.enabled is True
     assert s.rate_limit.heavy_analysis_limit == 7
+
+
+def test_database_config_on_app_settings():
+    from nexora.database.config import DatabaseConfig
+
+    db = DatabaseConfig(url="postgresql://localhost/db")
+    s = AppSettings(llm=llm(), embedding=EMBEDDING, database=db)
+    assert s.database is db
+
+
+def test_database_config_invalid_type_raises():
+    with pytest.raises(ConfigurationError) as exc:
+        AppSettings(llm=llm(), embedding=EMBEDDING, database="invalid")
+    assert "database must be a DatabaseConfig" in str(exc.value)
+
+
+def test_env_loading_of_database_config():
+    env = dict(
+        BASE_ENV,
+        NEXORA_DATABASE_URL="postgresql://localhost/db",
+        NEXORA_DATABASE_POOL_SIZE="12",
+    )
+    s = AppSettings.from_env(env, embedding=EMBEDDING)
+    assert s.database is not None
+    assert s.database.url == "postgresql://localhost/db"
+    assert s.database.pool_size == 12
+
+
+def test_env_loading_of_database_config_fallback():
+    env = dict(
+        BASE_ENV,
+        DATABASE_URL="postgresql://localhost/db",
+        DATABASE_POOL_SIZE="15",
+    )
+    s = AppSettings.from_env(env, embedding=EMBEDDING)
+    assert s.database is not None
+    assert s.database.url == "postgresql://localhost/db"
+    assert s.database.pool_size == 15
+

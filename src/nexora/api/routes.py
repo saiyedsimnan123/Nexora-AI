@@ -521,6 +521,7 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
     - database: verifies connectivity via session_factory if configured.
     - auth: checks authentication service readiness when enforce_auth is True.
     - research: checks research service availability.
+    - vector_store: checks vector store connectivity via count() if configured.
 
     Returns HTTP 200 with status='ready' when all required components are operational.
     Returns HTTP 503 with status='unavailable' when any required component is failing.
@@ -588,7 +589,18 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
     rag_pipeline = getattr(request.app.state, "rag_pipeline", None)
     vector_store = getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
     if vector_store is not None:
-        checks["vector_store"] = {"status": "ready"}
+        if callable(getattr(vector_store, "count", None)):
+            try:
+                vector_store.count()
+                checks["vector_store"] = {"status": "ready"}
+            except Exception as exc:
+                checks["vector_store"] = {
+                    "status": "unavailable",
+                    "error": type(exc).__name__,
+                }
+                is_ready = False
+        else:
+            checks["vector_store"] = {"status": "ready"}
 
     if not is_ready:
         response.status_code = 503

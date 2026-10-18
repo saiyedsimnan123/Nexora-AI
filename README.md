@@ -863,6 +863,36 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
 - **No Wildcard with Credentials**: The wildcard origin `*` is strictly forbidden when `NEXORA_CORS_ALLOW_CREDENTIALS=true`.
 - **Origin Validation**: Permitted origins must explicitly specify `http://` or `https://` schemes.
 
+#### 5. Database Connection Pooling & Concurrency
+- **PostgreSQL Requirement**: In production, `DatabaseConfig` enforces a PostgreSQL dialect (`postgresql://` or `postgresql+<driver>://`), redacting credentials from logs and exceptions. SQLite is used for fast, isolated in-memory unit/integration test doubles via dedicated SQLite session factories.
+- **Configuration Precedence**: `NEXORA_DATABASE_URL` takes precedence over `DATABASE_URL`.
+- **Configurable Pool Parameters**:
+  - `NEXORA_DATABASE_POOL_SIZE` (default: 5, recommended: 10–20 per ASGI worker process).
+  - `NEXORA_DATABASE_MAX_OVERFLOW` (default: 10, handles burst concurrency).
+  - `NEXORA_DATABASE_POOL_TIMEOUT` (default: 30.0s, wait time before raising on pool exhaustion).
+  - `NEXORA_DATABASE_POOL_RECYCLE` (default: 1800s, recycles idle connections before backend server timeout).
+- **Session Lifecycle**: Requests and worker jobs manage isolated sessions via the `database_transaction` context manager, ensuring commits only occur on clean exits and rollbacks/closes happen deterministically on any failure or cancellation.
+- **Auto-Initialization**: When `database` configuration is provided in `AppSettings`, `build_http_app` automatically provisions the SQLAlchemy engine and `sessionmaker` factory.
+
+#### 6. Health, Readiness & Liveness Architecture
+- **Liveness Probe**: `GET /health`
+  - Ultra-lightweight; touches zero network or database dependencies.
+  - Returns `{"status": "ok"}` (HTTP 200) as long as the ASGI event loop and worker process are running.
+- **Readiness Probe**: `GET /ready` (alias: `GET /health/ready`)
+  - Deep dependency validation for container orchestrators and load balancers:
+    - **Database**: Ping check via `SELECT 1`.
+    - **Authentication**: Validates that required auth tables/service are accessible.
+    - **Research Service**: Confirms RAG query handlers are wired.
+    - **Vector Store**: Active cluster connectivity check via `vector_store.count()`.
+  - Returns HTTP 200 (`status: "ready"`) when all dependencies respond.
+  - Returns HTTP 503 (`status: "unavailable"`) if any required dependency degrades, causing upstream load balancers to halt routing to the degraded replica without restarting the container prematurely.
+
+#### 7. Bounded Durable Document Recovery
+- **Background Reindexing**: Interrupted or failed document ingestion is repaired via `DocumentRecoveryService.recover_batch()`.
+- **Bounded Batch Execution**: Strictly enforces `1 <= batch_size <= 100` (`MAX_BATCH_SIZE`) to prevent synchronous event loop or worker thread starvation.
+- **Crash Claiming**: Claims unindexed documents using timed leases (`claimed_at`, `claimed_by`) with automatic expiry (`claim_timeout_seconds=300.0`) so crashed workers release locks safely.
+- **Idempotency**: Vectors are keyed deterministically by chunk UUID (`str(chunk.id)`), guaranteeing duplicate recovery runs overwrite in place without creating orphaned vectors.
+
 ---
 
 🎯 Project Objectives
