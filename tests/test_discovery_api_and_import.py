@@ -480,10 +480,17 @@ def test_discovery_paper_details_legacy_id():
     app = create_app(FakeResearchService(), discovery_service=service)
     client = TestClient(app)
 
+    # Standard slash in path
     resp = client.get("/api/v1/discovery/paper/math/0501001")
     assert resp.status_code == 200
     assert resp.json()["external_id"] == "math/0501001"
     assert resp.json()["title"] == "Legacy Math Paper"
+
+    # URL-encoded slash in path
+    resp_encoded = client.get("/api/v1/discovery/paper/math%2F0501001")
+    assert resp_encoded.status_code == 200
+    assert resp_encoded.json()["external_id"] == "math/0501001"
+    assert resp_encoded.json()["title"] == "Legacy Math Paper"
 
 
 def test_discovery_paper_details_rejects_arbitrary_urls_and_malformed_ids():
@@ -496,6 +503,11 @@ def test_discovery_paper_details_rejects_arbitrary_urls_and_malformed_ids():
     r_bad_url = client.get("/api/v1/discovery/paper/https://evil.example.com/exploit.pdf")
     assert r_bad_url.status_code == 400
     assert r_bad_url.json()["error"]["code"] == "invalid_request"
+
+    # URL-encoded arbitrary domain URL -> rejected with 400
+    r_bad_enc = client.get("/api/v1/discovery/paper/https%3A%2F%2Fevil.example.com%2Fexploit.pdf")
+    assert r_bad_enc.status_code == 400
+    assert r_bad_enc.json()["error"]["code"] == "invalid_request"
 
     # Malformed non-arXiv identifier -> rejected with 400
     r_bad_id = client.get("/api/v1/discovery/paper/not_a_valid_arxiv_id")
@@ -574,6 +586,7 @@ def test_discovery_import_arbitrary_url_rejected_400(seeded_collection):
     app = create_app(FakeResearchService(), discovery_service=service, session_factory=session_factory)
     client = TestClient(app)
 
+    # Raw arbitrary URL -> 400
     resp = client.post(
         "/api/v1/discovery/import",
         json={
@@ -583,6 +596,17 @@ def test_discovery_import_arbitrary_url_rejected_400(seeded_collection):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "invalid_request"
+
+    # URL-encoded arbitrary URL -> 400
+    resp_enc = client.post(
+        "/api/v1/discovery/import",
+        json={
+            "collection_id": str(col_id),
+            "external_id": "https%3A%2F%2Fmalicious.org%2Fpaper.pdf",
+        },
+    )
+    assert resp_enc.status_code == 400
+    assert resp_enc.json()["error"]["code"] == "invalid_request"
 
 
 def test_discovery_import_paper_not_found_on_arxiv_404(seeded_collection):
@@ -660,6 +684,58 @@ def test_discovery_import_success_end_to_end_persisted_state(seeded_collection):
     # Verify temporary file cleanup on success
     assert len(downloader.created_temp_paths) == 1
     assert not downloader.created_temp_paths[0].exists()
+
+
+def test_discovery_import_legacy_arxiv_id_with_encoded_slash(seeded_collection):
+    col_id, session_factory = seeded_collection
+    legacy_paper = make_test_paper(
+        external_id="math/0501001",
+        title="Legacy Math Paper",
+    )
+    provider = FakeProvider(papers=[legacy_paper])
+    downloader = FakeDownloader(pdf_bytes=VALID_PDF_BYTES)
+    ingestion = RecordingIngestionService(session_factory=session_factory)
+    pipeline = FakeDocumentPipeline()
+
+    service = DiscoveryService(
+        provider=provider,
+        downloader=downloader,
+        session_factory=session_factory,
+        ingestion_service=ingestion,
+        document_pipeline=pipeline,
+    )
+    app = create_app(
+        FakeResearchService(),
+        discovery_service=service,
+        session_factory=session_factory,
+        ingestion_service=ingestion,
+        document_pipeline=pipeline,
+    )
+    client = TestClient(app)
+
+    # Import using URL-encoded slash in the body
+    resp = client.post(
+        "/api/v1/discovery/import",
+        json={"collection_id": str(col_id), "external_id": "math%2F0501001"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["status"] == "imported"
+    assert data["external_id"] == "math/0501001"
+    assert data["collection_id"] == str(col_id)
+    assert data["title"] == "Legacy Math Paper"
+
+    # Verify ingestion was called with sanitized filename replacing slash with underscore
+    assert len(ingestion.calls) == 1
+    assert ingestion.calls[0]["filename"] == "math_0501001.pdf"
+
+    # Verify paper record in DB uses normalized slash
+    with session_factory() as session:
+        paper_repo = PaperRepository(session)
+        db_paper = paper_repo.get_by_external_id(col_id, "math/0501001")
+        assert db_paper is not None
+        assert db_paper.title == "Legacy Math Paper"
 
 
 def test_discovery_import_repeated_returns_already_imported_without_downloading(seeded_collection):

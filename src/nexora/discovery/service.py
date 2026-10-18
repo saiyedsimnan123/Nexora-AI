@@ -10,6 +10,7 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Any, Sequence
+import urllib.parse
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -47,19 +48,23 @@ from nexora.discovery.provider import ScholarlySourceProvider
 
 def _is_unpermitted_external_url(raw_id: str) -> bool:
     """Return True if raw_id is an arbitrary external URL that is not an arXiv URL."""
-    lowered = raw_id.strip().lower()
-    if lowered.startswith("http://") or lowered.startswith("https://"):
-        valid_prefixes = (
-            "https://arxiv.org/abs/",
-            "http://arxiv.org/abs/",
-            "https://arxiv.org/pdf/",
-            "http://arxiv.org/pdf/",
-            "https://export.arxiv.org/abs/",
-            "http://export.arxiv.org/abs/",
-            "https://export.arxiv.org/pdf/",
-            "http://export.arxiv.org/pdf/",
-        )
-        return not any(lowered.startswith(prefix) for prefix in valid_prefixes)
+    cleaned = raw_id.strip()
+    unquoted = urllib.parse.unquote(cleaned).strip().lower()
+    lowered = cleaned.lower()
+    valid_prefixes = (
+        "https://arxiv.org/abs/",
+        "http://arxiv.org/abs/",
+        "https://arxiv.org/pdf/",
+        "http://arxiv.org/pdf/",
+        "https://export.arxiv.org/abs/",
+        "http://export.arxiv.org/abs/",
+        "https://export.arxiv.org/pdf/",
+        "http://export.arxiv.org/pdf/",
+    )
+    for candidate in (lowered, unquoted):
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            if not any(candidate.startswith(prefix) for prefix in valid_prefixes):
+                return True
     return False
 
 

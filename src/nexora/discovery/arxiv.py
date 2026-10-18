@@ -16,6 +16,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Sequence
+import urllib.parse
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -79,12 +80,21 @@ def normalize_and_validate_arxiv_id(raw_id: str) -> str:
     if not cleaned:
         raise InvalidIdentifierError("arXiv identifier must not be empty or blank")
 
+    # URL-decode to handle encoded legacy slashes like math%2F0501001 or URL-encoded prefixes
+    cleaned = urllib.parse.unquote(cleaned).strip()
+    if not cleaned:
+        raise InvalidIdentifierError("arXiv identifier must not be empty or blank")
+
     # Strip URL prefixes if supplied as URL
     for prefix in (
         "https://arxiv.org/abs/",
         "http://arxiv.org/abs/",
         "https://arxiv.org/pdf/",
         "http://arxiv.org/pdf/",
+        "https://export.arxiv.org/abs/",
+        "http://export.arxiv.org/abs/",
+        "https://export.arxiv.org/pdf/",
+        "http://export.arxiv.org/pdf/",
     ):
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix) :]
@@ -485,8 +495,8 @@ class ArxivSourceProvider:
 
         # Ensure the returned paper matches the requested ID (ignoring version suffix if requested unversioned)
         for paper in papers:
-            req_base = clean_id.split("v")[0]
-            got_base = paper.external_id.split("v")[0]
+            req_base = re.sub(r"v\d+$", "", clean_id)
+            got_base = re.sub(r"v\d+$", "", paper.external_id)
             if paper.external_id == clean_id or req_base == got_base:
                 return paper
 

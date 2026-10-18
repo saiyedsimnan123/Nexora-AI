@@ -117,6 +117,11 @@ def test_normalize_and_validate_legacy_arxiv_ids():
     assert normalize_and_validate_arxiv_id("math/0501001v3") == "math/0501001v3"
     assert normalize_and_validate_arxiv_id("cs.AI/0601001") == "cs.AI/0601001"
     assert normalize_and_validate_arxiv_id("hep-th/9901001") == "hep-th/9901001"
+    # URL-encoded legacy identifiers
+    assert normalize_and_validate_arxiv_id("math%2F0501001") == "math/0501001"
+    assert normalize_and_validate_arxiv_id("math%2f0501001v2") == "math/0501001v2"
+    assert normalize_and_validate_arxiv_id("cs.AI%2F0601001") == "cs.AI/0601001"
+    assert normalize_and_validate_arxiv_id("hep-th%2F9901001") == "hep-th/9901001"
 
 
 def test_normalize_and_validate_prefixes_and_urls():
@@ -125,6 +130,10 @@ def test_normalize_and_validate_prefixes_and_urls():
     assert normalize_and_validate_arxiv_id("https://arxiv.org/abs/2106.09685") == "2106.09685"
     assert normalize_and_validate_arxiv_id("http://arxiv.org/abs/2106.09685v2") == "2106.09685v2"
     assert normalize_and_validate_arxiv_id("https://arxiv.org/pdf/2106.09685.pdf") == "2106.09685"
+    assert normalize_and_validate_arxiv_id("https://export.arxiv.org/abs/2106.09685") == "2106.09685"
+    assert normalize_and_validate_arxiv_id("https://export.arxiv.org/pdf/math/0501001.pdf") == "math/0501001"
+    assert normalize_and_validate_arxiv_id("https%3A%2F%2Farxiv.org%2Fabs%2F2106.09685") == "2106.09685"
+    assert normalize_and_validate_arxiv_id("https%3A%2F%2Fexport.arxiv.org%2Fpdf%2Fmath%2F0501001.pdf") == "math/0501001"
     assert normalize_and_validate_arxiv_id("  2106.09685 \n ") == "2106.09685"
 
 
