@@ -13,7 +13,9 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexora.api.errors import (
+    DocumentNotFoundError,
     FileTooLargeError,
+    ForbiddenError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
@@ -431,6 +433,74 @@ def get_discovery_service(request: Request) -> Any:
     return service
 
 
+class DocumentDetailsResponseBody(BaseModel):
+    """Wire format for document details."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: str = Field(..., description="UUID of the document.")
+    paper_id: str = Field(..., description="UUID of the owning paper.")
+    filename: str = Field(..., description="Original filename of the document.")
+    file_size: int = Field(..., ge=0, description="Size in bytes.")
+    mime_type: str = Field(..., description="MIME type.")
+    checksum: str = Field(..., description="SHA-256 hex checksum.")
+    indexing_status: str = Field(..., description="Vector indexing lifecycle status.")
+    indexing_attempts: int = Field(default=0, ge=0, description="Number of indexing attempts.")
+    created_at: str | None = Field(default=None, description="Creation timestamp.")
+    updated_at: str | None = Field(default=None, description="Last update timestamp.")
+
+
+class CollectionDetailsResponseBody(BaseModel):
+    """Wire format for collection details."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the collection.")
+    workspace_id: str = Field(..., description="UUID of the owning workspace.")
+    name: str = Field(..., description="Collection name.")
+    description: str | None = Field(default=None, description="Collection description.")
+    created_at: str | None = Field(default=None, description="Creation timestamp.")
+    updated_at: str | None = Field(default=None, description="Last update timestamp.")
+
+
+class WorkspaceCollectionsResponseBody(BaseModel):
+    """Wire format for listing collections in a workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str = Field(..., description="UUID of the workspace.")
+    collections: list[CollectionDetailsResponseBody] = Field(
+        default_factory=list, description="Collections in the workspace."
+    )
+
+
+def get_auth_service(request: Request) -> Any:
+    """Dependency: the authentication and authorization service."""
+    service = getattr(request.app.state, "auth_service", None)
+    if service is None:
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is not None:
+            from nexora.auth.service import AuthenticationService
+
+            service = AuthenticationService(session_factory)
+            request.app.state.auth_service = service
+    return service
+
+
+def get_current_user(request: Request) -> Any:
+    """Dependency: authenticates the caller if authentication is enforced."""
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    if not enforce_auth:
+        return None
+
+    auth_service = get_auth_service(request)
+    if auth_service is None:
+        raise InvalidConfigurationError(
+            "Authentication is enforced but no session_factory or auth_service is configured."
+        )
+    return auth_service.authenticate_request(request)
+
+
 health_router = APIRouter()
 v1_router = APIRouter(prefix="/api/v1")
 
@@ -571,8 +641,14 @@ def analyze_paper_endpoint(
 )
 def analyze_paper_by_id_endpoint(
     paper_id: str,
+    request: Request,
     service: Any = Depends(get_analysis_service),
+    current_user: Any = Depends(get_current_user),
 ) -> PaperAnalysisResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(paper_id, current_user.id)
     req = PaperAnalysisRequest(paper_id=paper_id)
     result = service.analyze_paper(req.paper_id)
     resp = PaperAnalysisResponse.from_analysis(result)
@@ -697,8 +773,14 @@ def discover_research_gaps_endpoint(
 )
 def discover_paper_gaps_by_id_endpoint(
     paper_id: str,
+    request: Request,
     service: Any = Depends(get_gap_service),
+    current_user: Any = Depends(get_current_user),
 ) -> ResearchGapsResponseBody:
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(paper_id, current_user.id)
     req = ResearchGapsRequest(paper_ids=[paper_id])
     assert req.paper_ids is not None
     result = service.discover_gaps_for_papers(req.paper_ids)
@@ -737,6 +819,7 @@ async def ingest_document(
     file: UploadFile = File(...),
     durable: bool = Form(False),
     service: Any = Depends(get_ingestion_service),
+    current_user: Any = Depends(get_current_user),
 ) -> DocumentIngestResponseBody:
     """Upload and ingest a research paper PDF into relational storage and vector index."""
     if not isinstance(paper_id, str) or not paper_id.strip():
@@ -746,6 +829,11 @@ async def ingest_document(
         paper_uuid = UUID(paper_id.strip())
     except (ValueError, AttributeError):
         raise InvalidRequestError("Invalid paper_id: must be a valid UUID.")
+
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(paper_uuid, current_user.id)
 
     raw_filename = file.filename or ""
     if not raw_filename.lower().endswith(".pdf"):
@@ -961,6 +1049,8 @@ def get_scholarly_paper_details(
     responses={
         200: {"description": "Import result (imported or already_imported).", "model": DiscoveryImportResponseBody},
         400: {"description": "Invalid collection ID, malformed paper ID, or invalid PDF."},
+        401: {"description": "Authentication required or invalid credentials."},
+        403: {"description": "Access to target collection is forbidden."},
         404: {"description": "Collection or paper not found."},
         409: {"description": "Duplicate document conflict."},
         413: {"description": "PDF exceeds maximum allowed download size."},
@@ -973,12 +1063,180 @@ def get_scholarly_paper_details(
 )
 def import_scholarly_paper(
     body: DiscoveryImportRequestBody,
+    request: Request,
     service: Any = Depends(get_discovery_service),
+    current_user: Any = Depends(get_current_user),
 ) -> DiscoveryImportResponseBody:
     """Explicitly import, deduplicate, and ingest an arXiv paper into a collection."""
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_collection_ownership(body.collection_id, current_user.id)
+
     result = service.import_paper(
         collection_id=body.collection_id,
         external_id=body.external_id,
         durable=body.durable,
     )
     return DiscoveryImportResponseBody(**result.to_dict())
+
+
+@v1_router.get(
+    "/documents/{document_id}",
+    response_model=DocumentDetailsResponseBody,
+    status_code=200,
+    summary="Get document details and indexing status",
+    description="Retrieves metadata, file properties, and vector indexing status for a document. Enforces ownership authorization.",
+    responses={
+        200: {"description": "Document details returned successfully.", "model": DocumentDetailsResponseBody},
+        400: {"description": "Invalid document UUID."},
+        401: {"description": "Authentication required or invalid credentials."},
+        403: {"description": "Access to this document is forbidden."},
+        404: {"description": "Document was not found."},
+    },
+)
+def get_document_details(
+    document_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> DocumentDetailsResponseBody:
+    """Get metadata and indexing status for a document."""
+    try:
+        doc_uuid = UUID(document_id.strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid document_id: must be a valid UUID.")
+
+    auth_service = get_auth_service(request)
+    if current_user is not None and auth_service is not None:
+        doc, _, _, _ = auth_service.verify_document_ownership(doc_uuid, current_user.id)
+    else:
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is None:
+            raise InvalidConfigurationError("session_factory is not configured")
+        from nexora.database.repository.document import DocumentRepository
+
+        with session_factory() as session:
+            doc_repo = DocumentRepository(session)
+            doc = doc_repo.get_by_id(doc_uuid)
+            if doc is None:
+                raise DocumentNotFoundError(f"Document with id {doc_uuid} not found.")
+
+    return DocumentDetailsResponseBody(
+        document_id=str(doc.id),
+        paper_id=str(doc.paper_id),
+        filename=doc.filename,
+        file_size=doc.file_size,
+        mime_type=doc.mime_type,
+        checksum=doc.checksum,
+        indexing_status=str(doc.indexing_status.value if hasattr(doc.indexing_status, "value") else doc.indexing_status),
+        indexing_attempts=doc.indexing_attempts or 0,
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+        updated_at=doc.updated_at.isoformat() if doc.updated_at else None,
+    )
+
+
+@v1_router.get(
+    "/collections/{collection_id}",
+    response_model=CollectionDetailsResponseBody,
+    status_code=200,
+    summary="Get collection metadata",
+    description="Retrieves collection metadata and workspace association. Enforces ownership authorization.",
+    responses={
+        200: {"description": "Collection details returned successfully.", "model": CollectionDetailsResponseBody},
+        400: {"description": "Invalid collection UUID."},
+        401: {"description": "Authentication required or invalid credentials."},
+        403: {"description": "Access to this collection is forbidden."},
+        404: {"description": "Collection was not found."},
+    },
+)
+def get_collection_details(
+    collection_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> CollectionDetailsResponseBody:
+    """Get metadata for a collection."""
+    try:
+        col_uuid = UUID(collection_id.strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid collection_id: must be a valid UUID.")
+
+    auth_service = get_auth_service(request)
+    if current_user is not None and auth_service is not None:
+        col, _ = auth_service.verify_collection_ownership(col_uuid, current_user.id)
+    else:
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is None:
+            raise InvalidConfigurationError("session_factory is not configured")
+        from nexora.database.repository.collection import CollectionRepository
+
+        with session_factory() as session:
+            col_repo = CollectionRepository(session)
+            col = col_repo.get_by_id(col_uuid)
+            if col is None:
+                raise DocumentNotFoundError(f"Collection with id {col_uuid} not found.")
+
+    return CollectionDetailsResponseBody(
+        collection_id=str(col.id),
+        workspace_id=str(col.workspace_id),
+        name=col.name,
+        description=col.description,
+        created_at=col.created_at.isoformat() if col.created_at else None,
+        updated_at=col.updated_at.isoformat() if col.updated_at else None,
+    )
+
+
+@v1_router.get(
+    "/workspaces/{workspace_id}/collections",
+    response_model=WorkspaceCollectionsResponseBody,
+    status_code=200,
+    summary="List collections in a workspace",
+    description="Lists all collections belonging to a workspace. Enforces workspace ownership authorization.",
+    responses={
+        200: {"description": "Collections returned successfully.", "model": WorkspaceCollectionsResponseBody},
+        400: {"description": "Invalid workspace UUID."},
+        401: {"description": "Authentication required or invalid credentials."},
+        403: {"description": "Access to this workspace is forbidden."},
+        404: {"description": "Workspace was not found."},
+    },
+)
+def list_workspace_collections(
+    workspace_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> WorkspaceCollectionsResponseBody:
+    """List collections in a workspace."""
+    try:
+        ws_uuid = UUID(workspace_id.strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid workspace_id: must be a valid UUID.")
+
+    auth_service = get_auth_service(request)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured")
+
+    if current_user is not None and auth_service is not None:
+        auth_service.verify_workspace_ownership(ws_uuid, current_user.id)
+
+    from nexora.database.repository.collection import CollectionRepository
+
+    with session_factory() as session:
+        col_repo = CollectionRepository(session)
+        collections = col_repo.list_by_workspace_id(ws_uuid)
+
+        col_models = [
+            CollectionDetailsResponseBody(
+                collection_id=str(c.id),
+                workspace_id=str(c.workspace_id),
+                name=c.name,
+                description=c.description,
+                created_at=c.created_at.isoformat() if c.created_at else None,
+                updated_at=c.updated_at.isoformat() if c.updated_at else None,
+            )
+            for c in collections
+        ]
+
+    return WorkspaceCollectionsResponseBody(
+        workspace_id=str(ws_uuid),
+        collections=col_models,
+    )

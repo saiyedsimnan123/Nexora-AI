@@ -11,9 +11,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from nexora import __version__
 from nexora.api.errors import (
     AnalysisServiceError,
+    AuthenticationError,
     ComparisonServiceError,
     DocumentNotFoundError,
     FileTooLargeError,
+    ForbiddenError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
@@ -42,12 +44,16 @@ from nexora.document.ingestion import VectorIndexingError
 
 
 def _error_response(
-    status_code: int, code: str, message: str, details: list[dict[str, Any]] | None = None
+    status_code: int,
+    code: str,
+    message: str,
+    details: list[dict[str, Any]] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     error: dict[str, Any] = {"code": code, "message": message}
     if details:
         error["details"] = details
-    return JSONResponse(status_code=status_code, content={"error": error})
+    return JSONResponse(status_code=status_code, content={"error": error}, headers=headers)
 
 
 async def _invalid_request(request: Request, exc: Exception) -> JSONResponse:
@@ -103,13 +109,26 @@ async def _validation_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(422, "validation_error", "Request validation failed.", details)
 
 
+async def _unauthorized(request: Request, exc: Exception) -> JSONResponse:
+    message = str(exc) if str(exc) else "Authentication credentials are required or invalid."
+    return _error_response(
+        401, "unauthorized", message, headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
+async def _forbidden(request: Request, exc: Exception) -> JSONResponse:
+    message = str(exc) if str(exc) else "Access to the requested resource is forbidden."
+    return _error_response(403, "forbidden", message)
+
+
 async def _http_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)
     try:
         phrase = HTTPStatus(exc.status_code).phrase
     except ValueError:
         phrase = "HTTP error"
-    return _error_response(exc.status_code, "http_error", phrase)
+    headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None
+    return _error_response(exc.status_code, "http_error", phrase, headers=headers)
 
 
 async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
@@ -147,11 +166,20 @@ def create_app(
     discovery_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
+    auth_service: Any = None,
+    enforce_auth: bool | None = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
 ) -> FastAPI:
-    """Build the app around injected research, ingestion, analysis, comparison, gap, and discovery services."""
+    """Build the app around injected research, ingestion, analysis, comparison, gap, discovery, and auth services."""
     if not callable(getattr(research_service, "ask", None)):
         raise InvalidConfigurationError("research_service must provide ask(request)")
+
+    if enforce_auth is None:
+        enforce_auth = auth_service is not None
+
+    if enforce_auth and auth_service is None and session_factory is not None:
+        from nexora.auth.service import AuthenticationService
+        auth_service = AuthenticationService(session_factory)
 
     app = FastAPI(
         title="Nexora AI",
@@ -170,11 +198,15 @@ def create_app(
     app.state.discovery_service = discovery_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
+    app.state.auth_service = auth_service
+    app.state.enforce_auth = enforce_auth
     app.state.max_upload_size_bytes = max_upload_size_bytes
 
     app.include_router(health_router)
     app.include_router(v1_router)
 
+    app.add_exception_handler(AuthenticationError, _unauthorized)
+    app.add_exception_handler(ForbiddenError, _forbidden)
     app.add_exception_handler(FileTooLargeError, _file_too_large)
     app.add_exception_handler(OversizedPDFError, _file_too_large)
     app.add_exception_handler(DocumentNotFoundError, _not_found)

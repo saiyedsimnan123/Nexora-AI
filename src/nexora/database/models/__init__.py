@@ -10,6 +10,7 @@ from nexora.database.models.base import (
     UUIDPrimaryKeyMixin,
     utc_now,
 )
+from nexora.database.models.api_key import ApiKey
 from nexora.database.models.author import Author
 from nexora.database.models.collection import Collection
 from nexora.database.models.document import Document, IndexingStatus
@@ -21,6 +22,7 @@ from nexora.database.models.user import User
 from nexora.database.models.workspace import Workspace
 
 __all__ = [
+    "ApiKey",
     "NAMING_CONVENTION",
     "Author",
     "Base",

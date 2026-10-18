@@ -2,10 +2,12 @@
 
 from nexora.api.errors import (
     AnalysisServiceError,
+    AuthenticationError,
     ComparisonServiceError,
     DocumentIngestionApiError,
     DocumentNotFoundError,
     FileTooLargeError,
+    ForbiddenError,
     GapDiscoveryServiceError,
     InvalidConfigurationError,
     InvalidRequestError,
@@ -33,11 +35,13 @@ from nexora.api.service import ResearchApplicationService
 __all__ = [
     "AnalysisServiceError",
     "AttributedSource",
+    "AuthenticationError",
     "ComparisonServiceError",
     "DocumentIngestResponse",
     "DocumentIngestionApiError",
     "DocumentNotFoundError",
     "FileTooLargeError",
+    "ForbiddenError",
     "GapDiscoveryServiceError",
     "InvalidConfigurationError",
     "InvalidRequestError",

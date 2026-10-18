@@ -396,6 +396,16 @@ def build_http_app(
             document_pipeline=document_pipeline,
         )
 
+    auth_service = dependencies.get("auth_service")
+    if auth_service is None and session_factory is not None:
+        from nexora.auth.service import AuthenticationService
+
+        auth_service = AuthenticationService(session_factory=session_factory)
+
+    enforce_auth = dependencies.get("enforce_auth")
+    if enforce_auth is None:
+        enforce_auth = auth_service is not None
+
     return create_app(
         research_service,
         rag_pipeline=rag_pipeline,
@@ -406,5 +416,7 @@ def build_http_app(
         discovery_service=discovery_service,
         document_pipeline=document_pipeline,
         session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=enforce_auth,
         max_upload_size_bytes=max_upload_size_bytes,
     )

@@ -1,5 +1,6 @@
 """Repository exports."""
 
+from nexora.database.repository.api_key import ApiKeyRepository
 from nexora.database.repository.author import AuthorRepository
 from nexora.database.repository.base import (
     BaseRepository,
@@ -18,6 +19,7 @@ from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
 
 __all__ = [
+    "ApiKeyRepository",
     "AuthorRepository",
     "BaseRepository",
     "CollectionRepository",

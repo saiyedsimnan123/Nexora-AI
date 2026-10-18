@@ -42,3 +42,11 @@ class VerificationServiceError(RuntimeError):
 class GapDiscoveryServiceError(RuntimeError):
     """Research gap discovery failed; the original error is chained as __cause__."""
 
+
+class AuthenticationError(Exception):
+    """Authentication credential is missing, malformed, invalid, expired, or revoked."""
+
+
+class ForbiddenError(Exception):
+    """Caller is authenticated but not authorized to access or modify the requested resource."""
+

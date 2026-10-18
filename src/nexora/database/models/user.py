@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from nexora.database.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from nexora.database.models.api_key import ApiKey
     from nexora.database.models.workspace import Workspace
 
 EMAIL_MAX_LENGTH = 320  # 64 (local part) + 1 + 255 (domain), per RFC 5321
@@ -26,6 +27,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Ownership deletion is handled by the database (ON DELETE CASCADE).
     # passive_deletes="all": the ORM neither loads nor nulls children when a user is deleted.
     workspaces: Mapped[list[Workspace]] = relationship(
+        back_populates="user", passive_deletes="all"
+    )
+    api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", passive_deletes="all"
     )
 
