@@ -1,7 +1,9 @@
 """FastAPI application factory and centralized error handling."""
 
-import os
+from contextlib import asynccontextmanager
 from http import HTTPStatus
+import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -155,6 +157,78 @@ async def _discovery_failed(request: Request, exc: Exception) -> JSONResponse:
         500, "discovery_failed", "The scholarly discovery request could not be completed."
     )
 
+def _run_shutdown_cleanup(app: FastAPI) -> None:
+    """Safely and idempotently close owned application resources on shutdown."""
+    app_logger = logging.getLogger(__name__)
+
+    # 1. Dispose database connection pool
+    session_factory = getattr(app.state, "session_factory", None)
+    if session_factory is not None:
+        try:
+            engine = (
+                getattr(app.state, "db_engine", None)
+                or getattr(session_factory, "bind", None)
+                or getattr(session_factory, "kw", {}).get("bind")
+            )
+            if engine is not None and hasattr(engine, "dispose"):
+                engine.dispose()
+        except Exception as exc:
+            app_logger.warning("Error disposing database engine on shutdown: %s", exc)
+
+    # 2. Close vector search client
+    try:
+        vs = getattr(app.state, "vector_store", None)
+        if vs is None:
+            ingestion = getattr(app.state, "ingestion_service", None)
+            vs = getattr(ingestion, "_vector_store", None)
+        v_client = getattr(app.state, "vector_client", None)
+        if v_client is None and vs is not None:
+            v_client = getattr(vs, "_client", None)
+        if v_client is not None and hasattr(v_client, "close"):
+            v_client.close()
+        if vs is not None and hasattr(vs, "close"):
+            vs.close()
+    except Exception as exc:
+        app_logger.warning("Error closing vector client on shutdown: %s", exc)
+
+    # 3. Close Rate Limit Storage (e.g. Redis)
+    try:
+        rl_storage = getattr(app.state, "rate_limit_storage", None)
+        if rl_storage is not None and hasattr(rl_storage, "close"):
+            rl_storage.close()
+    except Exception as exc:
+        app_logger.warning("Error closing rate limit storage on shutdown: %s", exc)
+
+    # 4. Close Discovery HTTP clients
+    try:
+        discovery = getattr(app.state, "discovery_service", None)
+        if discovery is not None:
+            for attr in ("_provider", "_downloader", "_arxiv_client"):
+                sub = getattr(discovery, attr, None)
+                if sub is not None and hasattr(sub, "close"):
+                    sub.close()
+                elif sub is not None:
+                    c = getattr(sub, "_client", None)
+                    if c is not None and hasattr(c, "close"):
+                        c.close()
+    except Exception as exc:
+        app_logger.warning("Error closing discovery clients on shutdown: %s", exc)
+
+    # 5. Execute custom shutdown hooks
+    hooks = getattr(app.state, "shutdown_hooks", [])
+    for hook in hooks:
+        try:
+            if callable(hook):
+                hook()
+        except Exception as exc:
+            app_logger.warning("Error running custom shutdown hook: %s", exc)
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    yield
+    _run_shutdown_cleanup(app)
+
 
 def create_app(
     research_service: Any,
@@ -167,6 +241,9 @@ def create_app(
     discovery_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
+    vector_store: Any = None,
+    vector_client: Any = None,
+    db_engine: Any = None,
     auth_service: Any = None,
     enforce_auth: bool | None = None,
     cors_config: Any = None,
@@ -190,6 +267,22 @@ def create_app(
             "Authentication is enforced but no session_factory or auth_service is configured."
         )
 
+    # Auto-instantiate RedisRateLimitStorage if backend is 'redis' and storage not explicitly provided
+    if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
+        if getattr(rate_limit_config, "backend", "memory") == "redis" and rate_limit_storage is None:
+            if getattr(rate_limit_config, "redis_url", None):
+                from nexora.api.rate_limit import RedisRateLimitStorage
+
+                rate_limit_storage = RedisRateLimitStorage(
+                    redis_url=rate_limit_config.redis_url,
+                    fail_closed=getattr(rate_limit_config, "redis_fail_closed", True),
+                )
+            else:
+                raise InvalidConfigurationError(
+                    "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
+                    "Pass rate_limit_storage to create_app or set NEXORA_RATE_LIMIT_REDIS_URL."
+                )
+
     app = FastAPI(
         title="Nexora AI",
         description=(
@@ -197,6 +290,7 @@ def create_app(
             "with full citation attribution, lexical BM25, and hybrid retrieval."
         ),
         version=__version__,
+        lifespan=_app_lifespan,
     )
     app.state.research_service = research_service
     app.state.rag_pipeline = rag_pipeline
@@ -207,19 +301,19 @@ def create_app(
     app.state.discovery_service = discovery_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
+    app.state.vector_store = vector_store
+    app.state.vector_client = vector_client
+    app.state.db_engine = db_engine
     app.state.auth_service = auth_service
     app.state.enforce_auth = enforce_auth
     app.state.cors_config = cors_config
     app.state.rate_limit_config = rate_limit_config
+    app.state.rate_limit_storage = rate_limit_storage
     app.state.max_upload_size_bytes = max_upload_size_bytes
+    app.state.shutdown_hooks = []
 
     # 1. Rate Limit Middleware (runs after CORS, before endpoints)
     if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
-        if getattr(rate_limit_config, "backend", "memory") == "redis" and rate_limit_storage is None:
-            raise InvalidConfigurationError(
-                "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
-                "Pass rate_limit_storage to create_app or use backend='memory'."
-            )
         from nexora.api.rate_limit import RateLimitMiddleware
 
         app.add_middleware(
@@ -228,7 +322,7 @@ def create_app(
             storage=rate_limit_storage,
         )
 
-    # 2. CORS Middleware (outermost: handles preflight OPTIONS and adds CORS headers to all responses)
+    # 2. CORS Middleware (handles preflight OPTIONS and adds CORS headers to responses)
     if (
         cors_config is not None
         and getattr(cors_config, "enabled", False)
@@ -244,6 +338,11 @@ def create_app(
             allow_headers=list(cors_config.allow_headers),
             max_age=cors_config.max_age,
         )
+
+    # 3. Request ID Correlation Middleware (outermost: assigns & echoes X-Request-ID for all requests)
+    from nexora.api.logging import RequestIDMiddleware
+
+    app.add_middleware(RequestIDMiddleware)
 
     app.include_router(health_router)
     app.include_router(v1_router)

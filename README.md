@@ -920,7 +920,12 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
   - `default` (120 req/min): Standard metadata reads.
   - Unmetered: `/health`, `/docs`.
 - **Tamper-Resistant Caller Tracking**: Authenticated requests are keyed by a 16-character SHA-256 digest prefix of their API key (raw secrets are never logged or stored in counter keys). Unauthenticated requests fall back to client IP, with anti-spoofing protection (`X-Forwarded-For` only trusted from explicitly configured `NEXORA_RATE_LIMIT_TRUSTED_PROXIES`).
-- **Multi-Worker Note**: Built-in `memory` backend maintains local sliding-window counters per process. For multi-worker deployments (e.g. Uvicorn `--workers N` or distributed containers), an explicit `RateLimitStorage` implementation (e.g. Redis) can be passed to `create_app` or `build_http_app`. If `backend="redis"` is configured without storage, startup fails closed immediately.
+- **Multi-Worker & Distributed Enforcement**:
+  - `memory` (default): In-process sliding-window counter for local development and unit tests. In multi-worker deployments (e.g. Uvicorn `--workers N`), each worker maintains its own counters.
+  - `redis`: Distributed rate limiting backed by Redis via atomic Lua scripts (`_LUA_SLIDING_WINDOW`). Guarantees atomic prune-and-check operations without race conditions across multiple workers and container replicas.
+  - **Configuration**: Set `NEXORA_RATE_LIMIT_BACKEND=redis` and configure `NEXORA_RATE_LIMIT_REDIS_URL` (or `REDIS_URL`, e.g. `redis://redis:6379/0`).
+  - **Fail-Closed Security Policy**: `NEXORA_RATE_LIMIT_REDIS_FAIL_CLOSED=true` (default) ensures requests are rejected safely if Redis becomes unreachable or times out, preventing API abuse during infrastructure degradation.
+  - **Fail-Fast Validation**: If `backend="redis"` is configured without a valid `redis_url` or injected storage, application startup fails closed immediately.
 
 #### 4. CORS Security
 - **Secure by Default**: CORS is disabled by default (`NEXORA_CORS_ENABLED=false`).
@@ -956,6 +961,19 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
 - **Bounded Batch Execution**: Strictly enforces `1 <= batch_size <= 100` (`MAX_BATCH_SIZE`) to prevent synchronous event loop or worker thread starvation.
 - **Crash Claiming**: Claims unindexed documents using timed leases (`claimed_at`, `claimed_by`) with automatic expiry (`claim_timeout_seconds=300.0`) so crashed workers release locks safely.
 - **Idempotency**: Vectors are keyed deterministically by chunk UUID (`str(chunk.id)`), guaranteeing duplicate recovery runs overwrite in place without creating orphaned vectors.
+
+#### 8. Request Correlation, Structured Logging & Graceful Lifecycle
+- **Request Correlation**: Outermost ASGI `RequestIDMiddleware` validates incoming `X-Request-ID` / `X-Correlation-ID` headers against `^[a-zA-Z0-9_\-\.]{1,64}$`, generating secure `req_<hex>` identifiers when absent or invalid. Guarantees that `X-Request-ID` is echoed on all HTTP responses (including 200 OK, 4xx client errors, 429 rate limit exceeded, and 500 internal errors).
+- **Context Variable Tracking**: Propagates request IDs across async coroutines and threadpools via Python `contextvars`, making correlation IDs instantly available to loggers and route handlers without manual plumbing.
+- **Structured JSON Logging**: `StructuredJsonFormatter` produces single-line machine-readable JSON logs containing `timestamp` (ISO-8601 UTC), `level`, `severity`, `logger`, `request_id`, and `message`.
+- **Sensitive Data Redaction**: Automatically scrubs Bearer tokens, API keys, passwords, database credentials, and Redis passwords from log messages and exception tracebacks prior to emission.
+- **Graceful Lifespan Teardown**: ASGI `lifespan` handler deterministically cleans up owned resources on process termination:
+  - Disposes database connection pool (`engine.dispose()`).
+  - Closes vector store / retrieval clients.
+  - Closes Redis rate limiting storage connections.
+  - Closes discovery HTTP clients (`ArxivClient`, `SafePDFDownloader`).
+  - Executes registered custom shutdown hooks (`app.state.shutdown_hooks`).
+  - **Fault Isolation**: Each subsystem cleanup is isolated in its own `try...except` block, ensuring a failure or timeout in one resource does not abort the teardown of remaining components.
 
 ---
 

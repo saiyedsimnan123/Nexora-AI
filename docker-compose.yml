@@ -52,7 +52,24 @@ services:
       - nexora-net
 
   # ---------------------------------------------------------------------------
-  # 3. Database Migration Runner (One-Shot Job)
+  # 3. Redis In-Memory Datastore (Distributed Rate Limiting)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: nexora-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nexora-net
+
+  # ---------------------------------------------------------------------------
+  # 4. Database Migration Runner (One-Shot Job)
   # ---------------------------------------------------------------------------
   migrate:
     build:
@@ -70,7 +87,7 @@ services:
       - nexora-net
 
   # ---------------------------------------------------------------------------
-  # 4. Nexora AI Backend Application
+  # 5. Nexora AI Backend Application
   # ---------------------------------------------------------------------------
   app:
     build:
@@ -87,6 +104,7 @@ services:
       NEXORA_VECTOR_STORE: qdrant
       NEXORA_QDRANT_URL: http://qdrant:6333
       NEXORA_QDRANT_COLLECTION: ${NEXORA_QDRANT_COLLECTION:-research_papers}
+      NEXORA_RATE_LIMIT_REDIS_URL: redis://redis:6379/0
       NEXORA_EMBEDDING_PROVIDER: ${NEXORA_EMBEDDING_PROVIDER:-hash}
       NEXORA_EMBEDDING_DIMENSION: ${NEXORA_EMBEDDING_DIMENSION:-128}
       NEXORA_EMBEDDING_API_KEY: ${NEXORA_EMBEDDING_API_KEY:-}
@@ -98,6 +116,8 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

@@ -64,6 +64,8 @@ class RateLimitConfig:
     default_limit: int = 120
     backend: str = "memory"
     trusted_proxies: tuple[str, ...] = ()
+    redis_url: str | None = None
+    redis_fail_closed: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -100,6 +102,8 @@ class RateLimitConfig:
           NEXORA_RATE_LIMIT_DEFAULT: int (default 120)
           NEXORA_RATE_LIMIT_BACKEND: str (default "memory")
           NEXORA_RATE_LIMIT_TRUSTED_PROXIES: comma-separated list of IP addresses
+          NEXORA_RATE_LIMIT_REDIS_URL / REDIS_URL: Redis connection URL (e.g. redis://localhost:6379/0)
+          NEXORA_RATE_LIMIT_REDIS_FAIL_CLOSED: bool (default True)
         """
         env = os.environ if environ is None else environ
 
@@ -132,5 +136,13 @@ class RateLimitConfig:
             kwargs["trusted_proxies"] = tuple(
                 p.strip() for p in raw_proxies.split(",") if p.strip()
             )
+
+        redis_url = env.get("NEXORA_RATE_LIMIT_REDIS_URL") or env.get("REDIS_URL")
+        if redis_url is not None and redis_url.strip():
+            kwargs["redis_url"] = redis_url.strip()
+
+        raw_fail_closed = env.get("NEXORA_RATE_LIMIT_REDIS_FAIL_CLOSED")
+        if raw_fail_closed is not None and raw_fail_closed.strip():
+            kwargs["redis_fail_closed"] = _parse_bool("NEXORA_RATE_LIMIT_REDIS_FAIL_CLOSED", raw_fail_closed)
 
         return cls(**kwargs)

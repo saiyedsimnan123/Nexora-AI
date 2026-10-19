@@ -84,6 +84,136 @@ class InMemoryRateLimitStorage:
             self._history.clear()
 
 
+_LUA_SLIDING_WINDOW = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local window = tonumber(ARGV[3])
+local member_id = ARGV[4]
+local cutoff = now - window
+
+-- 1. Evict entries outside the sliding window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+
+-- 2. Count current hits in the window
+local current_count = redis.call('ZCARD', key)
+
+if current_count >= limit then
+    -- Limit exceeded; find oldest timestamp to compute retry_after
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry_after = 1
+    if oldest and #oldest >= 2 then
+        local oldest_time = tonumber(oldest[2])
+        retry_after = math.max(1, math.ceil(oldest_time + window - now))
+    end
+    return {0, 0, retry_after}
+else
+    -- Hit allowed; record current member and score
+    redis.call('ZADD', key, now, member_id)
+    redis.call('EXPIRE', key, math.ceil(window) + 2)
+    local remaining = math.max(0, limit - current_count - 1)
+    return {1, remaining, 0}
+end
+"""
+
+
+class RedisRateLimitStorage:
+    """Atomic, distributed sliding-window rate limit storage backed by Redis.
+
+    Uses an atomic Lua script executing sliding-window log pruning and counting,
+    preventing race conditions under high concurrency across multiple workers/nodes.
+    """
+
+    def __init__(
+        self,
+        redis_client: Any = None,
+        redis_url: str | None = None,
+        *,
+        prefix: str = "nexora:ratelimit:",
+        connect_timeout: float = 2.0,
+        socket_timeout: float = 2.0,
+        fail_closed: bool = True,
+        time_func: Callable[[], float] = time.time,
+    ) -> None:
+        self._prefix = prefix
+        self._fail_closed = fail_closed
+        self._time_func = time_func
+        self._owns_client = False
+
+        if redis_client is not None:
+            self._client = redis_client
+        elif redis_url:
+            import redis
+
+            self._client = redis.from_url(
+                redis_url,
+                socket_connect_timeout=connect_timeout,
+                socket_timeout=socket_timeout,
+                decode_responses=True,
+            )
+            self._owns_client = True
+        else:
+            raise RateLimitConfigurationError(
+                "Either redis_client or redis_url must be provided for RedisRateLimitStorage"
+            )
+
+        self._lua_script = _LUA_SLIDING_WINDOW
+
+    def check_and_increment(
+        self, key: str, limit: int, window_seconds: int
+    ) -> tuple[bool, int, int]:
+        """Atomically check and record a rate-limit hit using a Redis Lua script."""
+        import logging
+        import uuid
+
+        now = self._time_func()
+        member_id = f"{now}:{uuid.uuid4().hex[:8]}"
+        full_key = f"{self._prefix}{key}"
+
+        try:
+            # Execute atomic sliding-window Lua script
+            eval_fn = getattr(self._client, "eval", None)
+            if not callable(eval_fn):
+                raise RuntimeError("Redis client does not support eval()")
+
+            res = eval_fn(
+                self._lua_script,
+                1,
+                full_key,
+                str(now),
+                str(limit),
+                str(window_seconds),
+                member_id,
+            )
+            # res is expected to be [allowed, remaining, retry_after]
+            allowed = bool(res[0])
+            remaining = int(res[1])
+            retry_after = int(res[2])
+            return allowed, remaining, retry_after
+
+        except Exception as exc:
+            logging.getLogger(__name__).error(
+                "Redis rate limit evaluation failed for key %s (%s): %s",
+                full_key,
+                type(exc).__name__,
+                exc,
+            )
+            if self._fail_closed:
+                # Security policy: fail closed to prevent DDoS / abuse on infrastructure degradation
+                return False, 0, max(1, window_seconds)
+            # Explicit opt-in fail-open policy
+            return True, 1, 0
+
+    def close(self, force: bool = False) -> None:
+        """Close underlying Redis connection pool if owned (or if forced)."""
+        if (getattr(self, "_owns_client", False) or force) and self._client is not None and hasattr(self._client, "close"):
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+
+
 def get_caller_identity(request: Request, trusted_proxies: Sequence[str] = ()) -> str:
     """Derive a tamper-resistant caller identifier for rate limiting.
 
@@ -187,10 +317,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.config = config
         if config.enabled and config.backend == "redis" and storage is None:
-            raise RateLimitConfigurationError(
-                "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
-                "Pass a custom RateLimitStorage instance or set backend to 'memory'."
-            )
+            if config.redis_url:
+                storage = RedisRateLimitStorage(
+                    redis_url=config.redis_url,
+                    fail_closed=config.redis_fail_closed,
+                )
+            else:
+                raise RateLimitConfigurationError(
+                    "Redis rate limit backend ('redis') is configured, but no distributed RateLimitStorage backend was provided. "
+                    "Set NEXORA_RATE_LIMIT_REDIS_URL or pass a custom RateLimitStorage instance."
+                )
         self.storage = storage or InMemoryRateLimitStorage()
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Any]) -> Response:

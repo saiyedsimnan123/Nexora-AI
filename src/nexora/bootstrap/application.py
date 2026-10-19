@@ -435,6 +435,8 @@ def build_http_app(
         discovery_service=discovery_service,
         document_pipeline=document_pipeline,
         session_factory=session_factory,
+        vector_store=vector_store,
+        vector_client=qdrant_client,
         auth_service=auth_service,
         enforce_auth=enforce_auth,
         cors_config=cors_config,

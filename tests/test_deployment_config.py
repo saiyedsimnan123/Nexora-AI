@@ -40,6 +40,7 @@ def test_requirements_txt_contains_only_runtime_dependencies() -> None:
         "openai",
         "python-dotenv",
         "python-multipart",
+        "redis",
     }
     for expected in expected_runtime_packages:
         assert any(expected in pkg for pkg in packages), f"Missing {expected} in requirements.txt"
@@ -157,18 +158,26 @@ def test_docker_compose_validity_and_service_wiring() -> None:
     assert "healthcheck" in qdrant
     assert "qdrant_data" in str(qdrant.get("volumes", []))
 
-    # 3. One-shot migration service
+    # 3. Redis service
+    assert "redis" in services, "Must define redis service"
+    redis_svc = services["redis"]
+    assert "redis:7" in redis_svc["image"]
+    assert "healthcheck" in redis_svc
+    assert "127.0.0.1:6379:6379" in redis_svc.get("ports", [])
+
+    # 4. One-shot migration service
     assert "migrate" in services, "Must define migrate service"
     migrate = services["migrate"]
     assert migrate["command"] == ["alembic", "upgrade", "head"]
     assert migrate.get("restart") == "no"
     assert "postgres" in migrate.get("depends_on", {})
 
-    # 4. App service
+    # 5. App service
     assert "app" in services, "Must define app service"
     app = services["app"]
     assert "postgres" in app.get("depends_on", {})
     assert "qdrant" in app.get("depends_on", {})
+    assert "redis" in app.get("depends_on", {})
     assert "migrate" in app.get("depends_on", {})
     # Must wait for migration service to complete successfully
     assert app["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
