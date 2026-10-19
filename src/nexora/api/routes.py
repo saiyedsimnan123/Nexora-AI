@@ -600,9 +600,10 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
     rag_pipeline = getattr(request.app.state, "rag_pipeline", None)
     vector_store = getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
     if vector_store is not None:
-        if callable(getattr(vector_store, "count", None)):
+        readiness_fn = getattr(vector_store, "check_readiness", None) or getattr(vector_store, "count", None)
+        if callable(readiness_fn):
             try:
-                vector_store.count()
+                readiness_fn()
                 checks["vector_store"] = {"status": "ready"}
             except Exception as exc:
                 checks["vector_store"] = {

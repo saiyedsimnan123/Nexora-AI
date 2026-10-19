@@ -203,6 +203,11 @@ class OpenAIEmbeddingProvider:
             )
         self._client = _create_openai_client(config.api_key, config.base_url)
 
+    @property
+    def dimension(self) -> int | None:
+        """Return the configured embedding dimension if set."""
+        return self._config.dimension
+
     def _request(self, input_value: str | list[str]) -> Any:
         """Send one embeddings request, wrapping any client failure."""
         request = {**self._base_request, "input": input_value}

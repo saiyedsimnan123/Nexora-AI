@@ -56,6 +56,14 @@ class EmbeddingService:
         self._cache = cache
         self._cache_namespace = cache_namespace
 
+    @property
+    def dimension(self) -> int | None:
+        """Return the vector dimension of the underlying provider if known."""
+        dim = getattr(self._provider, "dimension", None)
+        if isinstance(dim, int) and not isinstance(dim, bool) and dim > 0:
+            return dim
+        return None
+
     def cache_key(self, text: str) -> str:
         """Return a deterministic cache key for ``text``."""
         if not isinstance(text, str):

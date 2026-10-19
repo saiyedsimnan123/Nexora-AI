@@ -90,6 +90,34 @@ class QdrantVectorStore:
             ),
         )
 
+    def validate_collection_compatibility(self) -> None:
+        """Validate that the target collection exists and its vector dimension matches."""
+        get_col_fn = getattr(self._client, "get_collection", None)
+        if not callable(get_col_fn):
+            return
+        info = self._call("get_collection", get_col_fn, self._collection)
+        params = getattr(getattr(info, "config", None), "params", None)
+        vectors = getattr(params, "vectors", None)
+        actual_size = None
+        if hasattr(vectors, "size"):
+            actual_size = vectors.size
+        elif isinstance(vectors, dict):
+            for v in vectors.values():
+                if hasattr(v, "size"):
+                    actual_size = v.size
+                    break
+
+        if actual_size is not None and actual_size != self._dimension:
+            raise QdrantStoreError(
+                f"Qdrant collection {self._collection!r} vector dimension {actual_size} "
+                f"does not match configured dimension {self._dimension}"
+            )
+
+    def check_readiness(self) -> None:
+        """Check server connectivity, collection existence, and vector dimension compatibility."""
+        self.validate_collection_compatibility()
+        self.count()
+
     def upsert(self, records: list[VectorRecord]) -> None:
         if not isinstance(records, list):
             raise TypeError("records must be a list")

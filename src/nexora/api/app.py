@@ -1,5 +1,6 @@
 """FastAPI application factory and centralized error handling."""
 
+import os
 from http import HTTPStatus
 from typing import Any
 
@@ -278,12 +279,25 @@ def create_app(
     return app
 
 
+def _check_offline_allowed_in_environment() -> None:
+    for var_name in ("APP_ENV", "ENVIRONMENT", "NEXORA_APP_MODE"):
+        raw_val = os.getenv(var_name)
+        if raw_val is not None and raw_val.strip().lower() in ("production", "prod"):
+            raise InvalidConfigurationError(
+                f"Attempted to launch offline demo application in production mode ({var_name}={raw_val!r}). "
+                "The offline demo runs unauthenticated with in-memory storage and mock benchmarks. "
+                "For production deployments, use 'uvicorn nexora.server:create_production_app --factory' "
+                "or 'uvicorn nexora.server:app' with configured relational storage and authentication."
+            )
+
+
 def create_offline_app(*, rag_pipeline: Any = None) -> FastAPI:
     """Convenience factory to create a fully offline FastAPI app.
 
     Uses an in-memory RAG pipeline backed by the curated research paper benchmark.
     Requires zero API keys, external servers, or network calls.
     """
+    _check_offline_allowed_in_environment()
     from nexora.rag.pipeline import create_offline_rag_pipeline
 
     if rag_pipeline is None:

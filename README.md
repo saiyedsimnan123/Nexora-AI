@@ -826,6 +826,33 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
 
 ### Security, Authentication & Production Deployment Configuration
 
+#### 0. Production Startup & ASGI Entrypoint
+- **Production ASGI Factory**:
+  ```bash
+  uvicorn nexora.server:create_production_app --factory --host 0.0.0.0 --port 8000
+  ```
+  *(or `uvicorn nexora.server:app --host 0.0.0.0 --port 8000`)*
+- **Prerequisites**:
+  - **Database Migrations**: Apply all schema migrations prior to launching workers:
+    ```bash
+    alembic upgrade head
+    ```
+    *Note: The application creates connection pools lazily and connects to existing tables; it does not automatically execute DDL or schema migrations at runtime.*
+  - **Qdrant Collection Initialization**: When running with `NEXORA_VECTOR_STORE=qdrant`, ensure the target collection exists with the vector dimensionality matching your embedding provider (e.g., 1536 for OpenAI `text-embedding-3-small`, 768 for Gemini, or 128 for `hash` / `hash-sha256` testing):
+    *Note: The application connects to an existing collection and does not automatically create or resize collections during startup. If the target collection does not exist or has an incompatible dimensionality, vector store operations and `/ready` probes will fail closed with `QdrantStoreError` or dimension mismatch errors.*
+- **Required Production Environment Variables**:
+  - `NEXORA_DATABASE_URL` (or `DATABASE_URL`): PostgreSQL connection URL (e.g., `postgresql://user:password@localhost:5432/nexora`).
+  - `NEXORA_LLM_API_KEY`: API key for the LLM provider (or `OPENAI_API_KEY`).
+  - `NEXORA_LLM_MODEL`: Target model (e.g., `gpt-4o-mini`).
+  - `NEXORA_VECTOR_STORE`: `qdrant` (or `memory` for ephemeral dev/testing).
+  - `NEXORA_QDRANT_URL`: Required when vector store is `qdrant` (e.g., `http://localhost:6333`).
+  - `NEXORA_EMBEDDING_PROVIDER`: `openai`, `gemini`, or `hash`.
+  - `NEXORA_EMBEDDING_API_KEY`: Required if using external embedding providers (`openai` / `gemini`).
+  - `APP_ENV`: Set to `production` in production deployments.
+- **Fail-Safe Startup & Production Safeguards**:
+  - `create_production_app` validates all required configuration at boot time and fails closed with descriptive errors, keeping credentials and passwords completely out of exception messages and logs.
+  - The offline demo factory (`nexora.api.app:create_offline_app` and `nexora.api.app:app`) is safeguarded against accidental execution in production: if `APP_ENV=production`, `ENVIRONMENT=production`, or `NEXORA_APP_MODE=production` is detected, it raises `InvalidConfigurationError` immediately to prevent unauthenticated execution.
+
 #### 1. API Authentication & Multi-Tenant Authorization
 - **Credential Transport**: Pass credentials via `Authorization: Bearer <api_key>` or `X-API-Key: <api_key>`.
 - **Hashed Storage**: Only cryptographic SHA-256 digests of API keys are stored in the database. Raw keys are never stored, logged, or exposed.
