@@ -1,0 +1,115 @@
+# =============================================================================
+# Nexora AI — Local & Staging Docker Compose Stack
+# =============================================================================
+# Services:
+#   - postgres: PostgreSQL 16 database for relational metadata & auth
+#   - qdrant: Qdrant vector database for hybrid semantic retrieval
+#   - migrate: One-shot pre-deployment migration service (alembic upgrade head)
+#   - app: Nexora AI backend running the production ASGI entrypoint
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. PostgreSQL Relational Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexora-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nexora}
+      POSTGRES_USER: ${POSTGRES_USER:-nexora_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexora_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-nexora_user} -d $${POSTGRES_DB:-nexora}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexora-net
+
+  # ---------------------------------------------------------------------------
+  # 2. Qdrant Vector Database
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    container_name: nexora-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexora-net
+
+  # ---------------------------------------------------------------------------
+  # 3. Database Migration Runner (One-Shot Job)
+  # ---------------------------------------------------------------------------
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexora-migrate
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      NEXORA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexora_user}:${POSTGRES_PASSWORD:-nexora_secret}@postgres:5432/${POSTGRES_DB:-nexora}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - nexora-net
+
+  # ---------------------------------------------------------------------------
+  # 4. Nexora AI Backend Application
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexora-app
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      APP_ENV: production
+      PORT: 8000
+      NEXORA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexora_user}:${POSTGRES_PASSWORD:-nexora_secret}@postgres:5432/${POSTGRES_DB:-nexora}
+      NEXORA_VECTOR_STORE: qdrant
+      NEXORA_QDRANT_URL: http://qdrant:6333
+      NEXORA_QDRANT_COLLECTION: ${NEXORA_QDRANT_COLLECTION:-research_papers}
+      NEXORA_EMBEDDING_PROVIDER: ${NEXORA_EMBEDDING_PROVIDER:-hash}
+      NEXORA_EMBEDDING_DIMENSION: ${NEXORA_EMBEDDING_DIMENSION:-128}
+      NEXORA_EMBEDDING_API_KEY: ${NEXORA_EMBEDDING_API_KEY:-}
+      NEXORA_LLM_PROVIDER: ${NEXORA_LLM_PROVIDER:-openai}
+      NEXORA_LLM_API_KEY: ${NEXORA_LLM_API_KEY:-}
+      NEXORA_LLM_MODEL: ${NEXORA_LLM_MODEL:-gpt-4o-mini}
+      NEXORA_ENFORCE_AUTH: ${NEXORA_ENFORCE_AUTH:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - nexora-net
+
+volumes:
+  postgres_data:
+    name: nexora_postgres_data
+  qdrant_data:
+    name: nexora_qdrant_data
+
+networks:
+  nexora-net:
+    name: nexora_network

@@ -826,20 +826,50 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
 
 ### Security, Authentication & Production Deployment Configuration
 
-#### 0. Production Startup & ASGI Entrypoint
+#### 0. Production Startup & Container Deployment
 - **Production ASGI Factory**:
   ```bash
   uvicorn nexora.server:create_production_app --factory --host 0.0.0.0 --port 8000
   ```
   *(or `uvicorn nexora.server:app --host 0.0.0.0 --port 8000`)*
-- **Prerequisites**:
-  - **Database Migrations**: Apply all schema migrations prior to launching workers:
-    ```bash
-    alembic upgrade head
-    ```
-    *Note: The application creates connection pools lazily and connects to existing tables; it does not automatically execute DDL or schema migrations at runtime.*
-  - **Qdrant Collection Initialization**: When running with `NEXORA_VECTOR_STORE=qdrant`, ensure the target collection exists with the vector dimensionality matching your embedding provider (e.g., 1536 for OpenAI `text-embedding-3-small`, 768 for Gemini, or 128 for `hash` / `hash-sha256` testing):
-    *Note: The application connects to an existing collection and does not automatically create or resize collections during startup. If the target collection does not exist or has an incompatible dimensionality, vector store operations and `/ready` probes will fail closed with `QdrantStoreError` or dimension mismatch errors.*
+
+- **Containerized Deployment (Docker)**:
+  Build and run the production image (Python 3.12 slim, non-root user `appuser:10001`):
+  ```bash
+  docker build -t nexora-ai:latest .
+  docker run -d --name nexora-ai -p 8000:8000 --env-file .env nexora-ai:latest
+  ```
+
+- **Local & Staging Orchestration (Docker Compose)**:
+  Launch the complete stack (PostgreSQL 16, Qdrant, migration runner, and Nexora AI backend):
+  ```bash
+  # 1. Copy sample environment and configure provider keys
+  cp .env.example .env
+
+  # 2. Boot stack in background
+  docker compose up -d
+
+  # 3. View status and logs
+  docker compose ps
+  docker compose logs -f app
+
+  # 4. Tear down stack
+  docker compose down
+  ```
+  *Architecture Note: In Compose, the `migrate` service runs `alembic upgrade head` to completion before `app` begins serving traffic. When `app` starts, its `/ready` probe automatically validates that the schema and migration head are consistent.*
+
+- **Database Migrations**:
+  Apply all schema migrations prior to launching application workers:
+  ```bash
+  alembic upgrade head
+  ```
+  *Note: The application creates connection pools lazily and connects to existing tables; it does not automatically execute DDL or schema migrations at runtime.*
+  *In container environments, pre-flight migrations can be enabled via `RUN_MIGRATIONS=true` in `docker-entrypoint.sh`, or executed as a separate migration job/init-container.*
+
+- **Qdrant Collection Initialization**:
+  When running with `NEXORA_VECTOR_STORE=qdrant`, ensure the target collection exists with the vector dimensionality matching your embedding provider (e.g., 1536 for OpenAI `text-embedding-3-small`, 768 for Gemini, or 128 for `hash` / `hash-sha256` testing):
+  *Note: The application connects to an existing collection and does not automatically create or resize collections during startup. If the target collection does not exist or has an incompatible dimensionality, vector store operations and `/ready` probes will fail closed with `QdrantStoreError` or dimension mismatch errors.*
+
 - **Required Production Environment Variables**:
   - `NEXORA_DATABASE_URL` (or `DATABASE_URL`): PostgreSQL connection URL (e.g., `postgresql://user:password@localhost:5432/nexora`).
   - `NEXORA_LLM_API_KEY`: API key for the LLM provider (or `OPENAI_API_KEY`).
@@ -849,6 +879,13 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
   - `NEXORA_EMBEDDING_PROVIDER`: `openai`, `gemini`, or `hash`.
   - `NEXORA_EMBEDDING_API_KEY`: Required if using external embedding providers (`openai` / `gemini`).
   - `APP_ENV`: Set to `production` in production deployments.
+
+- **Reproducible Dependency Management**:
+  - `requirements.txt`: Minimal runtime-only dependencies with validated compatibility bounds.
+  - `requirements-dev.txt`: Development, linting, and testing dependencies (`-r requirements.txt` + `pytest`).
+  - `requirements.lock`: Exact, byte-for-byte pinned versions used for reproducible production container builds.
+  - To update locked dependencies: test compatibility in a clean virtual environment, run `pytest`, and freeze the tested packages into `requirements.lock`.
+
 - **Fail-Safe Startup & Production Safeguards**:
   - `create_production_app` validates all required configuration at boot time and fails closed with descriptive errors, keeping credentials and passwords completely out of exception messages and logs.
   - The offline demo factory (`nexora.api.app:create_offline_app` and `nexora.api.app:app`) is safeguarded against accidental execution in production: if `APP_ENV=production`, `ENVIRONMENT=production`, or `NEXORA_APP_MODE=production` is detected, it raises `InvalidConfigurationError` immediately to prevent unauthenticated execution.
@@ -907,12 +944,12 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
   - Returns `{"status": "ok"}` (HTTP 200) as long as the ASGI event loop and worker process are running.
 - **Readiness Probe**: `GET /ready` (alias: `GET /health/ready`)
   - Deep dependency validation for container orchestrators and load balancers:
-    - **Database**: Ping check via `SELECT 1`.
-    - **Authentication**: Validates that required auth tables/service are accessible.
-    - **Research Service**: Confirms RAG query handlers are wired.
-    - **Vector Store**: Active cluster connectivity check via `vector_store.count()`.
+    - **Database**: Validates connectivity (`SELECT 1`), verifies presence of all 10 core schema tables, and confirms applied Alembic migration revision matches expected application heads (`044c24ad4c33`). Fails closed on missing tables, outdated revisions, or connection drops.
+    - **Authentication**: Validates that required auth tables and service are operational when `enforce_auth=true`.
+    - **Research Service**: Confirms RAG query handlers and LLM service are wired.
+    - **Vector Store**: Verifies cluster connectivity via `vector_store.count()` and validates vector dimension compatibility against the configured embedding model.
   - Returns HTTP 200 (`status: "ready"`) when all dependencies respond.
-  - Returns HTTP 503 (`status: "unavailable"`) if any required dependency degrades, causing upstream load balancers to halt routing to the degraded replica without restarting the container prematurely.
+  - Returns HTTP 503 (`status: "unavailable"`) if any required dependency degrades or schema mismatch is detected, preventing traffic routing to unmigrated or degraded replicas.
 
 #### 7. Bounded Durable Document Recovery
 - **Background Reindexing**: Interrupted or failed document ingestion is repaired via `DocumentRecoveryService.recover_batch()`.

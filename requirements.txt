@@ -1,11 +1,24 @@
-pytest>=8.0
-pymupdf>=1.24
-openai>=1.0
-qdrant-client
-fastapi>=0.115
-uvicorn[standard]>=0.30
-httpx>=0.27
-SQLAlchemy>=2.0,<3.0
-alembic
-psycopg[binary]
-python-multipart
+# Production Runtime Dependencies for Nexora AI
+# Python 3.12+ compatible
+
+# Core Web API & ASGI
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+starlette>=0.38.0,<1.0.0
+python-multipart>=0.0.9
+
+# Relational Database & Migrations
+SQLAlchemy>=2.0.0,<3.0.0
+alembic>=1.13.0,<2.0.0
+psycopg[binary]>=3.1.0,<4.0.0
+
+# Vector Storage & Retrieval
+qdrant-client>=1.9.0,<2.0.0
+
+# Document Ingestion & PDF Parsing
+pymupdf>=1.24.0,<2.0.0
+
+# AI Providers & HTTP Clients
+httpx>=0.27.0,<1.0.0
+openai>=1.0.0,<4.0.0
+python-dotenv>=1.0.0,<2.0.0
