@@ -548,10 +548,9 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
     # 1. Database check
     if session_factory is not None:
         try:
-            from sqlalchemy import text
+            from nexora.database.readiness import check_database_readiness
 
-            with session_factory() as sess:
-                sess.execute(text("SELECT 1"))
+            check_database_readiness(session_factory)
             checks["database"] = {"status": "ready"}
         except Exception as exc:
             checks["database"] = {

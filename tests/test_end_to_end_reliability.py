@@ -295,6 +295,9 @@ def sqlite_db_factory():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
     return create_session_factory(engine)
 
 
