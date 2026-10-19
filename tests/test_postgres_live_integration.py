@@ -115,6 +115,11 @@ def test_live_postgres_readiness_check(postgres_url: str, live_db_engine: Any) -
     assert applied_heads == expected_heads
     assert "044c24ad4c33" in applied_heads
 
+    with session_factory() as session:
+        assert get_applied_migration_heads(session) == expected_heads
+
+    assert get_applied_migration_heads(live_db_engine) == expected_heads
+
 
 def test_live_postgres_app_ready_endpoint(postgres_url: str, live_db_engine: Any) -> None:
     """Verify that FastAPI /ready endpoint returns HTTP 200 against real PostgreSQL."""

@@ -70,9 +70,30 @@ def get_expected_migration_heads(migrations_dir: Path | None = None) -> tuple[st
 def get_applied_migration_heads(session_or_conn: Any) -> tuple[str, ...]:
     """Query the applied migration revisions from alembic_version table.
 
+    Accepts a SQLAlchemy Session, Connection, Engine, or session factory callable.
+
     Returns:
         tuple of applied revision strings, or an empty tuple if table is empty or missing.
     """
+    if session_or_conn is None:
+        return ()
+
+    # Support session factory callable (e.g. sessionmaker)
+    if callable(session_or_conn) and not hasattr(session_or_conn, "execute"):
+        try:
+            with session_or_conn() as session:
+                return get_applied_migration_heads(session)
+        except Exception:
+            return ()
+
+    # Support SQLAlchemy Engine (which lacks .execute() in SQLAlchemy 2.0)
+    if hasattr(session_or_conn, "connect") and not hasattr(session_or_conn, "execute"):
+        try:
+            with session_or_conn.connect() as conn:
+                return get_applied_migration_heads(conn)
+        except Exception:
+            return ()
+
     try:
         rows = session_or_conn.execute(
             text("SELECT version_num FROM alembic_version")

@@ -68,6 +68,41 @@ def test_get_expected_migration_heads_returns_current_head() -> None:
     assert "044c24ad4c33" in heads
 
 
+def test_get_applied_migration_heads_across_all_target_types() -> None:
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    # 1. When table is missing, all return empty tuple
+    session_factory = create_session_factory(engine)
+    assert get_applied_migration_heads(None) == ()
+    assert get_applied_migration_heads(engine) == ()
+    assert get_applied_migration_heads(session_factory) == ()
+    with session_factory() as session:
+        assert get_applied_migration_heads(session) == ()
+    with engine.connect() as conn:
+        assert get_applied_migration_heads(conn) == ()
+
+    # 2. When table is empty, all return empty tuple
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+    assert get_applied_migration_heads(engine) == ()
+    assert get_applied_migration_heads(session_factory) == ()
+    with session_factory() as session:
+        assert get_applied_migration_heads(session) == ()
+
+    # 3. When revision is populated, all return the expected tuple
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+    assert get_applied_migration_heads(session_factory) == ("044c24ad4c33",)
+    assert get_applied_migration_heads(engine) == ("044c24ad4c33",)
+    with session_factory() as session:
+        assert get_applied_migration_heads(session) == ("044c24ad4c33",)
+    with engine.connect() as conn:
+        assert get_applied_migration_heads(conn) == ("044c24ad4c33",)
+
+
 def test_correctly_migrated_database_is_reported_ready() -> None:
     engine = create_engine(
         "sqlite:///:memory:",
