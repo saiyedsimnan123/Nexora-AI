@@ -186,3 +186,38 @@ def test_docker_compose_validity_and_service_wiring() -> None:
     assert "volumes" in config
     assert "postgres_data" in config["volumes"]
     assert "qdrant_data" in config["volumes"]
+
+
+def test_ci_workflow_configuration() -> None:
+    ci_file = REPO_ROOT / ".github" / "workflows" / "tests.yml"
+    assert ci_file.is_file(), ".github/workflows/tests.yml must exist"
+
+    content = ci_file.read_text(encoding="utf-8")
+    ci_config = yaml.safe_load(content)
+
+    test_job = ci_config["jobs"]["test"]
+    services = test_job.get("services", {})
+
+    # Must contain both postgres and redis service containers
+    assert "postgres" in services, "CI must define postgres service container"
+    assert "redis" in services, "CI must define redis service container"
+
+    # Environment variables in steps must supply live URLs
+    steps = test_job.get("steps", [])
+    step_runs = [s.get("run", "") for s in steps]
+
+    # Must have docker build step
+    assert any("docker build" in run_cmd for run_cmd in step_runs), "CI must verify Docker image build"
+
+    # Must have migration step
+    assert any("alembic upgrade head" in run_cmd for run_cmd in step_runs), "CI must run Alembic migrations"
+
+
+def test_gitattributes_enforces_lf_line_endings() -> None:
+    gitattributes_file = REPO_ROOT / ".gitattributes"
+    assert gitattributes_file.is_file(), ".gitattributes must exist"
+
+    content = gitattributes_file.read_text(encoding="utf-8")
+    assert "*.sh" in content
+    assert "eol=lf" in content
+    assert "Dockerfile" in content

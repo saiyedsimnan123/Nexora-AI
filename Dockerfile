@@ -39,7 +39,7 @@ EXPOSE 8000
 
 # Container liveness health check using Python standard library (no curl dependency required)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", 8000)}/health')"
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/health')"]
 
 # Production ASGI Entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

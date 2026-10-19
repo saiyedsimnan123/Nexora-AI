@@ -1,0 +1,11 @@
+# Ensure consistent LF line endings for shell scripts and containers across platforms
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+alembic.ini text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.lock text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
