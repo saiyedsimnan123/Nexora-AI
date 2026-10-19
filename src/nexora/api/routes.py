@@ -778,10 +778,22 @@ def research_verify_endpoint(
     service: ResearchApplicationService = Depends(get_research_service),
     current_user: Any = Depends(get_current_user),
 ) -> ResearchVerifyResponseBody:
-    if current_user is not None and body.expected_paper_id is not None:
+    scoped_col_ids: list[str] | None = None
+    scoped_paper_id: str | None = None
+
+    if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
-            auth_service.verify_paper_ownership(body.expected_paper_id, current_user.id)
+            if body.expected_paper_id is not None:
+                paper, col, _ = auth_service.verify_paper_ownership(body.expected_paper_id, current_user.id)
+                scoped_paper_id = str(paper.id)
+                scoped_col_ids = [str(col.id)]
+            else:
+                user_cols = auth_service.get_user_collection_ids(current_user.id)
+                scoped_col_ids = [str(c) for c in user_cols]
+    elif body.expected_paper_id is not None:
+        scoped_paper_id = body.expected_paper_id
+
     req = ResearchVerifyRequest(
         query=body.query,
         text=body.text,
@@ -789,8 +801,13 @@ def research_verify_endpoint(
         temperature=body.temperature,
         max_output_tokens=body.max_output_tokens,
         expected_paper_id=body.expected_paper_id,
+        collection_ids=scoped_col_ids,
+        paper_id=scoped_paper_id,
     )
-    result = service.verify(req)
+    try:
+        result = service.verify(req, collection_ids=scoped_col_ids, paper_id=scoped_paper_id)
+    except TypeError:
+        result = service.verify(req)
     return ResearchVerifyResponseBody(**result.to_dict())
 
 

@@ -48,6 +48,13 @@ from nexora.retrieval.in_memory import InMemoryVectorStore
 from nexora.retrieval.models import VectorRecord
 from nexora.retrieval.qdrant import QdrantVectorStore
 from nexora.retrieval.qdrant_config import QdrantConfig
+from nexora.api.models import ResearchVerifyRequest
+from nexora.api.service import ResearchApplicationService
+from nexora.research.models import ResearchAnswer
+from nexora.research.query import ResearchQueryService
+from nexora.research.verification import ClaimToEvidenceVerifier
+from nexora.retrieval.evidence import EvidenceContextBuilder
+from nexora.retrieval.quality import RetrievalQualityPolicy, RetrievalQualityService
 from nexora.retrieval.service import RetrievalService
 
 
@@ -598,3 +605,255 @@ def test_qdrant_vector_store_pushes_filter_to_query_points():
     fake_client.query_points.assert_called_once()
     call_kwargs3 = fake_client.query_points.call_args.kwargs
     assert call_kwargs3.get("query_filter") is None
+
+
+def test_research_verify_tenant_isolation_unscoped_query(multi_tenant_env):
+    """Tenant B verifies a query without expected_paper_id: evidence must come only from Tenant B's collections."""
+    env = multi_tenant_env
+    retrieval_service = env["retrieval_service"]
+    quality = RetrievalQualityService(retrieval_service, RetrievalQualityPolicy())
+    evidence_builder = EvidenceContextBuilder(quality)
+
+    class MockAnswerService:
+        def answer(self, query: str, context: Any, **kwargs: Any) -> ResearchAnswer:
+            cites = " ".join(f"[{item.label.strip('[]')}]" for item in context.items)
+            text = f"Findings for {query}: {cites}" if cites else "No evidence found in authorized research collections."
+            return ResearchAnswer(
+                text=text,
+                query=query,
+                model="mock-model",
+                usage={"prompt_tokens": 10, "completion_tokens": 10},
+                evidence_count=len(context.items),
+            )
+
+    query_service = ResearchQueryService(evidence_builder, MockAnswerService())
+    verifier = ClaimToEvidenceVerifier()
+    research_service = ResearchApplicationService(query_service, verifier=verifier)
+
+    app = create_app(
+        research_service,
+        rag_pipeline=env["rag_pipeline"],
+        session_factory=env["session_factory"],
+        enforce_auth=True,
+    )
+    client = TestClient(app)
+
+    # Seed Paper A (User A, Collection Alpha) and Paper B (User B, Collection Beta)
+    paper_a, _ = _seed_paper_and_chunks(
+        env,
+        env["col_a_id"],
+        "Paper Alpha Secret",
+        ["Quantum stealth breakthrough alpha unique proprietary findings."],
+    )
+    paper_b, _ = _seed_paper_and_chunks(
+        env,
+        env["col_b_id"],
+        "Paper Beta Public",
+        ["Neural network architecture beta unique proprietary findings."],
+    )
+
+    # Tenant B verifies a query matching "findings" without providing expected_paper_id
+    resp_b = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_b']}"},
+        json={"query": "findings"},
+    )
+    assert resp_b.status_code == 200
+    data_b = resp_b.json()
+
+    # Must have retrieved chunks from Collection Beta, NEVER Collection Alpha
+    assert data_b["evidence_count"] > 0
+    verification_b = data_b["verification"]
+    for claim in verification_b.get("claims", []):
+        for source in claim.get("sources", []):
+            assert source.get("paper_id") == str(paper_b.id)
+            assert source.get("paper_id") != str(paper_a.id)
+
+    # Tenant A verifies the same query: gets Paper A, NEVER Paper B
+    resp_a = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_a']}"},
+        json={"query": "findings"},
+    )
+    assert resp_a.status_code == 200
+    data_a = resp_a.json()
+    assert data_a["evidence_count"] > 0
+    for claim in data_a["verification"].get("claims", []):
+        for source in claim.get("sources", []):
+            assert source.get("paper_id") == str(paper_a.id)
+            assert source.get("paper_id") != str(paper_b.id)
+
+
+def test_research_verify_cross_tenant_expected_paper_rejected_with_403(multi_tenant_env):
+    """Tenant B supplies Tenant A's expected_paper_id: rejected with 403 before retrieval."""
+    env = multi_tenant_env
+    retrieval_service = env["retrieval_service"]
+    quality = RetrievalQualityService(retrieval_service, RetrievalQualityPolicy())
+    evidence_builder = EvidenceContextBuilder(quality)
+
+    class MockAnswerService:
+        def answer(self, query: str, context: Any, **kwargs: Any) -> ResearchAnswer:
+            return ResearchAnswer(text="answer", query=query, model="mock-model", usage=None, evidence_count=0)
+
+    query_service = ResearchQueryService(evidence_builder, MockAnswerService())
+    research_service = ResearchApplicationService(query_service)
+
+    app = create_app(
+        research_service,
+        rag_pipeline=env["rag_pipeline"],
+        session_factory=env["session_factory"],
+        enforce_auth=True,
+    )
+    client = TestClient(app)
+
+    paper_a, _ = _seed_paper_and_chunks(env, env["col_a_id"], "Paper Alpha", ["Alpha text content."])
+
+    # User B passes Paper A as expected_paper_id -> 403 Forbidden
+    resp = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_b']}"},
+        json={"query": "Alpha content", "expected_paper_id": str(paper_a.id)},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "forbidden"
+
+
+def test_research_verify_user_with_no_collections_fails_closed(multi_tenant_env):
+    """A tenant with zero collections receives insufficient evidence and cannot trigger unscoped retrieval."""
+    env = multi_tenant_env
+    retrieval_service = env["retrieval_service"]
+    quality = RetrievalQualityService(retrieval_service, RetrievalQualityPolicy())
+    evidence_builder = EvidenceContextBuilder(quality)
+
+    class MockAnswerService:
+        def answer(self, query: str, context: Any, **kwargs: Any) -> ResearchAnswer:
+            return ResearchAnswer(
+                text="Should not be called for empty collections",
+                query=query,
+                model="mock-model",
+                usage=None,
+                evidence_count=len(context.items),
+            )
+
+    query_service = ResearchQueryService(evidence_builder, MockAnswerService())
+    research_service = ResearchApplicationService(query_service)
+
+    app = create_app(
+        research_service,
+        rag_pipeline=env["rag_pipeline"],
+        session_factory=env["session_factory"],
+        enforce_auth=True,
+    )
+    client = TestClient(app)
+
+    # Seed papers in Collection Alpha
+    _seed_paper_and_chunks(env, env["col_a_id"], "Paper Alpha", ["Confidential alpha text."])
+
+    # User C (owns 0 collections) calls /research/verify without text
+    resp = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_c']}"},
+        json={"query": "Confidential"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["evidence_count"] == 0
+    assert "No evidence found" in data["text"]
+    assert data["verification"]["is_grounded"] is True
+
+    # User C calls /research/verify with explicit text
+    resp_text = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_c']}"},
+        json={"query": "Confidential", "text": "Confidential alpha text is proven [E1]."},
+    )
+    assert resp_text.status_code == 200
+    data_text = resp_text.json()
+    assert data_text["evidence_count"] == 0
+    assert data_text["verification"]["is_grounded"] is False
+    assert data_text["verification"]["claims"][0]["status"] in ("insufficient", "unresolved")
+
+
+def test_research_verify_authorized_expected_paper_succeeds(multi_tenant_env):
+    """Authorized verification with a valid expected paper continues to work."""
+    env = multi_tenant_env
+    retrieval_service = env["retrieval_service"]
+    quality = RetrievalQualityService(retrieval_service, RetrievalQualityPolicy())
+    evidence_builder = EvidenceContextBuilder(quality)
+
+    class MockAnswerService:
+        def answer(self, query: str, context: Any, **kwargs: Any) -> ResearchAnswer:
+            label = context.items[0].label if context.items else "[E1]"
+            return ResearchAnswer(
+                text=f"Valid answer with citation {label}.",
+                query=query,
+                model="mock-model",
+                usage=None,
+                evidence_count=len(context.items),
+            )
+
+    query_service = ResearchQueryService(evidence_builder, MockAnswerService())
+    research_service = ResearchApplicationService(query_service)
+
+    app = create_app(
+        research_service,
+        rag_pipeline=env["rag_pipeline"],
+        session_factory=env["session_factory"],
+        enforce_auth=True,
+    )
+    client = TestClient(app)
+
+    paper_a, _ = _seed_paper_and_chunks(env, env["col_a_id"], "Paper Alpha", ["Alpha authoritative text."])
+
+    # User A verifies with their own paper
+    resp = client.post(
+        "/api/v1/research/verify",
+        headers={"Authorization": f"Bearer {env['key_a']}"},
+        json={"query": "authoritative", "expected_paper_id": str(paper_a.id)},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["evidence_count"] > 0
+    for claim in data["verification"].get("claims", []):
+        for source in claim.get("sources", []):
+            assert source.get("paper_id") == str(paper_a.id)
+
+
+def test_research_verify_service_collection_ids_and_paper_id_propagation(multi_tenant_env):
+    """Direct invocation of ResearchApplicationService.verify respects collection_ids and paper_id."""
+    env = multi_tenant_env
+    retrieval_service = env["retrieval_service"]
+    quality = RetrievalQualityService(retrieval_service, RetrievalQualityPolicy())
+    evidence_builder = EvidenceContextBuilder(quality)
+
+    class MockAnswerService:
+        def answer(self, query: str, context: Any, **kwargs: Any) -> ResearchAnswer:
+            return ResearchAnswer(
+                text=f"Answer for {query}",
+                query=query,
+                model="test",
+                usage=None,
+                evidence_count=len(context.items),
+            )
+
+    query_service = ResearchQueryService(evidence_builder, MockAnswerService())
+    service = ResearchApplicationService(query_service)
+
+    paper_a, _ = _seed_paper_and_chunks(env, env["col_a_id"], "Alpha Paper", ["Specific alpha content chunk."])
+    paper_b, _ = _seed_paper_and_chunks(env, env["col_b_id"], "Beta Paper", ["Specific beta content chunk."])
+
+    # 1. Scoped to Collection A
+    req_a = ResearchVerifyRequest(query="content", collection_ids=[str(env["col_a_id"])])
+    res_a = service.verify(req_a)
+    assert res_a.evidence_count > 0
+
+    # 2. Scoped to empty collections -> fail closed
+    req_empty = ResearchVerifyRequest(query="content", collection_ids=[])
+    res_empty = service.verify(req_empty)
+    assert res_empty.evidence_count == 0
+    assert "No evidence found" in res_empty.text
+
+    # 3. Scoped to specific paper_id
+    req_paper = ResearchVerifyRequest(query="content", paper_id=str(paper_b.id))
+    res_paper = service.verify(req_paper)
+    assert res_paper.evidence_count > 0

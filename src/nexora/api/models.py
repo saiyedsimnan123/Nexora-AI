@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from nexora.api.errors import InvalidRequestError
 from nexora.llm.config import validate_max_output_tokens, validate_temperature
@@ -383,6 +383,8 @@ class ResearchVerifyRequest:
     temperature: float | None = None
     max_output_tokens: int | None = None
     expected_paper_id: str | None = None
+    collection_ids: Sequence[str] | None = None
+    paper_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
@@ -400,6 +402,15 @@ class ResearchVerifyRequest:
         if self.expected_paper_id is not None:
             if not isinstance(self.expected_paper_id, str):
                 raise InvalidRequestError("expected_paper_id must be a string")
+        if self.paper_id is not None:
+            if not isinstance(self.paper_id, str):
+                raise InvalidRequestError("paper_id must be a string")
+        if self.collection_ids is not None:
+            if not isinstance(self.collection_ids, (list, tuple)):
+                raise InvalidRequestError("collection_ids must be a sequence of strings")
+            for c in self.collection_ids:
+                if not isinstance(c, str) or not c.strip():
+                    raise InvalidRequestError("collection_ids must contain non-empty strings")
         try:
             validate_temperature(self.temperature)
             validate_max_output_tokens(self.max_output_tokens)

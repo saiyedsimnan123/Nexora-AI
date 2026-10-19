@@ -98,11 +98,28 @@ class ResearchQueryService:
         )
         return answer, context
 
-    def get_evidence_context(self, query: str) -> Any:
+    def get_evidence_context(
+        self,
+        query: str,
+        *,
+        collection_ids: Sequence[str] | None = None,
+        collection_id: str | None = None,
+        paper_id: str | None = None,
+    ) -> Any:
         """Build and return the EvidenceContext for a query."""
         if not isinstance(query, str):
             raise TypeError("query must be a string")
         if not query.strip():
             raise ValueError("query must not be empty or whitespace-only")
-        return self._evidence_builder.build(query)
+        builder_kwargs: dict[str, Any] = {}
+        if collection_ids is not None:
+            builder_kwargs["collection_ids"] = collection_ids
+        if collection_id is not None:
+            builder_kwargs["collection_id"] = collection_id
+        if paper_id is not None:
+            builder_kwargs["paper_id"] = paper_id
+        try:
+            return self._evidence_builder.build(query, **builder_kwargs)
+        except TypeError:
+            return self._evidence_builder.build(query)
 
