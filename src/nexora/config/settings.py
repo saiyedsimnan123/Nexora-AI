@@ -66,6 +66,7 @@ class AppSettings:
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     database: Any | None = None
     enable_docs: bool | None = None
+    require_llm_key: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.llm, LLMConfig):
@@ -74,7 +75,11 @@ class AppSettings:
             raise ConfigurationError(
                 f"llm.provider must be one of {SUPPORTED_LLM_PROVIDERS}"
             )
-        if self.llm.provider.strip().lower() == "openai" and not self.llm.api_key:
+        if (
+            self.require_llm_key
+            and self.llm.provider.strip().lower() == "openai"
+            and not self.llm.api_key
+        ):
             raise ConfigurationError("llm.api_key is required for the openai provider")
         dimension = getattr(self.embedding, "dimension", None)
         if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
@@ -98,6 +103,8 @@ class AppSettings:
             raise ConfigurationError("rate_limit must be a RateLimitConfig")
         if self.enable_docs is not None and not isinstance(self.enable_docs, bool):
             raise ConfigurationError("enable_docs must be a boolean or None")
+        if not isinstance(self.require_llm_key, bool):
+            raise ConfigurationError("require_llm_key must be a boolean")
         if self.database is not None:
             from nexora.database.config import DatabaseConfig
 
@@ -122,6 +129,7 @@ class AppSettings:
         *,
         embedding: Any,
         qdrant: QdrantConfig | None = None,
+        require_llm_key: bool | None = None,
     ) -> AppSettings:
         """Load settings from the environment (read only here, never at import).
 
@@ -183,6 +191,13 @@ class AppSettings:
             except DatabaseConfigurationError as exc:
                 raise ConfigurationError(str(exc)) from exc
 
+        generator_mode = (env.get("NEXORA_RAG_GENERATOR_MODE") or "").strip().lower()
+        if require_llm_key is None:
+            if "NEXORA_REQUIRE_LLM_KEY" in env:
+                require_llm_key = _env_bool(env, "NEXORA_REQUIRE_LLM_KEY", default=False)
+            else:
+                require_llm_key = generator_mode == "live"
+
         return cls(
             llm=llm,
             embedding=embedding,
@@ -195,4 +210,5 @@ class AppSettings:
             rate_limit=rate_limit,
             database=db_config,
             enable_docs=enable_docs,
+            require_llm_key=require_llm_key,
         )

@@ -362,11 +362,47 @@ def test_missing_database_url_raises_configuration_error() -> None:
     assert SECRET_KEY not in msg
 
 
-def test_missing_llm_key_raises_configuration_error() -> None:
+def test_database_backed_startup_succeeds_without_llm_key_in_offline_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that database-backed production mode boots cleanly without an LLM key when offline generation is allowed."""
+    mock_engine = SimpleNamespace()
+    mock_factory = MagicMock()
+
+    monkeypatch.setattr(
+        "nexora.database.connection.create_database_engine",
+        lambda cfg: mock_engine,
+    )
+    monkeypatch.setattr(
+        "nexora.database.session.create_session_factory",
+        lambda eng: mock_factory,
+    )
+
     env = {
         "NEXORA_DATABASE_URL": TEST_DB_URL,
         "NEXORA_LLM_PROVIDER": "openai",
         "NEXORA_LLM_MODEL": "gpt-4o-mini",
+        "NEXORA_EMBEDDING_PROVIDER": "hash",
+        # No LLM API key
+    }
+    app = create_production_app(env)
+    assert isinstance(app, FastAPI)
+    assert app.state.enforce_auth is True
+    assert app.state.session_factory is mock_factory
+
+    client = TestClient(app)
+    health_resp = client.get("/health")
+    assert health_resp.status_code == 200
+    assert health_resp.json() == {"status": "ok"}
+
+
+def test_missing_llm_key_raises_when_live_generation_requested() -> None:
+    """Verify that explicitly requested live generation fails clearly when LLM credentials are missing."""
+    env = {
+        "NEXORA_DATABASE_URL": TEST_DB_URL,
+        "NEXORA_LLM_PROVIDER": "openai",
+        "NEXORA_LLM_MODEL": "gpt-4o-mini",
+        "NEXORA_RAG_GENERATOR_MODE": "live",
         # No LLM API key
     }
     with pytest.raises(ConfigurationError) as exc_info:
@@ -375,6 +411,34 @@ def test_missing_llm_key_raises_configuration_error() -> None:
     msg = str(exc_info.value)
     assert "api_key" in msg.lower() or "llm" in msg.lower()
     assert SECRET_DB_PASSWORD not in msg
+
+
+def test_missing_llm_key_raises_when_require_llm_key_flag_enabled() -> None:
+    """Verify that NEXORA_REQUIRE_LLM_KEY=true enforces LLM credentials on startup."""
+    env = {
+        "NEXORA_DATABASE_URL": TEST_DB_URL,
+        "NEXORA_LLM_PROVIDER": "openai",
+        "NEXORA_LLM_MODEL": "gpt-4o-mini",
+        "NEXORA_REQUIRE_LLM_KEY": "true",
+        # No LLM API key
+    }
+    with pytest.raises(ConfigurationError) as exc_info:
+        create_production_app(env)
+
+    msg = str(exc_info.value)
+    assert "api_key" in msg.lower() or "llm" in msg.lower()
+    assert SECRET_DB_PASSWORD not in msg
+
+
+def test_offline_demo_mode_starts_without_api_key_or_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that offline demo mode starts without database credentials or LLM key."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    app = create_offline_app()
+    assert isinstance(app, FastAPI)
+    assert app.state.enforce_auth is False
+    client = TestClient(app)
+    resp = client.get("/health")
+    assert resp.status_code == 200
 
 
 def test_invalid_vector_store_backend_raises_configuration_error(base_prod_env: dict[str, str]) -> None:

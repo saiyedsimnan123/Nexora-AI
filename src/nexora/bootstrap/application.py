@@ -380,13 +380,22 @@ def build_http_app(
             )
 
     rag_pipeline = dependencies.get("rag_pipeline")
-    if rag_pipeline is None and settings.llm.api_key:
-        from nexora.rag.generator import LLMAnswerGenerator
+    if rag_pipeline is None:
+        from nexora.rag.generator import DeterministicMockGenerator, LLMAnswerGenerator
         from nexora.rag.pipeline import create_rag_pipeline
 
         retrieval_service = RetrievalService(embedding_service, vector_store)
-        llm_inst = LLMService(llm_provider if llm_provider is not None else create_llm_provider(settings.llm))
-        generator = LLMAnswerGenerator(llm_inst, model_name=settings.llm.model)
+        if settings.llm.api_key:
+            llm_inst = LLMService(
+                llm_provider
+                if llm_provider is not None
+                else create_llm_provider(settings.llm)
+            )
+            generator = LLMAnswerGenerator(llm_inst, model_name=settings.llm.model)
+        else:
+            generator = DeterministicMockGenerator(
+                model_name=settings.llm.model or "offline-deterministic-mock-v1"
+            )
         rag_pipeline = create_rag_pipeline(
             retrieval_service=retrieval_service,
             generator=generator,

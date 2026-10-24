@@ -67,12 +67,21 @@ def test_invalid_env_values_fail_clearly(var, value):
     assert KEY not in str(info.value)
 
 
-def test_missing_model_and_missing_openai_key():
-    with pytest.raises(ConfigurationError):
-        AppSettings.from_env({}, embedding=EMBEDDING)
+def test_missing_openai_key_behavior():
+    # In default offline/mock mode, AppSettings does not fail solely because an API key is missing
+    s = AppSettings.from_env({}, embedding=EMBEDDING)
+    assert s.require_llm_key is False
+    assert s.llm.api_key is None
+    assert s.llm.model == "gpt-4o-mini"
+
+    # When live mode or require_llm_key is explicitly requested, missing API key fails clearly
     with pytest.raises(ConfigurationError) as info:
-        AppSettings.from_env({"NEXORA_LLM_MODEL": "m"}, embedding=EMBEDDING)
+        AppSettings.from_env({"NEXORA_RAG_GENERATOR_MODE": "live"}, embedding=EMBEDDING)
     assert "api_key" in str(info.value)
+
+    with pytest.raises(ConfigurationError) as info2:
+        AppSettings.from_env({"NEXORA_REQUIRE_LLM_KEY": "true"}, embedding=EMBEDDING)
+    assert "api_key" in str(info2.value)
 
 
 def test_unsupported_llm_provider():
@@ -111,10 +120,12 @@ def test_secrets_never_appear_in_repr_or_str():
     assert "AppSettings" in repr(s) and "'m'" in repr(s)
 
 
-def test_from_env_reads_only_the_supplied_mapping(monkeypatch=None):
-    # A different, empty mapping must not pick up values from the real environment.
-    with pytest.raises(ConfigurationError):
-        AppSettings.from_env({}, embedding=EMBEDDING)
+def test_from_env_reads_only_the_supplied_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A supplied mapping requiring live generation must not pick up api_key from real os.environ.
+    monkeypatch.setenv("NEXORA_LLM_API_KEY", "real-env-secret-key")
+    with pytest.raises(ConfigurationError) as exc_info:
+        AppSettings.from_env({"NEXORA_RAG_GENERATOR_MODE": "live"}, embedding=EMBEDDING)
+    assert "api_key" in str(exc_info.value)
 
 
 def test_defaults_from_env_enforces_auth_by_default():
