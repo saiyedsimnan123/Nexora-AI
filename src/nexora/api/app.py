@@ -347,6 +347,20 @@ def create_app(
     app.include_router(health_router)
     app.include_router(v1_router)
 
+    # 4. Optional Static Frontend SPA Mounting (unified production container)
+    static_dirs = [
+        os.getenv("NEXORA_STATIC_DIR"),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../frontend/dist")),
+        "frontend/dist",
+        "/app/frontend/dist",
+    ]
+    for candidate in static_dirs:
+        if candidate and os.path.isdir(candidate):
+            from starlette.staticfiles import StaticFiles
+
+            app.mount("/", StaticFiles(directory=candidate, html=True), name="frontend")
+            break
+
     app.add_exception_handler(AuthenticationError, _unauthorized)
     app.add_exception_handler(ForbiddenError, _forbidden)
     app.add_exception_handler(FileTooLargeError, _file_too_large)

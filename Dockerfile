@@ -1,8 +1,18 @@
 # =============================================================================
 # Nexora AI — Production Container Image
-# Multi-stage / minimal footprint Python 3.12 slim container
+# Multi-stage build: React/Vite 3D Frontend + FastAPI Python 3.12 Backend
 # =============================================================================
 
+# Stage 1: Build the React 19 / Vite 3D frontend
+FROM node:22-bookworm-slim AS frontend-builder
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Minimal footprint Python 3.12 slim runtime
 FROM python:3.12-slim-bookworm AS runtime
 
 # Set environment defaults
@@ -27,6 +37,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy project configuration, migrations, entrypoint, and application source
 COPY --chown=appuser:appgroup alembic.ini docker-entrypoint.sh ./
 COPY --chown=appuser:appgroup src/ ./src/
+
+# Copy built frontend assets from stage 1
+COPY --from=frontend-builder --chown=appuser:appgroup /app/frontend/dist ./frontend/dist
 
 # Ensure entrypoint is executable
 RUN chmod +x docker-entrypoint.sh
