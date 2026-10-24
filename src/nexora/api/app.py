@@ -382,9 +382,26 @@ def create_app(
     ]
     for candidate in static_dirs:
         if candidate and os.path.isdir(candidate):
+            from starlette.routing import Match, Mount
             from starlette.staticfiles import StaticFiles
 
-            app.mount("/", StaticFiles(directory=candidate, html=True), name="frontend")
+            class _SPAMount(Mount):
+                def matches(self, scope: Any) -> tuple[Match, Any]:
+                    path = scope.get("path", "")
+                    if (
+                        path.startswith("/api")
+                        or path.startswith("/health")
+                        or path.startswith("/ready")
+                        or path.startswith("/docs")
+                        or path.startswith("/openapi")
+                        or path.startswith("/redoc")
+                    ):
+                        return Match.NONE, {}
+                    return super().matches(scope)
+
+            app.routes.append(
+                _SPAMount("/", app=StaticFiles(directory=candidate, html=True), name="frontend")
+            )
             break
 
     app.add_exception_handler(AuthenticationError, _unauthorized)
@@ -447,11 +464,11 @@ def create_offline_app(*, rag_pipeline: Any = None) -> FastAPI:
             self._pipeline = pipeline
 
         def ask(self, request: Any) -> Any:
-            from nexora.research.models import ResearchAnswer
+            from nexora.api.models import ResearchResponse
 
             query_text = request.query if hasattr(request, "query") else str(request)
             resp = self._pipeline.answer(query_text)
-            return ResearchAnswer(
+            return ResearchResponse(
                 text=resp.answer,
                 query=query_text,
                 model=resp.model,

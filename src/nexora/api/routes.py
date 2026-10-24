@@ -32,10 +32,12 @@ from nexora.api.models import (
     ResearchGapsRequest,
     ResearchGapsResponse,
     ResearchRequest,
+    ResearchResponse,
     ResearchVerifyRequest,
     ResearchVerifyResponse,
 )
 from nexora.api.service import ResearchApplicationService
+from nexora.research.models import ResearchAnswer
 
 
 class ResearchRequestBody(BaseModel):
@@ -681,7 +683,21 @@ def research(
         ans = service.ask(request_obj, collection_ids=scoped_col_ids)
     except TypeError:
         ans = service.ask(request_obj)
-    return ResearchResponseBody(**ans.to_dict())
+    if isinstance(ans, ResearchResponse):
+        payload = ans.to_dict()
+    elif isinstance(ans, ResearchAnswer):
+        payload = ResearchResponse.from_answer(ans).to_dict()
+    elif hasattr(ans, "to_dict") and callable(ans.to_dict):
+        payload = ans.to_dict()
+    else:
+        payload = {
+            "text": getattr(ans, "text", ""),
+            "query": getattr(ans, "query", body.query),
+            "model": getattr(ans, "model", body.model or "unknown"),
+            "usage": getattr(ans, "usage", None),
+            "evidence_count": getattr(ans, "evidence_count", 0),
+        }
+    return ResearchResponseBody(**payload)
 
 
 @v1_router.post(

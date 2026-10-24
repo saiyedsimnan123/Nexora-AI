@@ -260,3 +260,37 @@ def test_unexpected_exception_response_is_fully_generic():
     assert response.json() == {"error": {"code": "internal_error", "message": "An internal error occurred."}}
     for leaked in (SECRET, "KeyError", "Traceback", "secret_module", ".py"):
         assert leaked not in response.text
+
+
+def test_research_endpoint_serializes_direct_research_answer_object():
+    class DirectAnswerService:
+        def ask(self, request):
+            return ResearchAnswer(
+                text="Direct answer without to_dict [E1]",
+                query="What is FlashAttention?",
+                model="test-model",
+                evidence_count=2,
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+    client = TestClient(create_app(DirectAnswerService()), raise_server_exceptions=False)
+    response = client.post(URL, json={"query": "What is FlashAttention?"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["text"] == "Direct answer without to_dict [E1]"
+    assert body["query"] == "What is FlashAttention?"
+    assert body["model"] == "test-model"
+    assert body["evidence_count"] == 2
+    assert body["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
+def test_research_endpoint_serializes_offline_app():
+    from nexora.api.app import create_offline_app
+
+    client = TestClient(create_offline_app(), raise_server_exceptions=False)
+    response = client.post(URL, json={"query": "How do FlashAttention IO optimizations achieve speedup?"})
+    assert response.status_code == 200
+    body = response.json()
+    assert "FlashAttention" in body["text"] or "[E1]" in body["text"]
+    assert body["query"] == "How do FlashAttention IO optimizations achieve speedup?"
+    assert body["evidence_count"] >= 1
