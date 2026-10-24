@@ -25,7 +25,8 @@ export const App: React.FC = () => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    const element = document.getElementById(sectionId);
+    const targetId = sectionId === 'architecture' ? 'standards' : sectionId;
+    const element = document.getElementById(targetId) || document.getElementById(sectionId);
     if (element) {
       element.scrollIntoView({ behavior: 'smooth' });
     }
@@ -43,7 +44,7 @@ export const App: React.FC = () => {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onSearchSubmit={handleSearchSubmit}
-          onViewArchitecture={() => handleNavigate('architecture')}
+          onViewArchitecture={() => handleNavigate('standards')}
         />
 
         {/* Section 2: Research Capabilities (3 Signature Panels) */}

@@ -7,7 +7,6 @@ import {
   Layers,
   FileCheck,
   X,
-  Database,
   ShieldCheck,
   ChevronRight
 } from 'lucide-react';
@@ -200,8 +199,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                 onClick={onViewArchitecture}
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl glass-panel glass-panel-hover text-sm font-medium text-slate-200 border-white/10"
               >
-                <Database className="w-4 h-4 text-violet-400" />
-                <span>View Verified Architecture</span>
+                <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                <span>View Research Standards</span>
               </button>
 
               <div className="flex items-center gap-2 text-xs font-mono text-slate-400">

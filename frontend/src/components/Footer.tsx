@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, ShieldCheck } from 'lucide-react';
+import { ShieldCheck, BookOpen, Layers } from 'lucide-react';
 
 interface FooterProps {
   onNavigate: (sectionId: string) => void;
@@ -31,9 +31,9 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
             </p>
 
             {/* Verification Badge */}
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-emerald-400">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              <span>Backend MVP Release Candidate Verified</span>
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-cyan-400">
+              <ShieldCheck className="w-4 h-4 text-cyan-400" />
+              <span>Evidence-Grounded Research Verification</span>
             </div>
           </div>
 
@@ -69,62 +69,51 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
               </li>
               <li>
                 <button
-                  onClick={() => onNavigate('architecture')}
+                  onClick={() => onNavigate('standards')}
                   className="hover:text-cyan-400 transition-colors"
                 >
-                  Production Stack
+                  Research Standards
                 </button>
               </li>
             </ul>
           </div>
 
-          {/* Column 3: Architecture & Repos (4 cols) */}
+          {/* Column 3: Standards & Integrity (4 cols) */}
           <div className="md:col-span-4 space-y-3">
             <h4 className="text-xs font-mono uppercase tracking-wider text-white font-semibold">
-              Open Source & Specifications
+              Integrity &amp; Standards
             </h4>
             <ul className="space-y-2 text-xs font-mono">
-              <li>
-                <a
-                  href="https://github.com/saiyedsimnan123/Nexora-AI"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-cyan-400 transition-colors flex items-center gap-1.5"
-                >
-                  <span>GitHub Repository</span>
-                  <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-                </a>
+              <li className="flex items-center gap-2 text-slate-400">
+                <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Peer-Reviewed Literature Grounding</span>
               </li>
-              <li>
-                <span className="text-slate-500">FastAPI • PostgreSQL 16 • Qdrant • Redis 7</span>
+              <li className="flex items-center gap-2 text-slate-400">
+                <Layers className="w-3.5 h-3.5 text-purple-400" />
+                <span>Multi-Stage Hybrid Retrieval (Dense + BM25)</span>
               </li>
-              <li>
-                <span className="text-slate-500">2,659 Regression Tests • Python 3.12 Slim</span>
+              <li className="flex items-center gap-2 text-slate-400">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Sentence-Level Natural Language Inference</span>
               </li>
-              <li>
-                <span className="text-slate-500">Alembic Migration Revision: 044c24ad4c33</span>
+              <li className="text-slate-500 pt-1">
+                Zero unsupported superiority claims. Verifiable citations only.
               </li>
             </ul>
           </div>
 
         </div>
 
-        {/* Bottom Bar: Copyright & Credit */}
+        {/* Bottom Bar: Copyright & Platform Policy */}
         <div className="pt-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs font-mono text-slate-500">
           <div>
-            © {CURRENT_YEAR} Nexora AI. Research Intelligence Platform. All rights reserved.
+            &copy; {CURRENT_YEAR} Nexora AI. Research Intelligence Platform. All rights reserved.
           </div>
 
-          <div className="flex items-center gap-2">
-            <span>Designed & Built by</span>
-            <a
-              href="https://github.com/saiyedsimnan123"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-slate-300 hover:text-cyan-400 font-semibold transition-colors"
-            >
-              Saiyed Simnan
-            </a>
+          <div className="flex items-center gap-4 text-slate-400">
+            <span>Rigorous Scientific Verification</span>
+            <span>&bull;</span>
+            <span>Privacy &amp; Security Grounded</span>
           </div>
         </div>
 

@@ -230,6 +230,18 @@ async def _app_lifespan(app: FastAPI):
     _run_shutdown_cleanup(app)
 
 
+def _resolve_docs_enabled(enable_docs: bool | None = None) -> bool:
+    if enable_docs is not None:
+        return enable_docs
+    env_flag = os.getenv("NEXORA_ENABLE_DOCS")
+    if env_flag is not None and env_flag.strip():
+        return env_flag.strip().lower() in ("true", "1", "yes", "on")
+    app_env = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("NEXORA_APP_MODE") or "").strip().lower()
+    if app_env in ("production", "prod") or os.getenv("RAILWAY_ENVIRONMENT"):
+        return False
+    return True
+
+
 def create_app(
     research_service: Any,
     *,
@@ -250,6 +262,7 @@ def create_app(
     rate_limit_config: Any = None,
     rate_limit_storage: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
+    enable_docs: bool | None = None,
 ) -> FastAPI:
     """Build the app around injected research, ingestion, analysis, comparison, gap, discovery, and auth services."""
     if not callable(getattr(research_service, "ask", None)):
@@ -283,6 +296,11 @@ def create_app(
                     "Pass rate_limit_storage to create_app or set NEXORA_RATE_LIMIT_REDIS_URL."
                 )
 
+    docs_allowed = _resolve_docs_enabled(enable_docs)
+    docs_url = "/docs" if docs_allowed else None
+    redoc_url = "/redoc" if docs_allowed else None
+    openapi_url = "/openapi.json" if docs_allowed else None
+
     app = FastAPI(
         title="Nexora AI",
         description=(
@@ -290,6 +308,9 @@ def create_app(
             "with full citation attribution, lexical BM25, and hybrid retrieval."
         ),
         version=__version__,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
         lifespan=_app_lifespan,
     )
     app.state.research_service = research_service
@@ -339,10 +360,15 @@ def create_app(
             max_age=cors_config.max_age,
         )
 
-    # 3. Request ID Correlation Middleware (outermost: assigns & echoes X-Request-ID for all requests)
+    # 3. Request ID Correlation Middleware
     from nexora.api.logging import RequestIDMiddleware
 
     app.add_middleware(RequestIDMiddleware)
+
+    # 4. Security Headers Middleware (defense-in-depth headers on all responses)
+    from nexora.api.security import SecurityHeadersMiddleware
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(health_router)
     app.include_router(v1_router)

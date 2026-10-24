@@ -65,6 +65,7 @@ class AppSettings:
     cors: CORSConfig = field(default_factory=CORSConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     database: Any | None = None
+    enable_docs: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.llm, LLMConfig):
@@ -95,6 +96,8 @@ class AppSettings:
             raise ConfigurationError("cors must be a CORSConfig")
         if not isinstance(self.rate_limit, RateLimitConfig):
             raise ConfigurationError("rate_limit must be a RateLimitConfig")
+        if self.enable_docs is not None and not isinstance(self.enable_docs, bool):
+            raise ConfigurationError("enable_docs must be a boolean or None")
         if self.database is not None:
             from nexora.database.config import DatabaseConfig
 
@@ -166,6 +169,10 @@ class AppSettings:
         except RateLimitConfigurationError as exc:
             raise ConfigurationError(str(exc)) from exc
 
+        enable_docs = None
+        if "NEXORA_ENABLE_DOCS" in env:
+            enable_docs = _env_bool(env, "NEXORA_ENABLE_DOCS", default=False)
+
         db_config = None
         db_url = env.get("NEXORA_DATABASE_URL") or env.get("DATABASE_URL")
         if db_url and db_url.strip():
@@ -187,4 +194,5 @@ class AppSettings:
             cors=cors,
             rate_limit=rate_limit,
             database=db_config,
+            enable_docs=enable_docs,
         )

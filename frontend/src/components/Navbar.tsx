@@ -5,9 +5,8 @@ import {
   X,
   Compass,
   GitCompare,
-  Cpu,
-  ArrowRight,
-  ExternalLink
+  ShieldCheck,
+  ArrowRight
 } from 'lucide-react';
 import { checkBackendHealth } from '../services/api';
 
@@ -90,21 +89,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
               Intelligence Matrix
             </button>
             <button
-              onClick={() => handleNavClick('architecture')}
+              onClick={() => handleNavClick('standards')}
               className="px-3.5 py-2 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-white/[0.05] transition-all flex items-center gap-1.5"
             >
-              <Cpu className="w-4 h-4 text-blue-400" />
-              Architecture
+              <ShieldCheck className="w-4 h-4 text-cyan-400" />
+              Research Standards
             </button>
-            <a
-              href="https://github.com/saiyedsimnan123/Nexora-AI"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-3.5 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-white/[0.05] transition-all flex items-center gap-1.5"
-            >
-              <span>GitHub</span>
-              <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-            </a>
           </div>
 
           {/* Right Action & Status Badge */}
@@ -113,10 +103,10 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
             <div
               title={
                 backendLive === true
-                  ? "Live backend connected at /api (FastAPI RAG engine ready)."
+                  ? "Research intelligence engine connected and ready."
                   : backendLive === false
-                  ? "Backend service offline on localhost:8000. Deterministic regression suite verified (2,659 passed)."
-                  : "Checking backend service status..."
+                  ? "Demonstration mode active. Interactive research preview ready."
+                  : "Connecting to research engine..."
               }
               className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-700/60 text-[12px] font-mono text-slate-300"
             >
@@ -129,12 +119,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
                     : "bg-slate-400 animate-pulse"
                 }`}
               />
-              <span className="text-slate-400">Backend:</span>
+              <span className="text-slate-400">Engine:</span>
               <span className={backendLive === true ? "text-cyan-300 font-semibold" : "text-emerald-300 font-semibold"}>
                 {backendLive === true
                   ? "Live (v0.1.0 RC)"
                   : backendLive === false
-                  ? "2,659 Tests Verified"
+                  ? "Demonstration Mode"
                   : "Connecting..."}
               </span>
             </div>
@@ -170,8 +160,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
             <div
               title={
                 backendLive === true
-                  ? "Live backend connected at /api."
-                  : "Deterministic regression test suite verified on main branch."
+                  ? "Research intelligence engine connected and ready."
+                  : "Interactive research demonstration mode."
               }
               className={`flex items-center gap-2 px-2.5 py-1 rounded-full bg-slate-900/80 border text-xs font-mono ${
                 backendLive === true
@@ -184,7 +174,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
                   backendLive === true ? "bg-cyan-400 animate-pulse" : "bg-emerald-400"
                 }`}
               />
-              <span>{backendLive === true ? "Backend: Live" : "Backend Suite: Verified"}</span>
+              <span>{backendLive === true ? "Engine: Live" : "Demonstration Mode"}</span>
             </div>
             <span className="text-xs text-slate-400 font-mono">v0.1.0 RC</span>
           </div>
@@ -212,21 +202,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
               Intelligence Matrix
             </button>
             <button
-              onClick={() => handleNavClick('architecture')}
+              onClick={() => handleNavClick('standards')}
               className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-200 hover:bg-white/[0.06] text-left text-sm font-medium"
             >
-              <Cpu className="w-4 h-4 text-blue-400" />
-              Production Architecture
+              <ShieldCheck className="w-4 h-4 text-cyan-400" />
+              Research Standards
             </button>
-            <a
-              href="https://github.com/saiyedsimnan123/Nexora-AI"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-between px-3 py-2.5 rounded-lg text-slate-400 hover:bg-white/[0.06] text-sm font-medium"
-            >
-              <span>GitHub Repository</span>
-              <ExternalLink className="w-4 h-4 opacity-70" />
-            </a>
           </div>
 
           <div className="pt-2">

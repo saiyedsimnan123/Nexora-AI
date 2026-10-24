@@ -10,8 +10,7 @@ import {
   Layers,
   ShieldCheck,
   Loader2,
-  Database,
-  ExternalLink
+  Database
 } from 'lucide-react';
 import { queryResearchRAG } from '../services/api';
 import type { RAGQueryResponse, AttributedSource } from '../types/api';
@@ -325,11 +324,11 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
               </div>
             </div>
 
-            <div className="bg-black/50 p-3 rounded-lg border border-amber-500/20 text-xs font-mono text-slate-300 space-y-1">
-              <div className="text-[11px] text-slate-400">To start the local offline Nexora backend:</div>
-              <code className="text-cyan-300 block select-all">
-                set PYTHONPATH=src &amp;&amp; python -m uvicorn nexora.api.app:app --host 127.0.0.1 --port 8000
-              </code>
+            <div className="bg-black/40 p-3 rounded-lg border border-amber-500/20 text-xs text-slate-300 space-y-1">
+              <div className="text-[11px] text-amber-300 font-mono">Research Engine Notice:</div>
+              <p className="text-slate-300 text-xs leading-relaxed">
+                The research service could not be reached. You may retry the inquiry or explore demonstrated evidence contexts below.
+              </p>
             </div>
 
             <div className="flex items-center gap-3 pt-1">
@@ -493,15 +492,13 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
             >
               Close
             </button>
-            <a
-              href="https://github.com/saiyedsimnan123/Nexora-AI"
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              onClick={() => handleExecuteSearch(activeQuery || defaultQuery)}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-xs sm:text-sm text-slate-900 bg-cyan-400 hover:bg-cyan-300 font-semibold shadow-[0_0_15px_rgba(0,245,212,0.3)]"
             >
-              <span>GitHub Specification</span>
-              <ExternalLink className="w-4 h-4" />
-            </a>
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Run Research Query</span>
+            </button>
           </div>
         </div>
 

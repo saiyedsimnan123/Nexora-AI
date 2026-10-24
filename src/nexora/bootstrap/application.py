@@ -425,6 +425,10 @@ def build_http_app(
 
     rate_limit_storage = dependencies.get("rate_limit_storage")
 
+    enable_docs = dependencies.get("enable_docs")
+    if enable_docs is None:
+        enable_docs = getattr(settings, "enable_docs", None)
+
     return create_app(
         research_service,
         rag_pipeline=rag_pipeline,
@@ -443,4 +447,5 @@ def build_http_app(
         rate_limit_config=rate_limit_config,
         rate_limit_storage=rate_limit_storage,
         max_upload_size_bytes=max_upload_size_bytes,
+        enable_docs=enable_docs,
     )

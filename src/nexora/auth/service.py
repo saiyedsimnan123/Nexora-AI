@@ -144,7 +144,7 @@ class AuthenticationService:
             ws_repo = WorkspaceRepository(sess)
             workspace = ws_repo.get_by_id(collection.workspace_id)
             if workspace is None or workspace.user_id != user_id:
-                raise ForbiddenError(f"Access to collection {col_uuid} is forbidden.")
+                raise ForbiddenError("Access to the requested collection is forbidden.")
 
             return collection, workspace
 
@@ -245,7 +245,7 @@ class AuthenticationService:
                 raise DocumentNotFoundError(f"Workspace with id {ws_uuid} not found.")
 
             if workspace.user_id != user_id:
-                raise ForbiddenError(f"Access to workspace {ws_uuid} is forbidden.")
+                raise ForbiddenError("Access to the requested workspace is forbidden.")
 
             return workspace
 

@@ -363,6 +363,7 @@ def _build_auth_app(
     comparison_service=None,
     gap_service=None,
     rag_pipeline=None,
+    enforce_auth=True,
 ):
     sf = context["session_factory"]
     paper_meta = ScholarlyPaperMetadata(
@@ -396,7 +397,7 @@ def _build_auth_app(
         gap_service=gap_service or FakeGapService(),
         session_factory=sf,
         auth_service=auth_service,
-        enforce_auth=True,
+        enforce_auth=enforce_auth,
     )
     return TestClient(app), dl
 
@@ -1180,3 +1181,72 @@ def test_create_offline_app_bypasses_auth_by_design():
 
     offline_app = create_offline_app()
     assert getattr(offline_app.state, "enforce_auth", None) is False
+
+
+def test_tenant_routes_fail_closed_without_authentication(auth_test_db):
+    """Verify private tenant endpoints fail closed with 401 when called without credentials,
+
+    even if enforce_auth was somehow False.
+    """
+    client, _ = _build_auth_app(auth_test_db, enforce_auth=False)
+    doc_id = auth_test_db["doc_a1_id"]
+    col_id = auth_test_db["col_a1_id"]
+    ws_id = auth_test_db["ws_a1_id"]
+
+    # 1. GET /documents/{id} without auth -> 401
+    resp_doc = client.get(f"/api/v1/documents/{doc_id}")
+    assert resp_doc.status_code == 401
+    assert resp_doc.json()["error"]["code"] == "unauthorized"
+
+    # 2. GET /collections/{id} without auth -> 401
+    resp_col = client.get(f"/api/v1/collections/{col_id}")
+    assert resp_col.status_code == 401
+    assert resp_col.json()["error"]["code"] == "unauthorized"
+
+    # 3. GET /workspaces/{id}/collections without auth -> 401
+    resp_ws = client.get(f"/api/v1/workspaces/{ws_id}/collections")
+    assert resp_ws.status_code == 401
+    assert resp_ws.json()["error"]["code"] == "unauthorized"
+
+
+def test_tenant_routes_fail_closed_without_session_factory():
+    """Verify private tenant endpoints fail closed when database session factory is missing."""
+    app = create_app(FakeResearchService(), session_factory=None, enforce_auth=False)
+    client = TestClient(app, raise_server_exceptions=False)
+    dummy_uuid = str(uuid4())
+
+    resp_doc = client.get(f"/api/v1/documents/{dummy_uuid}")
+    assert resp_doc.status_code == 500
+    assert resp_doc.json()["error"]["code"] == "server_misconfigured"
+
+    resp_col = client.get(f"/api/v1/collections/{dummy_uuid}")
+    assert resp_col.status_code == 500
+    assert resp_col.json()["error"]["code"] == "server_misconfigured"
+
+    resp_ws = client.get(f"/api/v1/workspaces/{dummy_uuid}/collections")
+    assert resp_ws.status_code == 500
+    assert resp_ws.json()["error"]["code"] == "server_misconfigured"
+
+
+def test_forbidden_error_messages_do_not_leak_uuids(auth_test_db):
+    """Verify that 403 Forbidden responses do not echo private resource UUIDs in error messages."""
+    client, _ = _build_auth_app(auth_test_db)
+    token_b = auth_test_db["token_b"]
+    doc_a_id = auth_test_db["doc_a1_id"]
+    col_a_id = auth_test_db["col_a1_id"]
+    ws_a_id = auth_test_db["ws_a1_id"]
+
+    # User B accesses User A's collection
+    resp_col = client.get(f"/api/v1/collections/{col_a_id}", headers={"Authorization": f"Bearer {token_b}"})
+    assert resp_col.status_code == 403
+    assert str(col_a_id) not in resp_col.json()["error"]["message"]
+
+    # User B accesses User A's workspace
+    resp_ws = client.get(f"/api/v1/workspaces/{ws_a_id}/collections", headers={"Authorization": f"Bearer {token_b}"})
+    assert resp_ws.status_code == 403
+    assert str(ws_a_id) not in resp_ws.json()["error"]["message"]
+
+    # User B accesses User A's document
+    resp_doc = client.get(f"/api/v1/documents/{doc_a_id}", headers={"Authorization": f"Bearer {token_b}"})
+    assert resp_doc.status_code == 403
+    assert str(doc_a_id) not in resp_doc.json()["error"]["message"]

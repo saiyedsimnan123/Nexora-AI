@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexora.api.errors import (
+    AuthenticationError,
     DocumentNotFoundError,
     FileTooLargeError,
     ForbiddenError,
@@ -580,12 +581,12 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
                 pass
 
         if auth_service is not None and checks.get("database", {}).get("status") == "ready":
-            checks["auth"] = {"status": "ready", "enforced": True}
+            checks["auth"] = {"status": "ready"}
         else:
-            checks["auth"] = {"status": "unavailable", "enforced": True}
+            checks["auth"] = {"status": "unavailable"}
             is_ready = False
     else:
-        checks["auth"] = {"status": "ready", "enforced": False}
+        checks["auth"] = {"status": "ready"}
 
     # 3. Research Service check
     if research_service is not None and callable(getattr(research_service, "ask", None)):
@@ -1364,19 +1365,14 @@ def get_document_details(
         raise InvalidRequestError("Invalid document_id: must be a valid UUID.")
 
     auth_service = get_auth_service(request)
-    if current_user is not None and auth_service is not None:
-        doc, _, _, _ = auth_service.verify_document_ownership(doc_uuid, current_user.id)
-    else:
-        session_factory = getattr(request.app.state, "session_factory", None)
-        if session_factory is None:
-            raise InvalidConfigurationError("session_factory is not configured")
-        from nexora.database.repository.document import DocumentRepository
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured")
 
-        with session_factory() as session:
-            doc_repo = DocumentRepository(session)
-            doc = doc_repo.get_by_id(doc_uuid)
-            if doc is None:
-                raise DocumentNotFoundError(f"Document with id {doc_uuid} not found.")
+    if current_user is None or auth_service is None:
+        raise AuthenticationError("Authentication credentials are required or invalid.")
+
+    doc, _, _, _ = auth_service.verify_document_ownership(doc_uuid, current_user.id)
 
     return DocumentDetailsResponseBody(
         document_id=str(doc.id),
@@ -1418,19 +1414,14 @@ def get_collection_details(
         raise InvalidRequestError("Invalid collection_id: must be a valid UUID.")
 
     auth_service = get_auth_service(request)
-    if current_user is not None and auth_service is not None:
-        col, _ = auth_service.verify_collection_ownership(col_uuid, current_user.id)
-    else:
-        session_factory = getattr(request.app.state, "session_factory", None)
-        if session_factory is None:
-            raise InvalidConfigurationError("session_factory is not configured")
-        from nexora.database.repository.collection import CollectionRepository
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured")
 
-        with session_factory() as session:
-            col_repo = CollectionRepository(session)
-            col = col_repo.get_by_id(col_uuid)
-            if col is None:
-                raise DocumentNotFoundError(f"Collection with id {col_uuid} not found.")
+    if current_user is None or auth_service is None:
+        raise AuthenticationError("Authentication credentials are required or invalid.")
+
+    col, _ = auth_service.verify_collection_ownership(col_uuid, current_user.id)
 
     return CollectionDetailsResponseBody(
         collection_id=str(col.id),
@@ -1472,8 +1463,10 @@ def list_workspace_collections(
     if session_factory is None:
         raise InvalidConfigurationError("session_factory is not configured")
 
-    if current_user is not None and auth_service is not None:
-        auth_service.verify_workspace_ownership(ws_uuid, current_user.id)
+    if current_user is None or auth_service is None:
+        raise AuthenticationError("Authentication credentials are required or invalid.")
+
+    auth_service.verify_workspace_ownership(ws_uuid, current_user.id)
 
     from nexora.database.repository.collection import CollectionRepository
 
