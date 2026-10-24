@@ -83,6 +83,10 @@ class InMemoryRateLimitStorage:
         with self._lock:
             self._history.clear()
 
+    def check_readiness(self) -> tuple[bool, str]:
+        """Check if in-memory rate limit storage is operational."""
+        return True, "in_memory_ready"
+
 
 _LUA_SLIDING_WINDOW = """
 local key = KEYS[1]
@@ -211,6 +215,18 @@ class RedisRateLimitStorage:
                 self._client.close()
             except Exception:
                 pass
+
+    def check_readiness(self) -> tuple[bool, str]:
+        """Check if Redis connection is responsive via PING."""
+        try:
+            ping_fn = getattr(self._client, "ping", None)
+            if callable(ping_fn):
+                res = ping_fn()
+                if res:
+                    return True, "redis_ready"
+            return False, "redis_ping_failed"
+        except Exception as exc:
+            return False, f"redis_unavailable: {type(exc).__name__}"
 
 
 

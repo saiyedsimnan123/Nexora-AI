@@ -953,6 +953,7 @@ curl -X POST "http://localhost:8000/api/v1/papers/compare" \
     - **Authentication**: Validates that required auth tables and service are operational when `enforce_auth=true`.
     - **Research Service**: Confirms RAG query handlers and LLM service are wired.
     - **Vector Store**: Verifies cluster connectivity via `vector_store.count()` and validates vector dimension compatibility against the configured embedding model.
+    - **Rate Limit Storage**: When rate limiting is enabled (`enabled=true`), validates storage responsiveness (including Redis connection and `PING`). Fails closed with HTTP 503 if storage degrades.
   - Returns HTTP 200 (`status: "ready"`) when all dependencies respond.
   - Returns HTTP 503 (`status: "unavailable"`) if any required dependency degrades or schema mismatch is detected, preventing traffic routing to unmigrated or degraded replicas.
 

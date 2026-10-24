@@ -14,7 +14,7 @@ import copy
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -22,6 +22,31 @@ from nexora.llm.models import LLMMessage, _check_no_secret_keys
 from nexora.retrieval.evidence import EvidenceContext, EvidenceItem, extract_citations
 
 _CITATION_PATTERN = re.compile(r"\[E(\d+)\]")
+
+_SUPERIORITY_PATTERN = re.compile(
+    r"\b(?:"
+    r"outperform(?:s|ed|ing)?|"
+    r"superior\s+to|superior\s+(?:performance|accuracy|results?|efficiency)|superiority|"
+    r"surpass(?:es|ed|ing)?\s+(?:all\b|the\b|prior\b|previous\b|existing\b|competitors?\b|baselines?\b|models?\b|methods?\b|other\b)|"
+    r"beats?\s+(?:all\b|the\b|prior\b|previous\b|existing\b|competitors?\b|baselines?\b|models?\b|methods?\b|other\b)|"
+    r"better\s+than|"
+    r"higher\s+accuracy\s+than|"
+    r"state-of-the-art|sota|"
+    r"best-in-class|"
+    r"vastly\s+outperform(?:s|ed|ing)?|"
+    r"exceed(?:s|ed|ing)?\s+(?:all\s+|the\s+|prior\s+|previous\s+|existing\s+|other\s+)?(?:baselines?|models?|methods?|approaches?|sota|results?|work|systems?|benchmarks?|competitors?)|"
+    r"widely\s+superior|"
+    r"substantially\s+faster\s+than|"
+    r"consistently\s+superior"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_COMPARATIVE_EVIDENCE_PATTERN = re.compile(
+    r"\b(?:outperform|baseline|than|compared|surpass|state-of-the-art|sota|exceed|higher|lower|"
+    r"speedup|gain|versus|vs\.?|improvement|trade-?off|benchmark|relative\s+to|against|margin)\b",
+    re.IGNORECASE,
+)
 
 
 class ClaimVerificationStatus(str, Enum):
@@ -61,6 +86,8 @@ class ClaimVerification:
     cited_labels: list[str]
     sources: list[dict[str, Any]]
     unresolved_labels: list[str]
+    is_superiority_claim: bool = False
+    is_unsupported_superiority: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.claim_text, str):
@@ -108,6 +135,8 @@ class ClaimVerification:
             "cited_labels": list(self.cited_labels),
             "sources": copy.deepcopy(self.sources),
             "unresolved_labels": list(self.unresolved_labels),
+            "is_superiority_claim": self.is_superiority_claim,
+            "is_unsupported_superiority": self.is_unsupported_superiority,
         }
 
 
@@ -131,6 +160,9 @@ class AnswerVerificationResult:
     is_grounded: bool
     has_contradictions: bool
     verification_mode: str
+    unsupported_superiority_claims_count: int = 0
+    has_unsupported_superiority_claims: bool = False
+    unsupported_superiority_claims: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.answer_text, str):
@@ -140,6 +172,7 @@ class AnswerVerificationResult:
         if not isinstance(self.claims, (list, tuple)):
             raise TypeError("claims must be a list of ClaimVerification objects")
         object.__setattr__(self, "claims", list(self.claims))
+        object.__setattr__(self, "unsupported_superiority_claims", list(self.unsupported_superiority_claims))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +192,9 @@ class AnswerVerificationResult:
             "is_grounded": self.is_grounded,
             "has_contradictions": self.has_contradictions,
             "verification_mode": self.verification_mode,
+            "unsupported_superiority_claims_count": self.unsupported_superiority_claims_count,
+            "has_unsupported_superiority_claims": self.has_unsupported_superiority_claims,
+            "unsupported_superiority_claims": list(self.unsupported_superiority_claims),
         }
 
     @classmethod
@@ -181,6 +217,9 @@ class AnswerVerificationResult:
             is_grounded=True,
             has_contradictions=False,
             verification_mode="empty_evidence",
+            unsupported_superiority_claims_count=0,
+            has_unsupported_superiority_claims=False,
+            unsupported_superiority_claims=[],
         )
 
 
@@ -299,16 +338,23 @@ class ClaimToEvidenceVerifier:
 
         cited_labels = claim.cited_labels
         num_context_items = len(context.items)
+        is_superiority = bool(_SUPERIORITY_PATTERN.search(claim.claim_text))
 
         # 1. No citations cited in claim -> Insufficient evidence
         if not cited_labels:
             return ClaimVerification(
                 claim_text=claim.claim_text,
                 status=ClaimVerificationStatus.INSUFFICIENT.value,
-                reasoning="Claim makes assertions without citing any supporting evidence.",
+                reasoning=(
+                    "Claim asserts comparative superiority without citing any supporting evidence."
+                    if is_superiority
+                    else "Claim makes assertions without citing any supporting evidence."
+                ),
                 cited_labels=[],
                 sources=[],
                 unresolved_labels=[],
+                is_superiority_claim=is_superiority,
+                is_unsupported_superiority=is_superiority,
             )
 
         resolved_items: list[EvidenceItem] = []
@@ -355,6 +401,8 @@ class ClaimToEvidenceVerifier:
                 reasons.append(
                     f"Citations {missing} do not resolve to any supplied evidence chunk."
                 )
+            if is_superiority:
+                reasons.append("Claim asserts comparative superiority with unresolvable citations.")
             return ClaimVerification(
                 claim_text=claim.claim_text,
                 status=ClaimVerificationStatus.UNRESOLVED.value,
@@ -362,6 +410,8 @@ class ClaimToEvidenceVerifier:
                 cited_labels=cited_labels,
                 sources=sources,
                 unresolved_labels=unresolved_labels,
+                is_superiority_claim=is_superiority,
+                is_unsupported_superiority=is_superiority,
             )
 
         # 4. Semantic verification via LLM verifier if configured
@@ -388,6 +438,19 @@ class ClaimToEvidenceVerifier:
                     status_val = ClaimVerificationStatus.INSUFFICIENT.value
 
                 reasoning_val = str(parsed.get("reasoning", "")).strip() or "Evaluated by semantic verifier."
+
+                is_unsupported_sup = False
+                if is_superiority:
+                    if status_val != ClaimVerificationStatus.SUPPORTED.value:
+                        is_unsupported_sup = True
+                        reasoning_val = f"{reasoning_val} Claim asserts comparative superiority without verified supporting evidence."
+                    else:
+                        combined_source_text = " ".join(str(s.get("text", "")) for s in sources)
+                        if not bool(_COMPARATIVE_EVIDENCE_PATTERN.search(combined_source_text)):
+                            status_val = ClaimVerificationStatus.INSUFFICIENT.value
+                            is_unsupported_sup = True
+                            reasoning_val = "Claim asserts comparative superiority, but cited evidence contains no comparative baseline measurements."
+
                 return ClaimVerification(
                     claim_text=claim.claim_text,
                     status=status_val,
@@ -395,6 +458,8 @@ class ClaimToEvidenceVerifier:
                     cited_labels=cited_labels,
                     sources=sources,
                     unresolved_labels=[],
+                    is_superiority_claim=is_superiority,
+                    is_unsupported_superiority=is_unsupported_sup,
                 )
             except Exception as exc:
                 # Provider failures fall back safely to INSUFFICIENT without fabricating support
@@ -405,19 +470,25 @@ class ClaimToEvidenceVerifier:
                     cited_labels=cited_labels,
                     sources=sources,
                     unresolved_labels=[],
+                    is_superiority_claim=is_superiority,
+                    is_unsupported_superiority=is_superiority,
                 )
 
         # 5. Deterministic structural verification only
+        reasoning_text = (
+            "Claim asserts comparative superiority without semantic verification."
+            if is_superiority
+            else "Citations structurally resolve to supplied evidence, but semantic verification was not configured."
+        )
         return ClaimVerification(
             claim_text=claim.claim_text,
             status=ClaimVerificationStatus.INSUFFICIENT.value,
-            reasoning=(
-                "Citations structurally resolve to supplied evidence, but semantic verification "
-                "was not configured."
-            ),
+            reasoning=reasoning_text,
             cited_labels=cited_labels,
             sources=sources,
             unresolved_labels=[],
+            is_superiority_claim=is_superiority,
+            is_unsupported_superiority=is_superiority,
         )
 
     def verify_answer(
@@ -462,9 +533,12 @@ class ClaimToEvidenceVerifier:
                     cited_labels=c.cited_labels,
                     sources=[],
                     unresolved_labels=c.cited_labels,
+                    is_superiority_claim=bool(_SUPERIORITY_PATTERN.search(c.claim_text)),
+                    is_unsupported_superiority=bool(_SUPERIORITY_PATTERN.search(c.claim_text)),
                 )
                 for c in claims
             ]
+            unsupported_sup = [c.claim_text for c in verified_claims if c.is_unsupported_superiority]
             return AnswerVerificationResult(
                 answer_text=answer_text,
                 query=query,
@@ -482,6 +556,9 @@ class ClaimToEvidenceVerifier:
                 is_grounded=False,
                 has_contradictions=False,
                 verification_mode="empty_evidence_with_claims",
+                unsupported_superiority_claims_count=len(unsupported_sup),
+                has_unsupported_superiority_claims=bool(unsupported_sup),
+                unsupported_superiority_claims=unsupported_sup,
             )
 
         raw_claims = extract_claims_from_text(answer_text)
@@ -503,6 +580,9 @@ class ClaimToEvidenceVerifier:
                 is_grounded=False,
                 has_contradictions=False,
                 verification_mode="zero_claims",
+                unsupported_superiority_claims_count=0,
+                has_unsupported_superiority_claims=False,
+                unsupported_superiority_claims=[],
             )
 
         verified_claims: list[ClaimVerification] = []
@@ -520,6 +600,8 @@ class ClaimToEvidenceVerifier:
         n_contra = sum(1 for c in verified_claims if c.is_contradicted)
         n_insuff = sum(1 for c in verified_claims if c.is_insufficient)
         n_unres = sum(1 for c in verified_claims if c.is_unresolved)
+        unsupported_sup = [c.claim_text for c in verified_claims if c.is_unsupported_superiority]
+        n_unsupported_sup = len(unsupported_sup)
 
         coverage_count = sum(1 for c in verified_claims if len(c.sources) > 0)
         coverage_ratio = (coverage_count / total_claims) if total_claims > 0 else 0.0
@@ -538,6 +620,7 @@ class ClaimToEvidenceVerifier:
             and n_supp == total_claims
             and n_contra == 0
             and n_unres == 0
+            and n_unsupported_sup == 0
         )
 
         return AnswerVerificationResult(
@@ -557,4 +640,7 @@ class ClaimToEvidenceVerifier:
             is_grounded=is_grounded,
             has_contradictions=(n_contra > 0),
             verification_mode="llm_verified" if self._llm is not None else "structural_only",
+            unsupported_superiority_claims_count=n_unsupported_sup,
+            has_unsupported_superiority_claims=bool(unsupported_sup),
+            unsupported_superiority_claims=unsupported_sup,
         )

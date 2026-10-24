@@ -600,6 +600,13 @@ class AnswerGroundingEvaluationMetrics:
     fully_grounded_answer_rate: float
     zero_evidence_handled_rate: float
     empty_claims_answers_count: int
+    unsupported_superiority_claims_count: int = 0
+    unsupported_superiority_claim_rate: float = 0.0
+    abstention_count: int = 0
+    abstention_rate: float = 1.0
+    retrieval_failure_count: int = 0
+    synthesis_failure_count: int = 0
+    citation_validation_failure_count: int = 0
 
 
 def evaluate_answer_grounding(
@@ -655,6 +662,11 @@ def evaluate_answer_grounding(
     total_contradicted = 0
     total_insufficient = 0
     total_unresolved = 0
+    total_unsupported_sup = 0
+    total_abstentions = 0
+    total_retrieval_failures = 0
+    total_synthesis_failures = 0
+    total_citation_val_failures = 0
 
     covered_claims_count = 0
     fully_grounded_answers = 0
@@ -692,6 +704,11 @@ def evaluate_answer_grounding(
         num_ev = len(context.items)
         total_evidence_across_all += num_ev
 
+        if case.get("retrieval_failure") or case.get("retrieval_failed"):
+            total_retrieval_failures += 1
+        if case.get("synthesis_failure") or case.get("synthesis_failed"):
+            total_synthesis_failures += 1
+
         result = verifier.verify_answer(text, context, query=query)
 
         n_claims = result.total_claims
@@ -709,13 +726,31 @@ def evaluate_answer_grounding(
         total_contradicted += result.contradicted_claims_count
         total_insufficient += result.insufficient_claims_count
         total_unresolved += result.unresolved_claims_count
+        total_unsupported_sup += getattr(result, "unsupported_superiority_claims_count", 0)
 
+        case_invalid_citations = 0
         for c in result.claims:
             total_citations += len(c.cited_labels)
-            total_valid_citations += (len(c.cited_labels) - len(c.unresolved_labels))
-            total_invalid_citations += len(c.unresolved_labels)
+            valid_in_c = len(c.cited_labels) - len(c.unresolved_labels)
+            invalid_in_c = len(c.unresolved_labels)
+            total_valid_citations += valid_in_c
+            total_invalid_citations += invalid_in_c
+            case_invalid_citations += invalid_in_c
             if len(c.sources) > 0:
                 covered_claims_count += 1
+
+        if case_invalid_citations > 0 or result.unresolved_claims_count > 0:
+            total_citation_val_failures += 1
+
+        is_abstention = (
+            bool(case.get("is_abstention"))
+            or (num_ev == 0 and n_claims == 0)
+            or ("insufficient evidence" in text.lower())
+            or ("no supporting evidence" in text.lower())
+            or ("cannot conclude" in text.lower())
+        )
+        if is_abstention:
+            total_abstentions += 1
 
         if result.is_grounded:
             fully_grounded_answers += 1
@@ -732,9 +767,11 @@ def evaluate_answer_grounding(
     contra_rate = (total_contradicted / total_claims) if total_claims > 0 else 0.0
     insuff_rate = (total_insufficient / total_claims) if total_claims > 0 else 0.0
     unres_rate = (total_unresolved / total_claims) if total_claims > 0 else 0.0
+    unsupported_sup_rate = (total_unsupported_sup / total_claims) if total_claims > 0 else 0.0
 
     grounded_rate = (fully_grounded_answers / num_answers) if num_answers > 0 else 1.0
     zero_ev_rate = (zero_ev_handled / zero_ev_total) if zero_ev_total > 0 else 1.0
+    abstention_rate = (total_abstentions / num_answers) if num_answers > 0 else 1.0
 
     return AnswerGroundingEvaluationMetrics(
         total_answers=num_answers,
@@ -755,5 +792,12 @@ def evaluate_answer_grounding(
         fully_grounded_answer_rate=round(grounded_rate, 4),
         zero_evidence_handled_rate=round(zero_ev_rate, 4),
         empty_claims_answers_count=empty_claims_answers,
+        unsupported_superiority_claims_count=total_unsupported_sup,
+        unsupported_superiority_claim_rate=round(unsupported_sup_rate, 4),
+        abstention_count=total_abstentions,
+        abstention_rate=round(abstention_rate, 4),
+        retrieval_failure_count=total_retrieval_failures,
+        synthesis_failure_count=total_synthesis_failures,
+        citation_validation_failure_count=total_citation_val_failures,
     )
 

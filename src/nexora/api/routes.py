@@ -613,6 +613,27 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
         else:
             checks["vector_store"] = {"status": "ready"}
 
+    # 5. Rate limit storage check (when rate limiting is enabled)
+    rate_limit_config = getattr(request.app.state, "rate_limit_config", None)
+    rate_limit_storage = getattr(request.app.state, "rate_limit_storage", None)
+    if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
+        if rate_limit_storage is not None and hasattr(rate_limit_storage, "check_readiness"):
+            ready_ok, ready_msg = rate_limit_storage.check_readiness()
+            if ready_ok:
+                checks["rate_limit_storage"] = {"status": "ready"}
+            else:
+                checks["rate_limit_storage"] = {
+                    "status": "unavailable",
+                    "error": ready_msg,
+                }
+                is_ready = False
+        else:
+            checks["rate_limit_storage"] = {
+                "status": "unavailable",
+                "error": "storage_not_configured_for_enabled_rate_limiting",
+            }
+            is_ready = False
+
     if not is_ready:
         response.status_code = 503
         return {"status": "unavailable", "checks": checks}
