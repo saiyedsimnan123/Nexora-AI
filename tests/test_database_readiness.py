@@ -379,9 +379,14 @@ def test_authentication_and_tenant_isolation_remain_unchanged() -> None:
     app = _build_test_app(session_factory)
     client = TestClient(app)
 
-    # 1. Unauthenticated request -> 401
+    # 1. Unauthenticated request specifying private collection -> 401
+    resp_unauth_col = client.post("/api/v1/research", json={"query": "test", "collection_id": col1_id})
+    assert resp_unauth_col.status_code == 401
+    assert resp_unauth_col.json()["error"]["code"] == "unauthorized"
+
+    # 1b. Unauthenticated public request without collection -> 200 (isolated benchmark corpus)
     resp_unauth = client.post("/api/v1/research", json={"query": "test"})
-    assert resp_unauth.status_code == 401
+    assert resp_unauth.status_code == 200
 
     # 2. Authenticated user 2 querying user 1's collection -> 403 Forbidden
     resp_cross = client.post(

@@ -246,6 +246,8 @@ def create_app(
     research_service: Any,
     *,
     rag_pipeline: Any = None,
+    public_rag_pipeline: Any = None,
+    public_research_service: Any = None,
     ingestion_service: Any = None,
     analysis_service: Any = None,
     comparison_service: Any = None,
@@ -315,6 +317,8 @@ def create_app(
     )
     app.state.research_service = research_service
     app.state.rag_pipeline = rag_pipeline
+    app.state.public_rag_pipeline = public_rag_pipeline
+    app.state.public_research_service = public_research_service
     app.state.ingestion_service = ingestion_service
     app.state.analysis_service = analysis_service
     app.state.comparison_service = comparison_service

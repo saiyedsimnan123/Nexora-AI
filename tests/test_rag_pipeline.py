@@ -397,3 +397,14 @@ def test_rag_cli_invalid_top_k(capsys):
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "--top-k must be a positive integer" in err
+
+
+def test_create_live_rag_pipeline_without_api_key_fails_clearly():
+    """Live generation without an API key raises ConfigurationError with clear instructions."""
+    from nexora.config.settings import ConfigurationError
+    from nexora.rag.pipeline import create_live_rag_pipeline
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        create_live_rag_pipeline(environ={})
+
+    assert "no api key configured" in str(exc_info.value).lower()

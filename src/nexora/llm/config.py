@@ -91,13 +91,12 @@ class LLMConfig:
                     api_key = val.strip()
                     break
 
-        model = get("MODEL")
-        if not model:
-            val = env.get("OPENAI_MODEL")
-            if val and val.strip():
-                model = val.strip()
-            elif api_key:
-                model = "gpt-4o-mini"
+        if "NEXORA_LLM_MODEL" in env:
+            model = env["NEXORA_LLM_MODEL"].strip()
+        elif "OPENAI_MODEL" in env:
+            model = env["OPENAI_MODEL"].strip()
+        else:
+            model = "gpt-4o-mini"
 
         base_url = get("BASE_URL")
         if not base_url:

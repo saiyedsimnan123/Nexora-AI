@@ -311,14 +311,21 @@ def test_actual_authentication_enforced_on_endpoints(base_prod_env: dict[str, st
 
     client = TestClient(app)
 
-    # 1. Research endpoint without credentials -> 401
-    resp_research_unauth = client.post("/api/v1/research", json={"query": "What is attention?"})
-    assert resp_research_unauth.status_code == 401
-    assert resp_research_unauth.json()["error"]["code"] == "unauthorized"
-
-    # 2. Collection details endpoint without credentials -> 401
     import uuid
     dummy_col_id = str(uuid.uuid4())
+
+    # 1. Anonymous research targeting a private collection -> 401
+    resp_research_col_unauth = client.post(
+        "/api/v1/research", json={"query": "What is attention?", "collection_id": dummy_col_id}
+    )
+    assert resp_research_col_unauth.status_code == 401
+    assert resp_research_col_unauth.json()["error"]["code"] == "unauthorized"
+
+    # 1b. Anonymous public research without collection_id -> 200 (isolated benchmark corpus)
+    resp_research_unauth = client.post("/api/v1/research", json={"query": "What is attention?"})
+    assert resp_research_unauth.status_code == 200
+
+    # 2. Collection details endpoint without credentials -> 401
     resp_col_unauth = client.get(f"/api/v1/collections/{dummy_col_id}")
     assert resp_col_unauth.status_code == 401
     assert resp_col_unauth.json()["error"]["code"] == "unauthorized"

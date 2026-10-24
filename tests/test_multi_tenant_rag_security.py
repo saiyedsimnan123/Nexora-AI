@@ -857,3 +857,88 @@ def test_research_verify_service_collection_ids_and_paper_id_propagation(multi_t
     req_paper = ResearchVerifyRequest(query="content", paper_id=str(paper_b.id))
     res_paper = service.verify(req_paper)
     assert res_paper.evidence_count > 0
+
+
+def test_anonymous_public_research_isolated_from_tenant_data(multi_tenant_env):
+    """Anonymous callers query only the isolated public benchmark corpus and never see tenant data."""
+    env = multi_tenant_env
+    app = create_app(
+        FakeResearchService(),
+        rag_pipeline=env["rag_pipeline"],
+        session_factory=env["session_factory"],
+        enforce_auth=True,
+    )
+    client = TestClient(app)
+
+    paper_a, _ = _seed_paper_and_chunks(
+        env,
+        env["col_a_id"],
+        "Alpha Secret Research",
+        ["Confidential quantum error correction code for Falcon-27 processor."],
+    )
+    paper_b, _ = _seed_paper_and_chunks(
+        env,
+        env["col_b_id"],
+        "Beta Secret Research",
+        ["Proprietary neuromorphic spike encoding algorithm on Loihi-2 chip."],
+    )
+
+    secret_a = "Confidential quantum error correction code for Falcon-27 processor."
+    secret_b = "Proprietary neuromorphic spike encoding algorithm on Loihi-2 chip."
+
+    # 1. Anonymous query to /research/query succeeds against public benchmark
+    resp_pub = client.post(
+        "/api/v1/research/query",
+        json={"query": "What is the key advantage of FlashAttention?"},
+    )
+    assert resp_pub.status_code == 200
+    pub_data = resp_pub.json()
+    assert pub_data["status"] == "success"
+    assert len(pub_data["sources"]) > 0
+    for src in pub_data["sources"]:
+        assert "Falcon" not in src["text"]
+        assert "Loihi" not in src["text"]
+
+    # 2. Anonymous query searching for tenant secrets NEVER returns tenant chunks
+    resp_search_secret = client.post(
+        "/api/v1/research/query",
+        json={"query": secret_a},
+    )
+    assert resp_search_secret.status_code == 200
+    secret_data = resp_search_secret.json()
+    for src in secret_data["sources"]:
+        assert "Falcon" not in src["text"]
+        assert "Loihi" not in src["text"]
+
+    # 3. Anonymous caller attempting to target a private collection_id receives 401
+    resp_anon_col = client.post(
+        "/api/v1/research/query",
+        json={"query": "quantum error correction", "collection_id": str(env["col_a_id"])},
+    )
+    assert resp_anon_col.status_code == 401
+    assert resp_anon_col.json()["error"]["code"] == "unauthorized"
+
+    # 4. Anonymous caller attempting to target a private paper_id receives 401
+    resp_anon_paper = client.post(
+        "/api/v1/research/query",
+        json={"query": "quantum error correction", "paper_id": str(paper_a.id)},
+    )
+    assert resp_anon_paper.status_code == 401
+    assert resp_anon_paper.json()["error"]["code"] == "unauthorized"
+
+    # 5. Anonymous caller attempting /api/v1/research with private collection_id receives 401
+    resp_anon_res_col = client.post(
+        "/api/v1/research",
+        json={"query": "quantum error correction", "collection_id": str(env["col_a_id"])},
+    )
+    assert resp_anon_res_col.status_code == 401
+    assert resp_anon_res_col.json()["error"]["code"] == "unauthorized"
+
+    # 6. Anonymous caller to /api/v1/research succeeds without collection_id
+    resp_anon_res = client.post(
+        "/api/v1/research",
+        json={"query": "What is FlashAttention?"},
+    )
+    assert resp_anon_res.status_code == 200
+    assert resp_anon_res.json()["evidence_count"] > 0
+    assert "Falcon" not in resp_anon_res.json()["text"]

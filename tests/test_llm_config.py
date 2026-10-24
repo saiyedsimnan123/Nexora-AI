@@ -69,8 +69,9 @@ def test_from_env_reads_all_variables():
 
 def test_from_env_defaults_and_missing_model():
     assert LLMConfig.from_env({"NEXORA_LLM_MODEL": "m"}).provider == "openai"
-    with pytest.raises(ValueError):
-        LLMConfig.from_env({})
+    # Unconfigured environment defaults to gpt-4o-mini even without API key
+    assert LLMConfig.from_env({}).model == "gpt-4o-mini"
+    assert LLMConfig.from_env({}).api_key is None
     with pytest.raises(ValueError):
         LLMConfig.from_env({"NEXORA_LLM_MODEL": "   "})
 

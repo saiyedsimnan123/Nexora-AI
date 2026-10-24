@@ -515,6 +515,79 @@ def get_current_user(request: Request) -> Any:
     return auth_service.authenticate_request(request)
 
 
+def get_optional_user(request: Request) -> Any:
+    """Dependency: authenticates the caller if credentials are provided, otherwise returns None."""
+    has_creds = bool(
+        request.headers.get("Authorization") or request.headers.get("X-API-Key")
+    )
+    if not has_creds:
+        return None
+    auth_service = get_auth_service(request)
+    if auth_service is None:
+        enforce_auth = getattr(request.app.state, "enforce_auth", False)
+        if enforce_auth:
+            raise InvalidConfigurationError(
+                "Authentication is enforced but no session_factory or auth_service is configured."
+            )
+        return None
+    return auth_service.authenticate_request(request)
+
+
+def get_public_rag_pipeline(request: Request) -> Any:
+    """Dependency: returns an explicitly isolated RAG pipeline over the public benchmark corpus."""
+    pipeline = getattr(request.app.state, "public_rag_pipeline", None)
+    if pipeline is not None:
+        return pipeline
+
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    if not enforce_auth and getattr(request.app.state, "rag_pipeline", None) is not None:
+        return request.app.state.rag_pipeline
+
+    from nexora.rag.pipeline import create_offline_rag_pipeline
+
+    pipeline = create_offline_rag_pipeline()
+    request.app.state.public_rag_pipeline = pipeline
+    return pipeline
+
+
+def get_public_research_service(request: Request) -> Any:
+    """Dependency: returns an isolated research service over the public benchmark corpus."""
+    service = getattr(request.app.state, "public_research_service", None)
+    if service is not None:
+        return service
+
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    if not enforce_auth and getattr(request.app.state, "research_service", None) is not None:
+        return request.app.state.research_service
+
+    public_pipeline = get_public_rag_pipeline(request)
+
+    class _PublicBenchmarkResearchService:
+        def __init__(self, pipeline: Any) -> None:
+            self._pipeline = pipeline
+
+        def ask(self, request_obj: Any, **kwargs: Any) -> Any:
+            from nexora.api.models import ResearchResponse
+
+            query_text = (
+                request_obj.query
+                if hasattr(request_obj, "query")
+                else str(request_obj)
+            )
+            resp = self._pipeline.answer(query_text)
+            return ResearchResponse(
+                text=resp.answer,
+                query=query_text,
+                model=resp.model,
+                usage=resp.usage,
+                evidence_count=resp.evidence_count,
+            )
+
+    service = _PublicBenchmarkResearchService(public_pipeline)
+    request.app.state.public_research_service = service
+    return service
+
+
 health_router = APIRouter()
 v1_router = APIRouter(prefix="/api/v1")
 
@@ -648,12 +721,29 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
 def research(
     body: ResearchRequestBody,
     request: Request,
-    service: ResearchApplicationService = Depends(get_research_service),
-    current_user: Any = Depends(get_current_user),
+    current_user: Any = Depends(get_optional_user),
 ) -> ResearchResponseBody:
-    scoped_col_ids: list[str] | None = None
-    if current_user is not None:
+    if current_user is None:
+        if body.collection_id is not None:
+            raise AuthenticationError(
+                "Authentication credentials are required to query specific collections."
+            )
+        service = get_public_research_service(request)
+        request_obj = ResearchRequest(
+            query=body.query,
+            model=body.model,
+            temperature=body.temperature,
+            max_output_tokens=body.max_output_tokens,
+            collection_id=None,
+        )
+        try:
+            ans = service.ask(request_obj)
+        except TypeError:
+            ans = service.ask(request_obj)
+    else:
+        service = get_research_service(request)
         auth_service = get_auth_service(request)
+        scoped_col_ids: list[str] | None = None
         if auth_service is not None:
             if body.collection_id is not None:
                 col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
@@ -661,28 +751,29 @@ def research(
             else:
                 user_cols = auth_service.get_user_collection_ids(current_user.id)
                 scoped_col_ids = [str(c) for c in user_cols]
-    elif body.collection_id is not None:
-        scoped_col_ids = [body.collection_id]
+        else:
+            scoped_col_ids = []
 
-    if scoped_col_ids is not None and len(scoped_col_ids) == 0:
-        return ResearchResponseBody(
-            text="No evidence found in authorized research collections.",
+        if scoped_col_ids is not None and len(scoped_col_ids) == 0:
+            return ResearchResponseBody(
+                text="No evidence found in authorized research collections.",
+                query=body.query,
+                model=body.model or "unknown",
+                evidence_count=0,
+            )
+
+        request_obj = ResearchRequest(
             query=body.query,
-            model=body.model or "unknown",
-            evidence_count=0,
+            model=body.model,
+            temperature=body.temperature,
+            max_output_tokens=body.max_output_tokens,
+            collection_id=body.collection_id,
         )
+        try:
+            ans = service.ask(request_obj, collection_ids=scoped_col_ids)
+        except TypeError:
+            ans = service.ask(request_obj)
 
-    request_obj = ResearchRequest(
-        query=body.query,
-        model=body.model,
-        temperature=body.temperature,
-        max_output_tokens=body.max_output_tokens,
-        collection_id=body.collection_id,
-    )
-    try:
-        ans = service.ask(request_obj, collection_ids=scoped_col_ids)
-    except TypeError:
-        ans = service.ask(request_obj)
     if isinstance(ans, ResearchResponse):
         payload = ans.to_dict()
     elif isinstance(ans, ResearchAnswer):
@@ -709,8 +800,7 @@ def research(
 def research_rag_query(
     body: RAGQueryRequestBody,
     request: Request,
-    pipeline: Any = Depends(get_rag_pipeline),
-    current_user: Any = Depends(get_current_user),
+    current_user: Any = Depends(get_optional_user),
 ) -> RAGQueryResponseBody:
     """Answer a research question using the grounded RAG pipeline."""
     if not body.query.strip():
@@ -724,11 +814,22 @@ def research_rag_query(
     if body.max_output_tokens is not None and body.max_output_tokens <= 0:
         raise InvalidRequestError("max_output_tokens must be greater than 0")
 
-    scoped_collection_ids: list[str] | None = None
-    scoped_paper_id: str | None = None
-    auth_service = get_auth_service(request)
+    if current_user is None:
+        if body.collection_id is not None or body.paper_id is not None:
+            raise AuthenticationError(
+                "Authentication credentials are required to query specific collections or papers."
+            )
+        pipeline = get_public_rag_pipeline(request)
+        scoped_collection_ids: list[str] | None = None
+        scoped_paper_id: str | None = None
+    else:
+        auth_service = get_auth_service(request)
+        if auth_service is None:
+            raise InvalidConfigurationError("auth_service is not configured")
 
-    if current_user is not None and auth_service is not None:
+        scoped_collection_ids = None
+        scoped_paper_id = None
+
         if body.collection_id is not None:
             col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
             scoped_collection_ids = [str(col.id)]
@@ -742,28 +843,26 @@ def research_rag_query(
         if scoped_collection_ids is None and scoped_paper_id is None:
             user_cols = auth_service.get_user_collection_ids(current_user.id)
             scoped_collection_ids = [str(c) for c in user_cols]
-    else:
-        if body.collection_id is not None:
-            scoped_collection_ids = [body.collection_id]
-        if body.paper_id is not None:
-            scoped_paper_id = body.paper_id
 
-    # Fail closed if caller is scoped but has no authorized collections
-    if scoped_collection_ids is not None and len(scoped_collection_ids) == 0:
-        from nexora.rag.pipeline import INSUFFICIENT_EVIDENCE_ANSWER
-        model_name = getattr(pipeline.generator, "model_name", "unknown") if hasattr(pipeline, "generator") else "unknown"
-        return RAGQueryResponseBody(
-            query=body.query,
-            answer=INSUFFICIENT_EVIDENCE_ANSWER,
-            sources=[],
-            cited_sources=[],
-            is_grounded=True,
-            is_mock=getattr(pipeline, "is_mock", True),
-            model=model_name,
-            status="insufficient_evidence",
-            retrieval_mode=body.retrieval_mode,
-            evidence_count=0,
-        )
+        # Fail closed if caller is scoped but has no authorized collections
+        if scoped_collection_ids is not None and len(scoped_collection_ids) == 0:
+            from nexora.rag.pipeline import INSUFFICIENT_EVIDENCE_ANSWER
+            pipeline = get_rag_pipeline(request)
+            model_name = getattr(pipeline.generator, "model_name", "unknown") if hasattr(pipeline, "generator") else "unknown"
+            return RAGQueryResponseBody(
+                query=body.query,
+                answer=INSUFFICIENT_EVIDENCE_ANSWER,
+                sources=[],
+                cited_sources=[],
+                is_grounded=True,
+                is_mock=getattr(pipeline, "is_mock", True),
+                model=model_name,
+                status="insufficient_evidence",
+                retrieval_mode=body.retrieval_mode,
+                evidence_count=0,
+            )
+
+        pipeline = get_rag_pipeline(request)
 
     try:
         response = pipeline.answer(
@@ -797,10 +896,9 @@ def research_rag_query(
 def rag_query_alias(
     body: RAGQueryRequestBody,
     request: Request,
-    pipeline: Any = Depends(get_rag_pipeline),
-    current_user: Any = Depends(get_current_user),
+    current_user: Any = Depends(get_optional_user),
 ) -> RAGQueryResponseBody:
-    return research_rag_query(body, request=request, pipeline=pipeline, current_user=current_user)
+    return research_rag_query(body, request=request, current_user=current_user)
 
 
 @v1_router.post(

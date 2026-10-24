@@ -1009,11 +1009,39 @@ def test_cross_user_research_verify_rejected_with_403(auth_test_db):
 def test_research_and_rag_query_require_auth_when_enforced(auth_test_db):
     client, _ = _build_auth_app(auth_test_db)
     token_a = auth_test_db["token_a"]
+    col_a_id = str(auth_test_db["col_a1_id"])
 
-    # 1. /research requires auth
+    # 1. Anonymous access to public research endpoints succeeds without collection_id
     resp_unauth_res = client.post("/api/v1/research", json={"query": "test query"})
-    assert resp_unauth_res.status_code == 401
+    assert resp_unauth_res.status_code == 200
 
+    resp_unauth_rag = client.post("/api/v1/research/query", json={"query": "test query"})
+    assert resp_unauth_rag.status_code == 200
+
+    resp_unauth_alias = client.post("/api/v1/rag/query", json={"query": "test query"})
+    assert resp_unauth_alias.status_code == 200
+
+    # 2. Anonymous callers attempting to target specific collections or papers are rejected with 401
+    resp_unauth_col_res = client.post(
+        "/api/v1/research", json={"query": "test query", "collection_id": col_a_id}
+    )
+    assert resp_unauth_col_res.status_code == 401
+    assert resp_unauth_col_res.json()["error"]["code"] == "unauthorized"
+
+    resp_unauth_col_rag = client.post(
+        "/api/v1/research/query", json={"query": "test query", "collection_id": col_a_id}
+    )
+    assert resp_unauth_col_rag.status_code == 401
+    assert resp_unauth_col_rag.json()["error"]["code"] == "unauthorized"
+
+    resp_unauth_paper_rag = client.post(
+        "/api/v1/research/query",
+        json={"query": "test query", "paper_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"},
+    )
+    assert resp_unauth_paper_rag.status_code == 401
+    assert resp_unauth_paper_rag.json()["error"]["code"] == "unauthorized"
+
+    # 3. Authenticated requests succeed with or without collection_id
     resp_auth_res = client.post(
         "/api/v1/research",
         headers={"Authorization": f"Bearer {token_a}"},
@@ -1021,20 +1049,12 @@ def test_research_and_rag_query_require_auth_when_enforced(auth_test_db):
     )
     assert resp_auth_res.status_code == 200
 
-    # 2. /research/query requires auth
-    resp_unauth_rag = client.post("/api/v1/research/query", json={"query": "test query"})
-    assert resp_unauth_rag.status_code == 401
-
     resp_auth_rag = client.post(
         "/api/v1/research/query",
         headers={"Authorization": f"Bearer {token_a}"},
         json={"query": "test query"},
     )
     assert resp_auth_rag.status_code == 200
-
-    # 3. /rag/query alias requires auth
-    resp_unauth_alias = client.post("/api/v1/rag/query", json={"query": "test query"})
-    assert resp_unauth_alias.status_code == 401
 
     resp_auth_alias = client.post(
         "/api/v1/rag/query",
