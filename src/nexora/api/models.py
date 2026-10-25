@@ -565,6 +565,271 @@ class ResearchGapsResponse:
         }
 
 
+
+
+@dataclass(frozen=True)
+class ResearchTrendsRequest:
+    """Request for temporal research trend analysis across a collection."""
+
+    collection_id: str
+    paper_ids: list[str] | None = None
+    time_unit: str = "year"
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+            raise InvalidRequestError("collection_id must be a non-empty string")
+        from uuid import UUID
+
+        try:
+            col_uuid = UUID(self.collection_id.strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError(
+                f"Invalid collection_id {self.collection_id!r}: must be a valid UUID."
+            )
+        object.__setattr__(self, "collection_id", str(col_uuid))
+
+        if not isinstance(self.time_unit, str) or not self.time_unit.strip():
+            raise InvalidRequestError("time_unit must be a non-empty string")
+        object.__setattr__(self, "time_unit", self.time_unit.strip().lower())
+
+        if self.paper_ids is not None:
+            if not isinstance(self.paper_ids, (list, tuple)):
+                raise InvalidRequestError("paper_ids must be a list of strings")
+            if len(self.paper_ids) == 0:
+                raise InvalidRequestError("paper_ids must not be empty when provided")
+            if len(self.paper_ids) > 10:
+                raise InvalidRequestError("paper_ids must contain at most 10 papers")
+
+            cleaned: list[str] = []
+            for idx, pid in enumerate(self.paper_ids):
+                if not isinstance(pid, str) or not pid.strip():
+                    raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+                try:
+                    UUID(pid.strip())
+                except (ValueError, AttributeError):
+                    raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
+                cleaned.append(str(UUID(pid.strip())))
+            if len(set(cleaned)) != len(cleaned):
+                raise InvalidRequestError("paper_ids must be unique with no duplicates.")
+            object.__setattr__(self, "paper_ids", cleaned)
+
+        if self.model is not None:
+            if not isinstance(self.model, str) or not self.model.strip():
+                raise InvalidRequestError("model must be a non-empty string")
+            object.__setattr__(self, "model", self.model.strip())
+
+        if self.temperature is not None:
+            if not isinstance(self.temperature, (int, float)):
+                raise InvalidRequestError("temperature must be a float")
+            if not 0.0 <= float(self.temperature) <= 2.0:
+                raise InvalidRequestError("temperature must be between 0.0 and 2.0")
+            object.__setattr__(self, "temperature", float(self.temperature))
+
+        if self.max_output_tokens is not None:
+            if isinstance(self.max_output_tokens, bool) or not isinstance(self.max_output_tokens, int):
+                raise InvalidRequestError("max_output_tokens must be an integer")
+            if self.max_output_tokens <= 0:
+                raise InvalidRequestError("max_output_tokens must be positive")
+
+
+@dataclass(frozen=True)
+class ResearchTrendsResponse:
+    """Public view of ResearchTrendsReport."""
+
+    collection_id: str
+    paper_ids: list[str]
+    time_unit: str
+    temporal_buckets: list[dict[str, Any]]
+    trends: list[dict[str, Any]]
+    missing_date_paper_ids: list[str]
+    summary: str
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paper_ids", list(self.paper_ids))
+        object.__setattr__(self, "temporal_buckets", copy.deepcopy(list(self.temporal_buckets)))
+        object.__setattr__(self, "trends", copy.deepcopy(list(self.trends)))
+        object.__setattr__(self, "missing_date_paper_ids", list(self.missing_date_paper_ids))
+        object.__setattr__(self, "limitations", list(self.limitations))
+        if self.usage is not None:
+            object.__setattr__(self, "usage", dict(self.usage))
+
+    @classmethod
+    def from_report(cls, report: Any) -> ResearchTrendsResponse:
+        d = report.to_dict()
+        return cls(
+            collection_id=d["collection_id"],
+            paper_ids=d["paper_ids"],
+            time_unit=d["time_unit"],
+            temporal_buckets=d["temporal_buckets"],
+            trends=d["trends"],
+            missing_date_paper_ids=d["missing_date_paper_ids"],
+            summary=d["summary"],
+            limitations=d["limitations"],
+            model=d["model"],
+            usage=d.get("usage"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "collection_id": self.collection_id,
+            "paper_ids": list(self.paper_ids),
+            "time_unit": self.time_unit,
+            "temporal_buckets": copy.deepcopy(self.temporal_buckets),
+            "trends": copy.deepcopy(self.trends),
+            "missing_date_paper_ids": list(self.missing_date_paper_ids),
+            "summary": self.summary,
+            "limitations": list(self.limitations),
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }
+
+
+@dataclass(frozen=True)
+class LiteratureSynthesisRequest:
+    """Request for evidence-grounded literature review synthesis across a collection."""
+
+    collection_id: str
+    paper_ids: list[str] | None = None
+    topic: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+            raise InvalidRequestError("collection_id must be a non-empty string")
+        from uuid import UUID
+
+        try:
+            col_uuid = UUID(self.collection_id.strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError(
+                f"Invalid collection_id {self.collection_id!r}: must be a valid UUID."
+            )
+        object.__setattr__(self, "collection_id", str(col_uuid))
+
+        if self.paper_ids is not None:
+            if not isinstance(self.paper_ids, (list, tuple)):
+                raise InvalidRequestError("paper_ids must be a list of strings")
+            if len(self.paper_ids) == 0:
+                raise InvalidRequestError("paper_ids must not be empty when provided")
+            if len(self.paper_ids) > 10:
+                raise InvalidRequestError("paper_ids must contain at most 10 papers")
+
+            cleaned: list[str] = []
+            for idx, pid in enumerate(self.paper_ids):
+                if not isinstance(pid, str) or not pid.strip():
+                    raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+                try:
+                    UUID(pid.strip())
+                except (ValueError, AttributeError):
+                    raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
+                cleaned.append(str(UUID(pid.strip())))
+            if len(set(cleaned)) != len(cleaned):
+                raise InvalidRequestError("paper_ids must be unique with no duplicates.")
+            object.__setattr__(self, "paper_ids", cleaned)
+
+        if self.topic is not None:
+            if not isinstance(self.topic, str) or not self.topic.strip():
+                raise InvalidRequestError("topic must be a non-empty string if provided")
+            object.__setattr__(self, "topic", self.topic.strip())
+
+        if self.model is not None:
+            if not isinstance(self.model, str) or not self.model.strip():
+                raise InvalidRequestError("model must be a non-empty string")
+            object.__setattr__(self, "model", self.model.strip())
+
+        if self.temperature is not None:
+            if not isinstance(self.temperature, (int, float)):
+                raise InvalidRequestError("temperature must be a float")
+            if not 0.0 <= float(self.temperature) <= 2.0:
+                raise InvalidRequestError("temperature must be between 0.0 and 2.0")
+            object.__setattr__(self, "temperature", float(self.temperature))
+
+        if self.max_output_tokens is not None:
+            if isinstance(self.max_output_tokens, bool) or not isinstance(self.max_output_tokens, int):
+                raise InvalidRequestError("max_output_tokens must be an integer")
+            if self.max_output_tokens <= 0:
+                raise InvalidRequestError("max_output_tokens must be positive")
+
+
+@dataclass(frozen=True)
+class LiteratureSynthesisResponse:
+    """Public view of LiteratureSynthesisReport."""
+
+    collection_id: str
+    paper_ids: list[str]
+    topic: str | None
+    executive_summary: str
+    common_findings: list[dict[str, Any]]
+    disagreements: list[dict[str, Any]]
+    primary_methods: list[str]
+    recurring_limitations: list[dict[str, Any]]
+    open_research_gaps: list[str]
+    evidence_count: int
+    is_grounded: bool
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paper_ids", list(self.paper_ids))
+        object.__setattr__(self, "common_findings", copy.deepcopy(list(self.common_findings)))
+        object.__setattr__(self, "disagreements", copy.deepcopy(list(self.disagreements)))
+        object.__setattr__(self, "primary_methods", list(self.primary_methods))
+        object.__setattr__(self, "recurring_limitations", copy.deepcopy(list(self.recurring_limitations)))
+        object.__setattr__(self, "open_research_gaps", list(self.open_research_gaps))
+        object.__setattr__(self, "limitations", list(self.limitations))
+        if self.usage is not None:
+            object.__setattr__(self, "usage", dict(self.usage))
+
+    @classmethod
+    def from_report(cls, report: Any) -> LiteratureSynthesisResponse:
+        d = report.to_dict()
+        return cls(
+            collection_id=d["collection_id"],
+            paper_ids=d["paper_ids"],
+            topic=d.get("topic"),
+            executive_summary=d["executive_summary"],
+            common_findings=d["common_findings"],
+            disagreements=d["disagreements"],
+            primary_methods=d["primary_methods"],
+            recurring_limitations=d["recurring_limitations"],
+            open_research_gaps=d["open_research_gaps"],
+            evidence_count=d["evidence_count"],
+            is_grounded=d["is_grounded"],
+            limitations=d["limitations"],
+            model=d["model"],
+            usage=d.get("usage"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready representation."""
+        return {
+            "collection_id": self.collection_id,
+            "paper_ids": list(self.paper_ids),
+            "topic": self.topic,
+            "executive_summary": self.executive_summary,
+            "common_findings": copy.deepcopy(self.common_findings),
+            "disagreements": copy.deepcopy(self.disagreements),
+            "primary_methods": list(self.primary_methods),
+            "recurring_limitations": copy.deepcopy(self.recurring_limitations),
+            "open_research_gaps": list(self.open_research_gaps),
+            "evidence_count": self.evidence_count,
+            "is_grounded": self.is_grounded,
+            "limitations": list(self.limitations),
+            "model": self.model,
+            "usage": None if self.usage is None else dict(self.usage),
+        }
+
+
 @dataclass(frozen=True)
 class DiscoverySearchRequest:
     """Request query parameters for searching scholarly research papers."""
@@ -694,6 +959,10 @@ __all__ = [
     "ResearchCompareResponse",
     "ResearchGapsRequest",
     "ResearchGapsResponse",
+    "ResearchTrendsRequest",
+    "ResearchTrendsResponse",
+    "LiteratureSynthesisRequest",
+    "LiteratureSynthesisResponse",
     "ResearchRequest",
     "ResearchResponse",
     "ResearchVerifyRequest",

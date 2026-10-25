@@ -31,6 +31,10 @@ from nexora.api.models import (
     ResearchCompareResponse,
     ResearchGapsRequest,
     ResearchGapsResponse,
+    ResearchTrendsRequest,
+    ResearchTrendsResponse,
+    LiteratureSynthesisRequest,
+    LiteratureSynthesisResponse,
     ResearchRequest,
     ResearchResponse,
     ResearchVerifyRequest,
@@ -226,6 +230,70 @@ class ResearchGapsResponseBody(BaseModel):
     usage: dict[str, int] | None = None
 
 
+class ResearchTrendsRequestBody(BaseModel):
+    """Wire format of temporal research trend analysis request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str
+    paper_ids: list[str] | None = None
+    time_unit: str = "year"
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class ResearchTrendsResponseBody(BaseModel):
+    """Wire format of temporal research trend analysis response."""
+
+    model_config = ConfigDict(strict=False)
+
+    collection_id: str
+    paper_ids: list[str]
+    time_unit: str
+    temporal_buckets: list[dict[str, Any]]
+    trends: list[dict[str, Any]]
+    missing_date_paper_ids: list[str]
+    summary: str
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None = None
+
+
+class LiteratureSynthesisRequestBody(BaseModel):
+    """Wire format of literature synthesis request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str
+    paper_ids: list[str] | None = None
+    topic: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class LiteratureSynthesisResponseBody(BaseModel):
+    """Wire format of literature synthesis response."""
+
+    model_config = ConfigDict(strict=False)
+
+    collection_id: str
+    paper_ids: list[str]
+    topic: str | None = None
+    executive_summary: str
+    common_findings: list[dict[str, Any]]
+    disagreements: list[dict[str, Any]]
+    primary_methods: list[str]
+    recurring_limitations: list[dict[str, Any]]
+    open_research_gaps: list[str]
+    evidence_count: int
+    is_grounded: bool
+    limitations: list[str]
+    model: str
+    usage: dict[str, int] | None = None
+
+
 class AttributedSourceBody(BaseModel):
     """Wire format of an attributed research evidence source."""
 
@@ -409,6 +477,14 @@ def get_gap_service(request: Request) -> Any:
     service = getattr(request.app.state, "gap_service", None)
     if service is None:
         raise InvalidConfigurationError("gap_service is not configured")
+    return service
+
+
+def get_trend_service(request: Request) -> Any:
+    """Dependency: the research trend analysis and synthesis service."""
+    service = getattr(request.app.state, "trend_service", None)
+    if service is None:
+        raise InvalidConfigurationError("trend_service is not configured")
     return service
 
 
@@ -1158,6 +1234,187 @@ def discover_paper_gaps_by_id_endpoint(
     result = service.discover_gaps_for_papers(req.paper_ids)
     resp = ResearchGapsResponse.from_report(result)
     return ResearchGapsResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/papers/trends",
+    response_model=ResearchTrendsResponseBody,
+    status_code=200,
+    summary="Analyze temporal research trends across a paper collection",
+    description=(
+        "Extracts methods, architectures, datasets, and benchmark metrics across papers in an authorized collection, "
+        "groups findings by publication year or temporal period, and classifies trajectories as emerging, established, "
+        "declining, or insufficient_data strictly based on traceable evidence."
+    ),
+    responses={
+        200: {
+            "description": "Temporal research trend analysis completed successfully.",
+            "model": ResearchTrendsResponseBody,
+        },
+        400: {"description": "Malformed request, invalid UUID, or invalid parameters."},
+        401: {"description": "Authentication required to access private tenant collections."},
+        403: {"description": "Caller does not own or have access to the specified collection or papers."},
+        404: {"description": "Referenced collection or paper was not found."},
+    },
+)
+def analyze_research_trends_endpoint(
+    body: ResearchTrendsRequestBody,
+    request: Request,
+    service: Any = Depends(get_trend_service),
+    current_user: Any = Depends(get_current_user),
+) -> ResearchTrendsResponseBody:
+    req = ResearchTrendsRequest(
+        collection_id=body.collection_id,
+        paper_ids=body.paper_ids,
+        time_unit=body.time_unit,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    if current_user is None:
+        from nexora.api.errors import AuthenticationError
+        raise AuthenticationError("Authentication required to access research trend analysis.")
+    auth_service = get_auth_service(request)
+    if auth_service is not None:
+        auth_service.verify_collection_ownership(req.collection_id, current_user.id)
+        if req.paper_ids:
+            for pid in req.paper_ids:
+                auth_service.verify_paper_ownership(pid, current_user.id)
+    result = service.analyze_collection_trends(
+        req.collection_id,
+        paper_ids=req.paper_ids,
+        time_unit=req.time_unit,
+        model=req.model,
+        temperature=req.temperature,
+        max_output_tokens=req.max_output_tokens,
+    )
+    resp = ResearchTrendsResponse.from_report(result)
+    return ResearchTrendsResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/collections/{collection_id}/trends",
+    response_model=ResearchTrendsResponseBody,
+    status_code=200,
+    summary="Analyze temporal research trends for a collection by ID",
+    description="Convenience endpoint for temporal research trend analysis scoped to a collection ID.",
+    responses={
+        200: {
+            "description": "Temporal research trend analysis completed successfully.",
+            "model": ResearchTrendsResponseBody,
+        },
+        400: {"description": "Malformed request or invalid collection_id."},
+        401: {"description": "Authentication required to access private tenant collections."},
+        403: {"description": "Caller does not own or have access to the specified collection."},
+        404: {"description": "Referenced collection was not found."},
+    },
+)
+def analyze_collection_trends_by_id_endpoint(
+    collection_id: str,
+    request: Request,
+    service: Any = Depends(get_trend_service),
+    current_user: Any = Depends(get_current_user),
+) -> ResearchTrendsResponseBody:
+    req = ResearchTrendsRequest(collection_id=collection_id)
+    if current_user is None:
+        from nexora.api.errors import AuthenticationError
+        raise AuthenticationError("Authentication required to access research trend analysis.")
+    auth_service = get_auth_service(request)
+    if auth_service is not None:
+        auth_service.verify_collection_ownership(req.collection_id, current_user.id)
+    result = service.analyze_collection_trends(req.collection_id)
+    resp = ResearchTrendsResponse.from_report(result)
+    return ResearchTrendsResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/papers/synthesis",
+    response_model=LiteratureSynthesisResponseBody,
+    status_code=200,
+    summary="Generate evidence-grounded literature review synthesis across a collection",
+    description=(
+        "Synthesizes common empirical findings, disagreements/divergences, primary methods, recurring limitations, "
+        "and open research gaps across an authorized collection, strictly grounded in traceable evidence citations."
+    ),
+    responses={
+        200: {
+            "description": "Literature review synthesis completed successfully.",
+            "model": LiteratureSynthesisResponseBody,
+        },
+        400: {"description": "Malformed request, invalid UUID, or invalid parameters."},
+        401: {"description": "Authentication required to access private tenant collections."},
+        403: {"description": "Caller does not own or have access to the specified collection or papers."},
+        404: {"description": "Referenced collection or paper was not found."},
+    },
+)
+def synthesize_literature_endpoint(
+    body: LiteratureSynthesisRequestBody,
+    request: Request,
+    service: Any = Depends(get_trend_service),
+    current_user: Any = Depends(get_current_user),
+) -> LiteratureSynthesisResponseBody:
+    req = LiteratureSynthesisRequest(
+        collection_id=body.collection_id,
+        paper_ids=body.paper_ids,
+        topic=body.topic,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    if current_user is None:
+        from nexora.api.errors import AuthenticationError
+        raise AuthenticationError("Authentication required to access literature review synthesis.")
+    auth_service = get_auth_service(request)
+    if auth_service is not None:
+        auth_service.verify_collection_ownership(req.collection_id, current_user.id)
+        if req.paper_ids:
+            for pid in req.paper_ids:
+                auth_service.verify_paper_ownership(pid, current_user.id)
+    result = service.synthesize_collection_literature(
+        req.collection_id,
+        paper_ids=req.paper_ids,
+        topic=req.topic,
+        model=req.model,
+        temperature=req.temperature,
+        max_output_tokens=req.max_output_tokens,
+    )
+    resp = LiteratureSynthesisResponse.from_report(result)
+    return LiteratureSynthesisResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/collections/{collection_id}/synthesis",
+    response_model=LiteratureSynthesisResponseBody,
+    status_code=200,
+    summary="Generate literature review synthesis for a collection by ID",
+    description="Convenience endpoint for literature review synthesis scoped to a collection ID.",
+    responses={
+        200: {
+            "description": "Literature review synthesis completed successfully.",
+            "model": LiteratureSynthesisResponseBody,
+        },
+        400: {"description": "Malformed request or invalid collection_id."},
+        401: {"description": "Authentication required to access private tenant collections."},
+        403: {"description": "Caller does not own or have access to the specified collection."},
+        404: {"description": "Referenced collection was not found."},
+    },
+)
+def synthesize_collection_literature_by_id_endpoint(
+    collection_id: str,
+    request: Request,
+    service: Any = Depends(get_trend_service),
+    current_user: Any = Depends(get_current_user),
+) -> LiteratureSynthesisResponseBody:
+    req = LiteratureSynthesisRequest(collection_id=collection_id)
+    if current_user is None:
+        from nexora.api.errors import AuthenticationError
+        raise AuthenticationError("Authentication required to access literature review synthesis.")
+    auth_service = get_auth_service(request)
+    if auth_service is not None:
+        auth_service.verify_collection_ownership(req.collection_id, current_user.id)
+    result = service.synthesize_collection_literature(req.collection_id)
+    resp = LiteratureSynthesisResponse.from_report(result)
+    return LiteratureSynthesisResponseBody(**resp.to_dict())
 
 
 

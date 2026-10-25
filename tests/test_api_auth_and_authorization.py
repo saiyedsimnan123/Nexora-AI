@@ -169,6 +169,44 @@ class FakeGapService:
         )
 
 
+class FakeTrendService:
+    def analyze_collection_trends(self, collection_id: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "collection_id": str(collection_id),
+                "paper_ids": [],
+                "time_unit": "year",
+                "temporal_buckets": [],
+                "trends": [],
+                "missing_date_paper_ids": [],
+                "summary": "Fake trends summary",
+                "limitations": [],
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+    def synthesize_collection_literature(self, collection_id: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "collection_id": str(collection_id),
+                "paper_ids": [],
+                "topic": None,
+                "executive_summary": "Fake synthesis summary",
+                "common_findings": [],
+                "disagreements": [],
+                "primary_methods": [],
+                "recurring_limitations": [],
+                "open_research_gaps": [],
+                "evidence_count": 0,
+                "is_grounded": True,
+                "limitations": [],
+                "model": "fake-model",
+                "usage": None,
+            }
+        )
+
+
 class FakeRAGPipeline:
     def answer(self, request: str, **kwargs: Any) -> Any:
         return SimpleNamespace(
@@ -362,6 +400,7 @@ def _build_auth_app(
     analysis_service=None,
     comparison_service=None,
     gap_service=None,
+    trend_service=None,
     rag_pipeline=None,
     enforce_auth=True,
 ):
@@ -395,6 +434,7 @@ def _build_auth_app(
         analysis_service=analysis_service or FakeAnalysisService(),
         comparison_service=comparison_service or FakeComparisonService(),
         gap_service=gap_service or FakeGapService(),
+        trend_service=trend_service or FakeTrendService(),
         session_factory=sf,
         auth_service=auth_service,
         enforce_auth=enforce_auth,
@@ -1270,3 +1310,61 @@ def test_forbidden_error_messages_do_not_leak_uuids(auth_test_db):
     resp_doc = client.get(f"/api/v1/documents/{doc_a_id}", headers={"Authorization": f"Bearer {token_b}"})
     assert resp_doc.status_code == 403
     assert str(doc_a_id) not in resp_doc.json()["error"]["message"]
+
+
+def test_cross_user_research_trends_rejected_with_403(auth_test_db):
+    """Verify research trend analysis enforces 401 unauth and 403 cross-tenant isolation."""
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    col_a_id = auth_test_db["col_a1_id"]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post("/api/v1/papers/trends", json={"collection_id": str(col_a_id)})
+    assert resp_unauth.status_code == 401
+
+    # 2. User B tries to analyze User A's collection -> 403 Forbidden
+    resp_cross_col = client.post(
+        "/api/v1/papers/trends",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_cross_col.status_code == 403
+    assert resp_cross_col.json()["error"]["code"] == "forbidden"
+
+    # 3. User A succeeds on own collection -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/papers/trends",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_owner.status_code == 200
+
+
+def test_cross_user_literature_synthesis_rejected_with_403(auth_test_db):
+    """Verify literature synthesis enforces 401 unauth and 403 cross-tenant isolation."""
+    client, _ = _build_auth_app(auth_test_db)
+    token_a = auth_test_db["token_a"]
+    token_b = auth_test_db["token_b"]
+    col_a_id = auth_test_db["col_a1_id"]
+
+    # 1. Unauthenticated -> 401
+    resp_unauth = client.post("/api/v1/papers/synthesis", json={"collection_id": str(col_a_id)})
+    assert resp_unauth.status_code == 401
+
+    # 2. User B tries to synthesize User A's collection -> 403 Forbidden
+    resp_cross_col = client.post(
+        "/api/v1/papers/synthesis",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_cross_col.status_code == 403
+    assert resp_cross_col.json()["error"]["code"] == "forbidden"
+
+    # 3. User A succeeds on own collection -> 200 OK
+    resp_owner = client.post(
+        "/api/v1/papers/synthesis",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"collection_id": str(col_a_id)},
+    )
+    assert resp_owner.status_code == 200

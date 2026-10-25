@@ -24,6 +24,25 @@ from nexora.research.prompt import (
 )
 from nexora.research.query import ResearchQueryService
 from nexora.research.service import ResearchAnswerService
+from nexora.research.synthesis import (
+    LiteratureSynthesisReport,
+    SynthesisDivergence,
+    SynthesisFinding,
+    SynthesisLimitation,
+)
+from nexora.research.trend_prompt import (
+    LiteratureSynthesisPromptBuilder,
+    TrendAnalysisPromptBuilder,
+)
+from nexora.research.trend_service import ResearchTrendService
+from nexora.research.trends import (
+    ResearchTrendsReport,
+    TemporalBucket,
+    TrendCategory,
+    TrendCitation,
+    TrendItem,
+    TrendTrajectory,
+)
 from nexora.research.verification import (
     AnswerVerificationResult,
     ClaimToEvidenceVerifier,
@@ -44,6 +63,8 @@ __all__ = [
     "ClaimVerificationStatus",
     "FieldComparison",
     "GapCategory",
+    "LiteratureSynthesisPromptBuilder",
+    "LiteratureSynthesisReport",
     "PaperAnalysisPromptBuilder",
     "PaperAnalysisService",
     "PaperComparisonPromptBuilder",
@@ -57,8 +78,17 @@ __all__ = [
     "ResearchGapReport",
     "ResearchGapService",
     "ResearchQueryService",
+    "ResearchTrendService",
+    "ResearchTrendsReport",
     "StructuredPaperAnalysis",
+    "SynthesisDivergence",
+    "SynthesisFinding",
+    "SynthesisLimitation",
+    "TemporalBucket",
+    "TrendAnalysisPromptBuilder",
+    "TrendCategory",
+    "TrendCitation",
+    "TrendItem",
+    "TrendTrajectory",
     "extract_claims_from_text",
 ]
-
-

@@ -290,6 +290,54 @@ def build_gap_service(
     )
 
 
+def build_trend_service(
+    settings: AppSettings,
+    *,
+    analysis_service: Any = None,
+    llm_provider: Any = None,
+    session_factory: Any = None,
+    vector_store: VectorStore | None = None,
+    trend_prompt_builder: Any = None,
+    synthesis_prompt_builder: Any = None,
+    max_evidence_characters: int | None = None,
+    verifier: Any = None,
+) -> Any:
+    """Assemble ResearchTrendService using settings and injected dependencies."""
+    from nexora.research.trend_service import ResearchTrendService
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_provider is None:
+        llm_provider = create_llm_provider(settings.llm)
+    llm_service = LLMService(llm_provider)
+
+    if analysis_service is None:
+        analysis_service = build_analysis_service(
+            settings,
+            llm_provider=llm_provider,
+            session_factory=session_factory,
+            vector_store=vector_store,
+        )
+
+    max_chars = (
+        max_evidence_characters
+        if max_evidence_characters is not None
+        else settings.max_evidence_characters
+    )
+
+    return ResearchTrendService(
+        llm_service,
+        paper_analysis_service=analysis_service,
+        session_factory=session_factory,
+        vector_store=vector_store,
+        trend_prompt_builder=trend_prompt_builder,
+        synthesis_prompt_builder=synthesis_prompt_builder,
+        max_evidence_characters=max_chars,
+        verifier=verifier,
+    )
+
+
 def build_http_app(
     settings: AppSettings,
     *,
@@ -303,6 +351,7 @@ def build_http_app(
     analysis_service: Any = None,
     comparison_service: Any = None,
     gap_service: Any = None,
+    trend_service: Any = None,
     document_pipeline: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
     **dependencies: Any,
@@ -379,6 +428,18 @@ def build_http_app(
                 verifier=verifier,
             )
 
+    if trend_service is None:
+        trend_service = dependencies.get("trend_service")
+        if trend_service is None:
+            trend_service = build_trend_service(
+                settings,
+                analysis_service=analysis_service,
+                llm_provider=llm_provider,
+                session_factory=session_factory,
+                vector_store=vector_store,
+                verifier=verifier,
+            )
+
     rag_pipeline = dependencies.get("rag_pipeline")
     if rag_pipeline is None:
         from nexora.rag.generator import DeterministicMockGenerator, LLMAnswerGenerator
@@ -445,6 +506,7 @@ def build_http_app(
         analysis_service=analysis_service,
         comparison_service=comparison_service,
         gap_service=gap_service,
+        trend_service=trend_service,
         discovery_service=discovery_service,
         document_pipeline=document_pipeline,
         session_factory=session_factory,

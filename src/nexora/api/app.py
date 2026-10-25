@@ -24,6 +24,7 @@ from nexora.api.errors import (
     ResearchServiceError,
     VerificationServiceError,
     GapDiscoveryServiceError,
+    TrendServiceError,
 )
 from nexora.api.routes import health_router, v1_router
 from nexora.database.repository.base import (
@@ -97,6 +98,10 @@ async def _verification_failed(request: Request, exc: Exception) -> JSONResponse
 
 async def _gap_discovery_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "gap_discovery_failed", "The research gap discovery could not be completed.")
+
+
+async def _trend_analysis_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "trend_analysis_failed", "The research trend analysis or synthesis could not be completed.")
 
 
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
@@ -252,6 +257,7 @@ def create_app(
     analysis_service: Any = None,
     comparison_service: Any = None,
     gap_service: Any = None,
+    trend_service: Any = None,
     discovery_service: Any = None,
     document_pipeline: Any = None,
     session_factory: Any = None,
@@ -323,6 +329,7 @@ def create_app(
     app.state.analysis_service = analysis_service
     app.state.comparison_service = comparison_service
     app.state.gap_service = gap_service
+    app.state.trend_service = trend_service
     app.state.discovery_service = discovery_service
     app.state.document_pipeline = document_pipeline
     app.state.session_factory = session_factory
@@ -432,6 +439,7 @@ def create_app(
     app.add_exception_handler(ComparisonServiceError, _comparison_failed)
     app.add_exception_handler(VerificationServiceError, _verification_failed)
     app.add_exception_handler(GapDiscoveryServiceError, _gap_discovery_failed)
+    app.add_exception_handler(TrendServiceError, _trend_analysis_failed)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(StarletteHTTPException, _http_error)

@@ -43,6 +43,10 @@ class GapDiscoveryServiceError(RuntimeError):
     """Research gap discovery failed; the original error is chained as __cause__."""
 
 
+class TrendServiceError(RuntimeError):
+    """Research trend analysis or literature synthesis failed; the original error is chained as __cause__."""
+
+
 class AuthenticationError(Exception):
     """Authentication credential is missing, malformed, invalid, expired, or revoked."""
 
