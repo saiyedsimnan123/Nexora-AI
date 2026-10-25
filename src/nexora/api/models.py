@@ -939,10 +939,158 @@ class DiscoveryImportResponse:
         }
 
 
+@dataclass(frozen=True)
+class AgentPlanRequest:
+    """Request for generating a 7-dimension evidence-grounded research plan."""
+
+    goal: str
+    collection_id: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.goal, str) or not self.goal.strip():
+            raise InvalidRequestError("goal must be a non-empty string")
+        if len(self.goal) > 2000:
+            raise InvalidRequestError("goal exceeds maximum length of 2000 characters")
+        if self.collection_id is not None:
+            if not isinstance(self.collection_id, str) or not self.collection_id.strip():
+                raise InvalidRequestError("collection_id must be a non-empty string or None")
+            from uuid import UUID
+
+            try:
+                UUID(str(self.collection_id).strip())
+            except ValueError:
+                raise InvalidRequestError(f"Invalid collection_id: '{self.collection_id}' is not a valid UUID")
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class AgentPlanResponse:
+    """Public view of a generated ResearchPlan."""
+
+    plan_id: str
+    title: str
+    research_problem: str
+    research_questions: list[str]
+    dimensions: dict[str, Any]
+    collection_id: str | None
+    paper_ids: list[str]
+    citations: list[dict[str, Any]]
+    created_at: str
+    is_mock: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "title": self.title,
+            "research_problem": self.research_problem,
+            "research_questions": list(self.research_questions),
+            "dimensions": copy.deepcopy(self.dimensions),
+            "collection_id": self.collection_id,
+            "paper_ids": list(self.paper_ids),
+            "citations": copy.deepcopy(self.citations),
+            "created_at": self.created_at,
+            "is_mock": self.is_mock,
+        }
+
+    @classmethod
+    def from_plan(cls, plan: Any) -> AgentPlanResponse:
+        d = plan.to_dict() if hasattr(plan, "to_dict") else dict(plan)
+        return cls(
+            plan_id=d["plan_id"],
+            title=d["title"],
+            research_problem=d["research_problem"],
+            research_questions=d["research_questions"],
+            dimensions=d["dimensions"],
+            collection_id=d.get("collection_id"),
+            paper_ids=d.get("paper_ids", []),
+            citations=d.get("citations", []),
+            created_at=d["created_at"],
+            is_mock=d.get("is_mock", False),
+        )
+
+
+@dataclass(frozen=True)
+class AgentRunRequest:
+    """Request for executing a bounded multi-step autonomous agent run."""
+
+    goal: str
+    max_steps: int | None = None
+    timeout_seconds: float | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.goal, str) or not self.goal.strip():
+            raise InvalidRequestError("goal must be a non-empty string")
+        if len(self.goal) > 2000:
+            raise InvalidRequestError("goal exceeds maximum length of 2000 characters")
+        if self.max_steps is not None:
+            if not isinstance(self.max_steps, int) or isinstance(self.max_steps, bool):
+                raise InvalidRequestError("max_steps must be an integer")
+            if self.max_steps < 1 or self.max_steps > 10:
+                raise InvalidRequestError("max_steps must be between 1 and 10")
+        if self.timeout_seconds is not None:
+            if not isinstance(self.timeout_seconds, (int, float)) or isinstance(self.timeout_seconds, bool):
+                raise InvalidRequestError("timeout_seconds must be a number")
+            if self.timeout_seconds <= 0 or self.timeout_seconds > 30.0:
+                raise InvalidRequestError("timeout_seconds must be between 0 and 30.0s")
+        try:
+            validate_temperature(self.temperature)
+            validate_max_output_tokens(self.max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(str(exc)) from None
+
+
+@dataclass(frozen=True)
+class AgentRunResponse:
+    """Public view of an AgentRunResult."""
+
+    trace: dict[str, Any]
+    final_answer: str | None
+    status: str
+    total_steps: int
+    duration_ms: float
+    evidence_labels: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace": copy.deepcopy(self.trace),
+            "final_answer": self.final_answer,
+            "status": self.status,
+            "total_steps": self.total_steps,
+            "duration_ms": self.duration_ms,
+            "evidence_labels": list(self.evidence_labels),
+        }
+
+    @classmethod
+    def from_result(cls, result: Any) -> AgentRunResponse:
+        d = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+        return cls(
+            trace=d["trace"],
+            final_answer=d.get("final_answer"),
+            status=d["status"],
+            total_steps=d["total_steps"],
+            duration_ms=d["duration_ms"],
+            evidence_labels=d.get("evidence_labels", []),
+        )
+
+
 # Re-export RAG contracts for external consumers of the API package
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
 
 __all__ = [
+    "AgentPlanRequest",
+    "AgentPlanResponse",
+    "AgentRunRequest",
+    "AgentRunResponse",
     "AttributedSource",
     "DiscoveryImportRequest",
     "DiscoveryImportResponse",

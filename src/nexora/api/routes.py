@@ -12,7 +12,15 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
+from nexora.agents.models import (
+    AgentContext,
+    AgentExecutionError,
+    AgentSecurityError,
+    InvalidActionError,
+    PlannerServiceError,
+)
 from nexora.api.errors import (
+    AgentServiceError,
     AuthenticationError,
     DocumentNotFoundError,
     FileTooLargeError,
@@ -22,6 +30,10 @@ from nexora.api.errors import (
     ResearchServiceError,
 )
 from nexora.api.models import (
+    AgentPlanRequest,
+    AgentPlanResponse,
+    AgentRunRequest,
+    AgentRunResponse,
     DocumentIngestResponse,
     PaperAnalysisRequest,
     PaperAnalysisResponse,
@@ -294,6 +306,105 @@ class LiteratureSynthesisResponseBody(BaseModel):
     usage: dict[str, int] | None = None
 
 
+class AgentPlanRequestBody(BaseModel):
+    """Wire format of research planning request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    goal: str = Field(..., min_length=1, max_length=2000, description="Natural language research problem statement or goal.")
+    collection_id: str | None = Field(default=None, description="Optional UUID of a collection to ground the plan in literature.")
+    model: str | None = Field(default=None, description="Optional LLM model override.")
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, description="Optional generation temperature.")
+    max_output_tokens: int | None = Field(default=None, ge=1, le=8192, description="Optional token generation budget.")
+
+
+class ResearchPlanDimensionBody(BaseModel):
+    """Wire format of an individual research plan dimension."""
+
+    model_config = ConfigDict(strict=False)
+
+    name: str
+    title: str
+    description: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    evidence_labels: list[str] = Field(default_factory=list)
+    supporting_paper_ids: list[str] = Field(default_factory=list)
+    is_grounded: bool
+
+
+class AgentPlanResponseBody(BaseModel):
+    """Wire format of research planning response."""
+
+    model_config = ConfigDict(strict=False)
+
+    plan_id: str
+    title: str
+    research_problem: str
+    research_questions: list[str]
+    dimensions: dict[str, ResearchPlanDimensionBody]
+    collection_id: str | None = None
+    paper_ids: list[str] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str
+    is_mock: bool
+
+
+class AgentRunRequestBody(BaseModel):
+    """Wire format of bounded autonomous agent run request."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    goal: str = Field(..., min_length=1, max_length=2000, description="Natural language research task or goal for the agent.")
+    max_steps: int | None = Field(default=None, ge=1, le=10, description="Maximum iterative Reason-Act-Observe steps (1-10, default 5).")
+    timeout_seconds: float | None = Field(default=None, gt=0.0, le=30.0, description="Maximum execution timeout in seconds (<= 30.0, default 30.0).")
+    model: str | None = Field(default=None, description="Optional LLM model override.")
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, description="Optional generation temperature.")
+    max_output_tokens: int | None = Field(default=None, ge=1, le=8192, description="Optional token generation budget.")
+
+
+class AgentStepBody(BaseModel):
+    """Wire format of an executed agent operational step."""
+
+    model_config = ConfigDict(strict=False)
+
+    step_index: int
+    tool_name: str
+    tool_input: dict[str, Any]
+    output_summary: str
+    status: str
+    duration_ms: float
+    error: str | None = None
+    evidence_labels: list[str] = Field(default_factory=list)
+
+
+class AgentTraceBody(BaseModel):
+    """Wire format of the full audit and execution trace of an agent run."""
+
+    model_config = ConfigDict(strict=False)
+
+    trace_id: str
+    goal: str
+    status: str
+    steps: list[AgentStepBody]
+    total_duration_ms: float
+    total_steps: int
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunResponseBody(BaseModel):
+    """Wire format of bounded autonomous agent run result."""
+
+    model_config = ConfigDict(strict=False)
+
+    trace: AgentTraceBody
+    final_answer: str | None = None
+    status: str
+    total_steps: int
+    duration_ms: float
+    evidence_labels: list[str] = Field(default_factory=list)
+
+
 class AttributedSourceBody(BaseModel):
     """Wire format of an attributed research evidence source."""
 
@@ -519,6 +630,30 @@ def get_discovery_service(request: Request) -> Any:
         if getattr(service, "_document_pipeline", None) is None:
             service._document_pipeline = getattr(request.app.state, "document_pipeline", None)
     return service
+
+
+def get_tool_registry(request: Request) -> Any:
+    """Dependency: the agent tool registry injected into the app."""
+    registry = getattr(request.app.state, "tool_registry", None)
+    if registry is None:
+        raise InvalidConfigurationError("tool_registry is not configured")
+    return registry
+
+
+def get_agent_orchestrator(request: Request) -> Any:
+    """Dependency: the bounded agent orchestrator injected into the app."""
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator is None:
+        raise InvalidConfigurationError("orchestrator is not configured")
+    return orchestrator
+
+
+def get_planner_agent(request: Request) -> Any:
+    """Dependency: the research planner agent injected into the app."""
+    agent = getattr(request.app.state, "planner_agent", None)
+    if agent is None:
+        raise InvalidConfigurationError("planner_agent is not configured")
+    return agent
 
 
 class DocumentDetailsResponseBody(BaseModel):
@@ -1861,3 +1996,119 @@ def list_workspace_collections(
         workspace_id=str(ws_uuid),
         collections=col_models,
     )
+
+
+@v1_router.post(
+    "/agents/plan",
+    response_model=AgentPlanResponseBody,
+    status_code=200,
+    summary="Generate an evidence-grounded research plan across 7 dimensions",
+    description=(
+        "Uses the autonomous Research Planner Agent to convert a research problem statement "
+        "into a structured research plan across 7 dimensions. Can be grounded in an authorized collection."
+    ),
+    responses={
+        200: {
+            "description": "Research plan generated successfully.",
+            "model": AgentPlanResponseBody,
+        },
+        400: {"description": "Malformed request, oversized goal, or invalid collection UUID."},
+        401: {"description": "Authentication required to access research planner or private collections."},
+        403: {"description": "Caller does not own or have access to the specified collection."},
+        404: {"description": "Referenced collection was not found."},
+        500: {"description": "Research plan generation failed."},
+    },
+)
+def plan_research_endpoint(
+    body: AgentPlanRequestBody,
+    request: Request,
+    planner: Any = Depends(get_planner_agent),
+    current_user: Any = Depends(get_optional_user),
+) -> AgentPlanResponseBody:
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    if enforce_auth and current_user is None:
+        raise AuthenticationError("Authentication required to access the research planner.")
+    if current_user is None and body.collection_id is not None:
+        raise AuthenticationError("Authentication required to access private tenant collections.")
+
+    auth_service = get_auth_service(request)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    context = AgentContext(
+        user_id=current_user.id if current_user is not None else None,
+        workspace_id=getattr(current_user, "workspace_id", None) if current_user is not None else None,
+        auth_enforced=enforce_auth or current_user is not None,
+        session_factory=session_factory,
+        auth_service=auth_service,
+    )
+
+    plan = planner.plan(
+        goal=body.goal,
+        collection_id=body.collection_id,
+        context=context,
+        model=body.model,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+    )
+    resp = AgentPlanResponse.from_plan(plan)
+    return AgentPlanResponseBody(**resp.to_dict())
+
+
+@v1_router.post(
+    "/agents/run",
+    response_model=AgentRunResponseBody,
+    status_code=200,
+    summary="Execute a bounded autonomous research agent run",
+    description=(
+        "Executes a bounded iterative Reason-Act-Observe research agent loop with allowlisted tools, "
+        "step limits, loop detection, and execution timeouts."
+    ),
+    responses={
+        200: {
+            "description": "Agent execution completed or reached safety boundary.",
+            "model": AgentRunResponseBody,
+        },
+        400: {"description": "Malformed request, invalid parameters, or malformed action."},
+        401: {"description": "Authentication required to run autonomous research agents."},
+        403: {"description": "Operation violates tenant security boundaries."},
+        500: {"description": "Agent execution failed due to an unrecoverable internal error."},
+    },
+)
+def run_agent_endpoint(
+    body: AgentRunRequestBody,
+    request: Request,
+    orchestrator: Any = Depends(get_agent_orchestrator),
+    current_user: Any = Depends(get_optional_user),
+) -> AgentRunResponseBody:
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    if enforce_auth and current_user is None:
+        raise AuthenticationError("Authentication required to run autonomous research agents.")
+
+    auth_service = get_auth_service(request)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    context = AgentContext(
+        user_id=current_user.id if current_user is not None else None,
+        workspace_id=getattr(current_user, "workspace_id", None) if current_user is not None else None,
+        auth_enforced=enforce_auth or current_user is not None,
+        session_factory=session_factory,
+        auth_service=auth_service,
+    )
+
+    try:
+        result = orchestrator.run(
+            goal=body.goal,
+            context=context,
+            max_steps=body.max_steps,
+            timeout_seconds=body.timeout_seconds,
+            model=body.model,
+            temperature=body.temperature,
+            max_output_tokens=body.max_output_tokens,
+        )
+    except AgentSecurityError as exc:
+        raise ForbiddenError(str(exc)) from exc
+    except ValueError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    except Exception as exc:
+        raise AgentServiceError(f"Agent execution failed: {exc}") from exc
+
+    resp = AgentRunResponse.from_result(result)
+    return AgentRunResponseBody(**resp.to_dict())

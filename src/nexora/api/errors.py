@@ -47,6 +47,10 @@ class TrendServiceError(RuntimeError):
     """Research trend analysis or literature synthesis failed; the original error is chained as __cause__."""
 
 
+class AgentServiceError(RuntimeError):
+    """Autonomous agent orchestration or research planning failed; the original error is chained as __cause__."""
+
+
 class AuthenticationError(Exception):
     """Authentication credential is missing, malformed, invalid, expired, or revoked."""
 

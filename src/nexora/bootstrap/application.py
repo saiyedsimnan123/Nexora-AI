@@ -338,6 +338,91 @@ def build_trend_service(
     )
 
 
+def build_tool_registry(
+    settings: AppSettings | None = None,
+    *,
+    query_service: Any = None,
+    analysis_service: Any = None,
+    comparison_service: Any = None,
+    gap_service: Any = None,
+    trend_service: Any = None,
+    verifier: Any = None,
+    session_factory: Any = None,
+) -> Any:
+    """Assemble default ToolRegistry using injected research and domain services."""
+    from nexora.agents.tools import create_default_tool_registry
+
+    return create_default_tool_registry(
+        query_service=query_service,
+        analysis_service=analysis_service,
+        comparison_service=comparison_service,
+        gap_service=gap_service,
+        trend_service=trend_service,
+        verifier=verifier,
+        session_factory=session_factory,
+    )
+
+
+def build_planner_agent(
+    settings: AppSettings,
+    *,
+    llm_provider: Any = None,
+    llm_service: Any = None,
+    trend_service: Any = None,
+    gap_service: Any = None,
+    session_factory: Any = None,
+    prompt_builder: Any = None,
+) -> Any:
+    """Assemble ResearchPlannerAgent using settings and injected dependencies."""
+    from nexora.agents.planner import ResearchPlannerAgent
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_service is None:
+        if llm_provider is None:
+            llm_provider = create_llm_provider(settings.llm)
+        llm_service = LLMService(llm_provider)
+
+    return ResearchPlannerAgent(
+        llm_service,
+        trend_service=trend_service,
+        gap_service=gap_service,
+        session_factory=session_factory,
+        prompt_builder=prompt_builder,
+    )
+
+
+def build_orchestrator(
+    settings: AppSettings,
+    *,
+    tool_registry: Any,
+    llm_provider: Any = None,
+    llm_service: Any = None,
+    default_max_steps: int = 5,
+    default_timeout_seconds: float = 30.0,
+    prompt_builder: Any = None,
+) -> Any:
+    """Assemble AgentOrchestrator using settings, tool registry, and injected dependencies."""
+    from nexora.agents.orchestrator import AgentOrchestrator
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    if llm_service is None:
+        if llm_provider is None:
+            llm_provider = create_llm_provider(settings.llm)
+        llm_service = LLMService(llm_provider)
+
+    return AgentOrchestrator(
+        llm_service,
+        tool_registry,
+        default_max_steps=default_max_steps,
+        default_timeout_seconds=default_timeout_seconds,
+        prompt_builder=prompt_builder,
+    )
+
+
 def build_http_app(
     settings: AppSettings,
     *,
@@ -353,6 +438,9 @@ def build_http_app(
     gap_service: Any = None,
     trend_service: Any = None,
     document_pipeline: Any = None,
+    tool_registry: Any = None,
+    orchestrator: Any = None,
+    planner_agent: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
     **dependencies: Any,
 ) -> Any:
@@ -499,6 +587,43 @@ def build_http_app(
     if enable_docs is None:
         enable_docs = getattr(settings, "enable_docs", None)
 
+    if tool_registry is None:
+        tool_registry = dependencies.get("tool_registry")
+        if tool_registry is None:
+            query_service = getattr(
+                research_service, "query_service", getattr(research_service, "_query_service", None)
+            )
+            tool_registry = build_tool_registry(
+                settings,
+                query_service=query_service,
+                analysis_service=analysis_service,
+                comparison_service=comparison_service,
+                gap_service=gap_service,
+                trend_service=trend_service,
+                verifier=verifier,
+                session_factory=session_factory,
+            )
+
+    if planner_agent is None:
+        planner_agent = dependencies.get("planner_agent")
+        if planner_agent is None:
+            planner_agent = build_planner_agent(
+                settings,
+                llm_provider=llm_provider,
+                trend_service=trend_service,
+                gap_service=gap_service,
+                session_factory=session_factory,
+            )
+
+    if orchestrator is None:
+        orchestrator = dependencies.get("orchestrator")
+        if orchestrator is None:
+            orchestrator = build_orchestrator(
+                settings,
+                tool_registry=tool_registry,
+                llm_provider=llm_provider,
+            )
+
     return create_app(
         research_service,
         rag_pipeline=rag_pipeline,
@@ -509,6 +634,9 @@ def build_http_app(
         trend_service=trend_service,
         discovery_service=discovery_service,
         document_pipeline=document_pipeline,
+        tool_registry=tool_registry,
+        orchestrator=orchestrator,
+        planner_agent=planner_agent,
         session_factory=session_factory,
         vector_store=vector_store,
         vector_client=qdrant_client,

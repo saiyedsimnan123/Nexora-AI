@@ -12,7 +12,16 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexora import __version__
+from nexora.agents.models import (
+    AgentExecutionError,
+    AgentSecurityError,
+    InvalidActionError,
+    InvalidToolArgumentError,
+    PlannerServiceError,
+    UnknownToolError,
+)
 from nexora.api.errors import (
+    AgentServiceError,
     AnalysisServiceError,
     AuthenticationError,
     ComparisonServiceError,
@@ -102,6 +111,14 @@ async def _gap_discovery_failed(request: Request, exc: Exception) -> JSONRespons
 
 async def _trend_analysis_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "trend_analysis_failed", "The research trend analysis or synthesis could not be completed.")
+
+
+async def _planner_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "planner_failed", "The research plan could not be generated.")
+
+
+async def _agent_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "agent_failed", "The research agent execution could not be completed.")
 
 
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
@@ -260,6 +277,9 @@ def create_app(
     trend_service: Any = None,
     discovery_service: Any = None,
     document_pipeline: Any = None,
+    tool_registry: Any = None,
+    orchestrator: Any = None,
+    planner_agent: Any = None,
     session_factory: Any = None,
     vector_store: Any = None,
     vector_client: Any = None,
@@ -332,6 +352,9 @@ def create_app(
     app.state.trend_service = trend_service
     app.state.discovery_service = discovery_service
     app.state.document_pipeline = document_pipeline
+    app.state.tool_registry = tool_registry
+    app.state.orchestrator = orchestrator
+    app.state.planner_agent = planner_agent
     app.state.session_factory = session_factory
     app.state.vector_store = vector_store
     app.state.vector_client = vector_client
@@ -440,6 +463,13 @@ def create_app(
     app.add_exception_handler(VerificationServiceError, _verification_failed)
     app.add_exception_handler(GapDiscoveryServiceError, _gap_discovery_failed)
     app.add_exception_handler(TrendServiceError, _trend_analysis_failed)
+    app.add_exception_handler(PlannerServiceError, _planner_failed)
+    app.add_exception_handler(AgentExecutionError, _agent_failed)
+    app.add_exception_handler(AgentServiceError, _agent_failed)
+    app.add_exception_handler(AgentSecurityError, _forbidden)
+    app.add_exception_handler(UnknownToolError, _invalid_request)
+    app.add_exception_handler(InvalidToolArgumentError, _invalid_request)
+    app.add_exception_handler(InvalidActionError, _invalid_request)
     app.add_exception_handler(InvalidConfigurationError, _misconfigured)
     app.add_exception_handler(RequestValidationError, _validation_failed)
     app.add_exception_handler(StarletteHTTPException, _http_error)

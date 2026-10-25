@@ -291,6 +291,11 @@ def categorize_route(path: str, method: str) -> str | None:
         or clean_path == "/api/v1/research/gaps"
         or (clean_path.startswith("/api/v1/papers/") and clean_path.endswith("/gaps"))
         or clean_path == "/api/v1/research/verify"
+        or clean_path == "/api/v1/papers/trends"
+        or clean_path == "/api/v1/papers/synthesis"
+        or (clean_path.startswith("/api/v1/collections/") and clean_path.endswith("/synthesis"))
+        or clean_path == "/api/v1/agents/plan"
+        or clean_path == "/api/v1/agents/run"
     ):
         return "heavy_analysis"
 
