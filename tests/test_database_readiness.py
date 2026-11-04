@@ -65,7 +65,7 @@ def test_get_expected_migration_heads_returns_current_head() -> None:
     heads = get_expected_migration_heads()
     assert isinstance(heads, tuple)
     assert len(heads) >= 1
-    assert "044c24ad4c33" in heads
+    assert "044c24ad4c34" in heads
 
 
 def test_get_applied_migration_heads_across_all_target_types() -> None:
@@ -94,13 +94,13 @@ def test_get_applied_migration_heads_across_all_target_types() -> None:
 
     # 3. When revision is populated, all return the expected tuple
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
-    assert get_applied_migration_heads(session_factory) == ("044c24ad4c33",)
-    assert get_applied_migration_heads(engine) == ("044c24ad4c33",)
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+    assert get_applied_migration_heads(session_factory) == ("044c24ad4c34",)
+    assert get_applied_migration_heads(engine) == ("044c24ad4c34",)
     with session_factory() as session:
-        assert get_applied_migration_heads(session) == ("044c24ad4c33",)
+        assert get_applied_migration_heads(session) == ("044c24ad4c34",)
     with engine.connect() as conn:
-        assert get_applied_migration_heads(conn) == ("044c24ad4c33",)
+        assert get_applied_migration_heads(conn) == ("044c24ad4c34",)
 
 
 def test_correctly_migrated_database_is_reported_ready() -> None:
@@ -112,7 +112,7 @@ def test_correctly_migrated_database_is_reported_ready() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
 
     session_factory = create_session_factory(engine)
 
@@ -136,7 +136,7 @@ def test_outdated_migration_revision_returns_503() -> None:
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    # Seed with previous revision 044c24ad4c32 instead of head 044c24ad4c33
+    # Seed with previous revision 044c24ad4c32 instead of head 044c24ad4c34
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c32')"))
@@ -221,7 +221,7 @@ def test_missing_core_tables_returns_503() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
         conn.execute(text("DROP TABLE api_keys"))
 
     session_factory = create_session_factory(engine)
@@ -310,7 +310,7 @@ def test_existing_qdrant_readiness_checks_continue_to_work() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
     session_factory = create_session_factory(engine)
 
     class BrokenVectorStore:
@@ -357,7 +357,7 @@ def test_authentication_and_tenant_isolation_remain_unchanged() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
     session_factory = create_session_factory(engine)
 
     # Bootstrap users
@@ -476,7 +476,7 @@ def test_migration_discovery_script_exception_fails_closed(monkeypatch: pytest.M
 
 
 def test_readiness_fails_closed_503_when_migration_discovery_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Database is migrated to '044c24ad4c33', but migration discovery fails
+    # Database is migrated to '044c24ad4c34', but migration discovery fails
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -485,7 +485,7 @@ def test_readiness_fails_closed_503_when_migration_discovery_fails(monkeypatch: 
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c33')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
     session_factory = create_session_factory(engine)
 
     def failing_heads(*args: Any, **kwargs: Any) -> Any:

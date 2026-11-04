@@ -15,6 +15,15 @@ from nexora.database.models.author import Author
 from nexora.database.models.collection import Collection
 from nexora.database.models.document import Document, IndexingStatus
 from nexora.database.models.document_chunk import DocumentChunkRecord
+from nexora.database.models.graph_entity import (
+    GraphEntity,
+    GraphEntityType,
+    normalize_entity_name,
+)
+from nexora.database.models.graph_relationship import (
+    GraphEndpointType,
+    GraphRelationship,
+)
 from nexora.database.models.paper import Paper
 from nexora.database.models.paper_author import PaperAuthor
 from nexora.database.models.paper_reference import PaperReference
@@ -23,13 +32,17 @@ from nexora.database.models.workspace import Workspace
 
 __all__ = [
     "ApiKey",
-    "NAMING_CONVENTION",
     "Author",
     "Base",
     "Collection",
     "Document",
     "DocumentChunkRecord",
+    "GraphEndpointType",
+    "GraphEntity",
+    "GraphEntityType",
+    "GraphRelationship",
     "IndexingStatus",
+    "NAMING_CONVENTION",
     "Paper",
     "PaperAuthor",
     "PaperReference",
@@ -37,5 +50,6 @@ __all__ = [
     "UUIDPrimaryKeyMixin",
     "User",
     "Workspace",
+    "normalize_entity_name",
     "utc_now",
 ]

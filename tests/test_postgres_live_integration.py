@@ -97,6 +97,8 @@ def test_live_postgres_migrations_reach_head(postgres_url: str, live_db_engine: 
         "paper_authors",
         "paper_references",
         "api_keys",
+        "graph_entities",
+        "graph_relationships",
     }
     for table in expected_tables:
         assert table in existing_tables, f"Table '{table}' missing from PostgreSQL after migration"
@@ -113,7 +115,7 @@ def test_live_postgres_readiness_check(postgres_url: str, live_db_engine: Any) -
     applied_heads = get_applied_migration_heads(session_factory)
     expected_heads = get_expected_migration_heads()
     assert applied_heads == expected_heads
-    assert "044c24ad4c33" in applied_heads
+    assert "044c24ad4c34" in applied_heads
 
     with session_factory() as session:
         assert get_applied_migration_heads(session) == expected_heads

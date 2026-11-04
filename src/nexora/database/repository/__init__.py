@@ -12,6 +12,8 @@ from nexora.database.repository.base import (
 from nexora.database.repository.collection import CollectionRepository
 from nexora.database.repository.document import DocumentRepository
 from nexora.database.repository.document_chunk import DocumentChunkRepository
+from nexora.database.repository.graph_entity import GraphEntityRepository
+from nexora.database.repository.graph_relationship import GraphRelationshipRepository
 from nexora.database.repository.paper import PaperRepository
 from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.database.repository.paper_reference import PaperReferenceRepository
@@ -27,6 +29,8 @@ __all__ = [
     "DocumentChunkRepository",
     "DocumentRepository",
     "DuplicateRecordError",
+    "GraphEntityRepository",
+    "GraphRelationshipRepository",
     "PaperAuthorRepository",
     "PaperReferenceRepository",
     "PaperRepository",

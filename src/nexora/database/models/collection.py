@@ -11,6 +11,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from nexora.database.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from nexora.database.models.graph_entity import GraphEntity
+    from nexora.database.models.graph_relationship import GraphRelationship
     from nexora.database.models.paper import Paper
     from nexora.database.models.workspace import Workspace
 
@@ -46,6 +48,18 @@ class Collection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     papers: Mapped[list[Paper]] = relationship(
+        back_populates="collection",
+        passive_deletes="all",
+    )
+
+    graph_entities: Mapped[list[GraphEntity]] = relationship(
+        "GraphEntity",
+        back_populates="collection",
+        passive_deletes="all",
+    )
+
+    graph_relationships: Mapped[list[GraphRelationship]] = relationship(
+        "GraphRelationship",
         back_populates="collection",
         passive_deletes="all",
     )
