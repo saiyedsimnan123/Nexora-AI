@@ -28,6 +28,7 @@ from nexora.api.errors import (
     DocumentNotFoundError,
     FileTooLargeError,
     ForbiddenError,
+    GraphServiceError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
@@ -119,6 +120,10 @@ async def _planner_failed(request: Request, exc: Exception) -> JSONResponse:
 
 async def _agent_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "agent_failed", "The research agent execution could not be completed.")
+
+
+async def _graph_failed(request: Request, exc: Exception) -> JSONResponse:
+    return _error_response(500, "graph_failed", "The knowledge graph operation could not be completed.")
 
 
 async def _misconfigured(request: Request, exc: Exception) -> JSONResponse:
@@ -280,6 +285,8 @@ def create_app(
     tool_registry: Any = None,
     orchestrator: Any = None,
     planner_agent: Any = None,
+    graph_traversal_service: Any = None,
+    graph_analytics_service: Any = None,
     session_factory: Any = None,
     vector_store: Any = None,
     vector_client: Any = None,
@@ -355,6 +362,8 @@ def create_app(
     app.state.tool_registry = tool_registry
     app.state.orchestrator = orchestrator
     app.state.planner_agent = planner_agent
+    app.state.graph_traversal_service = graph_traversal_service
+    app.state.graph_analytics_service = graph_analytics_service
     app.state.session_factory = session_factory
     app.state.vector_store = vector_store
     app.state.vector_client = vector_client
@@ -466,6 +475,7 @@ def create_app(
     app.add_exception_handler(PlannerServiceError, _planner_failed)
     app.add_exception_handler(AgentExecutionError, _agent_failed)
     app.add_exception_handler(AgentServiceError, _agent_failed)
+    app.add_exception_handler(GraphServiceError, _graph_failed)
     app.add_exception_handler(AgentSecurityError, _forbidden)
     app.add_exception_handler(UnknownToolError, _invalid_request)
     app.add_exception_handler(InvalidToolArgumentError, _invalid_request)

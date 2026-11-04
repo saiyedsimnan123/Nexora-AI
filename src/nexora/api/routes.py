@@ -25,6 +25,7 @@ from nexora.api.errors import (
     DocumentNotFoundError,
     FileTooLargeError,
     ForbiddenError,
+    GraphServiceError,
     InvalidConfigurationError,
     InvalidRequestError,
     ResearchServiceError,
@@ -2112,3 +2113,888 @@ def run_agent_endpoint(
 
     resp = AgentRunResponse.from_result(result)
     return AgentRunResponseBody(**resp.to_dict())
+
+
+# ===========================================================================
+# Knowledge Graph Endpoints & Wire Models (Stage 5 Step 4.1)
+# ===========================================================================
+
+class CollectionGraphSummaryResponseBody(BaseModel):
+    """Wire format for collection graph summary statistics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the collection.")
+    total_entities: int = Field(..., ge=0, description="Total entity nodes in the collection graph.")
+    total_relationships: int = Field(..., ge=0, description="Total relationship edges in the collection graph.")
+    entity_counts_by_type: dict[str, int] = Field(default_factory=dict, description="Entity counts grouped by type.")
+    relationship_counts_by_type: dict[str, int] = Field(default_factory=dict, description="Relationship counts grouped by type.")
+
+
+class EntityTypeCountResponseBody(BaseModel):
+    """Wire format for entity type counts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: str = Field(..., description="Entity classification type.")
+    count: int = Field(..., ge=0, description="Number of entities of this type.")
+
+
+class RelationshipTypeCountResponseBody(BaseModel):
+    """Wire format for relationship type counts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relationship_type: str = Field(..., description="Relationship type name.")
+    count: int = Field(..., ge=0, description="Number of relationships of this type.")
+
+
+class AuthorCollaborationResponseBody(BaseModel):
+    """Wire format for author co-authorship collaboration pairs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    author_id: str = Field(..., description="UUID of first author entity.")
+    author_name: str = Field(..., description="Name of first author.")
+    collaborator_id: str = Field(..., description="UUID of collaborator entity.")
+    collaborator_name: str = Field(..., description="Name of collaborator.")
+    shared_paper_ids: list[str] = Field(default_factory=list, description="UUIDs of shared research papers.")
+    collaboration_count: int = Field(..., ge=1, description="Number of shared co-authored papers.")
+
+
+class AuthorConnectivityResponseBody(BaseModel):
+    """Wire format for author graph connectivity and degree centrality."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    author_id: str = Field(..., description="UUID of author entity.")
+    author_name: str = Field(..., description="Author name.")
+    paper_count: int = Field(..., ge=0, description="Number of papers authored.")
+    collaborator_count: int = Field(..., ge=0, description="Number of distinct co-authors.")
+    total_collaborations: int = Field(..., ge=0, description="Total collaboration edges.")
+
+
+class CollectionAnalyticsResponseBody(BaseModel):
+    """Wire format for comprehensive collection graph analytics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the collection.")
+    summary: CollectionGraphSummaryResponseBody = Field(..., description="Overall graph summary.")
+    entity_distribution: list[EntityTypeCountResponseBody] = Field(default_factory=list, description="Entity distribution by type.")
+    relationship_distribution: list[RelationshipTypeCountResponseBody] = Field(default_factory=list, description="Relationship distribution by type.")
+    top_collaborations: list[AuthorCollaborationResponseBody] = Field(default_factory=list, description="Top author collaboration pairs.")
+    author_connectivity: list[AuthorConnectivityResponseBody] = Field(default_factory=list, description="Author degree centrality metrics.")
+
+
+class GraphEntityItemResponseBody(BaseModel):
+    """Wire format for a single graph entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="UUID of the entity.")
+    collection_id: str = Field(..., description="UUID of the owning collection.")
+    name: str = Field(..., description="Entity name as extracted.")
+    canonical_name: str = Field(..., description="Normalized canonical identifier.")
+    entity_type: str = Field(..., description="Entity classification type.")
+    description: str | None = Field(default=None, description="Entity description or summary.")
+    aliases: list[str] = Field(default_factory=list, description="Alternative names and synonyms.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary entity metadata.")
+    created_at: str | None = Field(default=None, description="Creation timestamp.")
+    updated_at: str | None = Field(default=None, description="Last update timestamp.")
+
+
+class GraphRelationshipItemResponseBody(BaseModel):
+    """Wire format for a single graph relationship edge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="UUID of the relationship.")
+    collection_id: str = Field(..., description="UUID of the owning collection.")
+    relationship_type: str = Field(..., description="Semantic relation type.")
+    source_type: str = Field(..., description="Source node type ('entity' or 'paper').")
+    source_id: str = Field(..., description="Source node UUID.")
+    target_type: str = Field(..., description="Target node type ('entity' or 'paper').")
+    target_id: str = Field(..., description="Target node UUID.")
+    confidence: float | None = Field(default=None, description="Extraction confidence score.")
+    evidence_text: str | None = Field(default=None, description="Grounding excerpt from source document.")
+    chunk_id: str | None = Field(default=None, description="UUID of source document chunk.")
+    page_number: int | None = Field(default=None, description="Page number of evidence.")
+    paper_id: str | None = Field(default=None, description="UUID of grounding research paper.")
+    extraction_method: str | None = Field(default=None, description="Extraction method used.")
+    created_at: str | None = Field(default=None, description="Creation timestamp.")
+    updated_at: str | None = Field(default=None, description="Last update timestamp.")
+
+
+class GraphEntityListResponseBody(BaseModel):
+    """Wire format for entity list and search results."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the collection.")
+    entities: list[GraphEntityItemResponseBody] = Field(default_factory=list, description="Entities matching query/pagination.")
+    total_count: int = Field(..., ge=0, description="Total matching entities.")
+    offset: int = Field(..., ge=0, description="Pagination offset.")
+    limit: int = Field(..., ge=1, description="Pagination limit.")
+
+
+class GraphEntityDetailResponseBody(BaseModel):
+    """Wire format for entity details with direct relationships."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="UUID of the entity.")
+    collection_id: str = Field(..., description="UUID of the owning collection.")
+    name: str = Field(..., description="Entity name.")
+    canonical_name: str = Field(..., description="Canonical name.")
+    entity_type: str = Field(..., description="Entity classification type.")
+    description: str | None = Field(default=None, description="Entity description.")
+    aliases: list[str] = Field(default_factory=list, description="Alternative aliases.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Entity metadata.")
+    created_at: str | None = Field(default=None, description="Creation timestamp.")
+    updated_at: str | None = Field(default=None, description="Last update timestamp.")
+    relationships: list[GraphRelationshipItemResponseBody] = Field(default_factory=list, description="Direct relationship edges.")
+    relationship_count: int = Field(..., ge=0, description="Number of direct relationship edges returned.")
+
+
+class GraphNodeResponseBody(BaseModel):
+    """Wire format for a graph node in traversal responses."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="UUID of the node.")
+    node_type: str = Field(..., description="Node type ('entity' or 'paper').")
+    name: str = Field(..., description="Display name or paper title.")
+    entity_type: str | None = Field(default=None, description="Entity type if node_type is 'entity'.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Node properties and metadata.")
+
+
+class GraphEdgeResponseBody(BaseModel):
+    """Wire format for a graph edge with complete evidence provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="UUID of the edge.")
+    relationship_type: str = Field(..., description="Semantic relation type.")
+    source_type: str = Field(..., description="Source endpoint type.")
+    source_id: str = Field(..., description="Source endpoint UUID.")
+    target_type: str = Field(..., description="Target endpoint type.")
+    target_id: str = Field(..., description="Target endpoint UUID.")
+    confidence: float | None = Field(default=None, description="Confidence score.")
+    evidence_text: str | None = Field(default=None, description="Grounding text excerpt.")
+    chunk_id: str | None = Field(default=None, description="UUID of source chunk.")
+    page_number: int | None = Field(default=None, description="Page number of evidence.")
+    paper_id: str | None = Field(default=None, description="UUID of grounding research paper.")
+    extraction_method: str | None = Field(default=None, description="Extraction method.")
+    relationship_metadata: dict[str, Any] | None = Field(default=None, description="Relationship metadata.")
+
+
+class GraphNeighborhoodRequestBody(BaseModel):
+    """Request wire format for neighborhood exploration."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    node_id: str = Field(..., description="Seed node UUID.")
+    node_type: str = Field(..., description="Seed node type ('entity' or 'paper').")
+    max_depth: int = Field(default=1, ge=1, le=3, description="Exploration depth (1 to 3).")
+    max_nodes: int = Field(default=50, ge=1, le=100, description="Maximum total nodes (1 to 100).")
+    max_edges: int = Field(default=100, ge=1, le=200, description="Maximum total edges (1 to 200).")
+    direction: str = Field(default="both", description="Traversal direction ('outgoing', 'incoming', 'both').")
+    relationship_types: list[str] | None = Field(default=None, description="Optional relationship types filter.")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum edge confidence score.")
+    include_unscored: bool = Field(default=True, description="Whether to include unscored edges.")
+
+
+class GraphSubgraphResponseBody(BaseModel):
+    """Response wire format for neighborhood exploration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    seed_id: str = Field(..., description="UUID of the seed node.")
+    seed_type: str = Field(..., description="Type of the seed node.")
+    depth: int = Field(..., ge=0, description="Actual traversal depth.")
+    nodes: list[GraphNodeResponseBody] = Field(default_factory=list, description="Nodes in the explored subgraph.")
+    edges: list[GraphEdgeResponseBody] = Field(default_factory=list, description="Edges in the explored subgraph.")
+    is_truncated: bool = Field(..., description="Whether exploration was truncated by a budget.")
+    truncation_reason: str | None = Field(default=None, description="Reason for truncation if truncated.")
+
+
+class GraphPathsRequestBody(BaseModel):
+    """Request wire format for pathfinding."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    source_id: str = Field(..., description="Source node UUID.")
+    source_type: str = Field(..., description="Source node type ('entity' or 'paper').")
+    target_id: str = Field(..., description="Target node UUID.")
+    target_type: str = Field(..., description="Target node type ('entity' or 'paper').")
+    max_depth: int = Field(default=2, ge=1, le=3, description="Maximum path depth (1 to 3).")
+    max_paths: int = Field(default=5, ge=1, le=10, description="Maximum paths to discover (1 to 10).")
+    direction: str = Field(default="outgoing", description="Traversal direction ('outgoing', 'incoming', 'both').")
+    relationship_types: list[str] | None = Field(default=None, description="Optional relationship types filter.")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum confidence score.")
+    include_unscored: bool = Field(default=False, description="Whether to include unscored edges.")
+
+
+class GraphPathResponseBody(BaseModel):
+    """Wire format for a single discovered graph path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[GraphNodeResponseBody] = Field(..., description="Ordered sequence of nodes along the path.")
+    edges: list[GraphEdgeResponseBody] = Field(..., description="Ordered sequence of edges along the path.")
+    length: int = Field(..., ge=1, description="Number of hops along the path.")
+    confidence_score: float | None = Field(default=None, description="Combined path confidence score.")
+    is_partially_unscored: bool = Field(..., description="Whether any edge in the path lacked confidence.")
+
+
+class GraphPathsResponseBody(BaseModel):
+    """Response wire format for pathfinding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(..., description="Source node UUID.")
+    source_type: str = Field(..., description="Source node type.")
+    target_id: str = Field(..., description="Target node UUID.")
+    target_type: str = Field(..., description="Target node type.")
+    paths: list[GraphPathResponseBody] = Field(default_factory=list, description="Discovered paths.")
+    path_count: int = Field(..., ge=0, description="Total paths returned.")
+
+
+class AuthorCollaborationsResponseBody(BaseModel):
+    """Response wire format for author collaborations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the collection.")
+    collaborations: list[AuthorCollaborationResponseBody] = Field(default_factory=list, description="Author collaboration records.")
+    total_count: int = Field(..., ge=0, description="Total collaboration pairs returned.")
+
+
+def get_graph_traversal_service(request: Request) -> Any:
+    """Dependency: returns or initializes the KnowledgeGraphTraversalService."""
+    service = getattr(request.app.state, "graph_traversal_service", None)
+    if service is None:
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is not None:
+            from nexora.graph.traversal import KnowledgeGraphTraversalService
+
+            service = KnowledgeGraphTraversalService(session_factory=session_factory)
+            request.app.state.graph_traversal_service = service
+        else:
+            raise InvalidConfigurationError("session_factory is not configured for knowledge graph traversal")
+    return service
+
+
+def get_graph_analytics_service(request: Request) -> Any:
+    """Dependency: returns or initializes the KnowledgeGraphAnalyticsService."""
+    service = getattr(request.app.state, "graph_analytics_service", None)
+    if service is None:
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is not None:
+            from nexora.graph.analytics_service import KnowledgeGraphAnalyticsService
+
+            service = KnowledgeGraphAnalyticsService(session_factory=session_factory)
+            request.app.state.graph_analytics_service = service
+        else:
+            raise InvalidConfigurationError("session_factory is not configured for knowledge graph analytics")
+    return service
+
+
+def _verify_graph_collection_access(collection_id: str, request: Request, current_user: Any) -> tuple[UUID, Any]:
+    """Verify caller is authenticated and owns the specified collection for graph access.
+
+    Enforces authentication even if enforce_auth=False because graph data is tenant-private.
+    Raises:
+        InvalidRequestError (400) if collection_id is not a valid UUID.
+        AuthenticationError (401) if caller is unauthenticated.
+        ForbiddenError (403) if caller does not own the collection.
+        DocumentNotFoundError (404) if collection does not exist.
+    """
+    try:
+        col_uuid = UUID(str(collection_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid collection_id: must be a valid UUID.")
+
+    auth_service = get_auth_service(request)
+    if current_user is None or auth_service is None:
+        raise AuthenticationError("Authentication credentials are required to access collection knowledge graph data.")
+
+    auth_service.verify_collection_ownership(col_uuid, current_user.id)
+    return col_uuid, auth_service
+
+
+# ---------------------------------------------------------------------------
+# 1. GET /api/v1/collections/{collection_id}/graph/summary
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/summary",
+    response_model=CollectionGraphSummaryResponseBody,
+    status_code=200,
+    summary="Get collection graph summary statistics",
+    description="Returns quantitative entity and relationship counts for an authorized collection graph.",
+    responses={
+        200: {"description": "Graph summary statistics returned successfully.", "model": CollectionGraphSummaryResponseBody},
+        400: {"description": "Invalid collection UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced collection was not found."},
+        500: {"description": "Failed to retrieve graph summary statistics."},
+    },
+)
+def get_graph_summary_endpoint(
+    collection_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+    analytics_service: Any = Depends(get_graph_analytics_service),
+) -> CollectionGraphSummaryResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    try:
+        summary = analytics_service.get_summary(col_uuid)
+    except Exception as exc:
+        raise GraphServiceError(f"Failed to retrieve graph summary: {exc}") from exc
+
+    return CollectionGraphSummaryResponseBody(
+        collection_id=str(summary.collection_id),
+        total_entities=summary.total_entities,
+        total_relationships=summary.total_relationships,
+        entity_counts_by_type=summary.entity_counts_by_type,
+        relationship_counts_by_type=summary.relationship_counts_by_type,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. GET /api/v1/collections/{collection_id}/graph/analytics
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/analytics",
+    response_model=CollectionAnalyticsResponseBody,
+    status_code=200,
+    summary="Get comprehensive collection graph analytics",
+    description="Returns graph summary, entity/relationship distributions, and author collaboration metrics.",
+    responses={
+        200: {"description": "Graph analytics returned successfully.", "model": CollectionAnalyticsResponseBody},
+        400: {"description": "Invalid parameters or collection UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced collection was not found."},
+        500: {"description": "Failed to retrieve graph analytics."},
+    },
+)
+def get_graph_analytics_endpoint(
+    collection_id: str,
+    request: Request,
+    top_collaborations_limit: int = Query(default=20, ge=1, le=100, description="Max top collaboration pairs to return."),
+    author_connectivity_limit: int = Query(default=50, ge=1, le=100, description="Max author connectivity metrics to return."),
+    min_confidence: float | None = Query(default=None, ge=0.0, le=1.0, description="Minimum edge confidence score for author metrics."),
+    include_unscored: bool = Query(default=True, description="Whether to include unscored edges in collaboration counts."),
+    current_user: Any = Depends(get_current_user),
+    analytics_service: Any = Depends(get_graph_analytics_service),
+) -> CollectionAnalyticsResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    try:
+        analytics = analytics_service.get_collection_analytics(
+            col_uuid,
+            top_collaborations_limit=top_collaborations_limit,
+            author_connectivity_limit=author_connectivity_limit,
+            min_confidence=min_confidence,
+            include_unscored=include_unscored,
+        )
+    except Exception as exc:
+        raise GraphServiceError(f"Failed to retrieve graph analytics: {exc}") from exc
+
+    return CollectionAnalyticsResponseBody(
+        collection_id=str(analytics.collection_id),
+        summary=CollectionGraphSummaryResponseBody(
+            collection_id=str(analytics.summary.collection_id),
+            total_entities=analytics.summary.total_entities,
+            total_relationships=analytics.summary.total_relationships,
+            entity_counts_by_type=analytics.summary.entity_counts_by_type,
+            relationship_counts_by_type=analytics.summary.relationship_counts_by_type,
+        ),
+        entity_distribution=[
+            EntityTypeCountResponseBody(entity_type=e.entity_type, count=e.count)
+            for e in analytics.entity_distribution
+        ],
+        relationship_distribution=[
+            RelationshipTypeCountResponseBody(relationship_type=r.relationship_type, count=r.count)
+            for r in analytics.relationship_distribution
+        ],
+        top_collaborations=[
+            AuthorCollaborationResponseBody(
+                author_id=str(c.author_id),
+                author_name=c.author_name,
+                collaborator_id=str(c.collaborator_id),
+                collaborator_name=c.collaborator_name,
+                shared_paper_ids=[str(p) for p in c.shared_paper_ids],
+                collaboration_count=c.collaboration_count,
+            )
+            for c in analytics.top_collaborations
+        ],
+        author_connectivity=[
+            AuthorConnectivityResponseBody(
+                author_id=str(m.author_id),
+                author_name=m.author_name,
+                paper_count=m.paper_count,
+                collaborator_count=m.collaborator_count,
+                total_collaborations=m.total_collaborations,
+            )
+            for m in analytics.author_connectivity
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3. GET /api/v1/collections/{collection_id}/graph/entities
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/entities",
+    response_model=GraphEntityListResponseBody,
+    status_code=200,
+    summary="List or search graph entities in a collection",
+    description="List or search graph entities belonging to an authorized collection.",
+    responses={
+        200: {"description": "Entities returned successfully.", "model": GraphEntityListResponseBody},
+        400: {"description": "Invalid parameters or collection UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced collection was not found."},
+        500: {"description": "Failed to list or search graph entities."},
+    },
+)
+def list_or_search_graph_entities(
+    collection_id: str,
+    request: Request,
+    query: str | None = Query(default=None, max_length=200, description="Optional entity name query substring to search."),
+    entity_type: str | None = Query(default=None, max_length=50, description="Optional entity type filter."),
+    offset: int = Query(default=0, ge=0, description="Pagination offset."),
+    limit: int = Query(default=20, ge=1, le=100, description="Maximum items to return (max 20 when searching)."),
+    current_user: Any = Depends(get_current_user),
+) -> GraphEntityListResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+
+    # Enforce maximum search limit of 20 matching repository specification
+    if query is not None and query.strip():
+        if limit > 20:
+            raise InvalidRequestError("limit cannot exceed 20 when searching entities by query.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured")
+
+    from nexora.database.repository.graph_entity import GraphEntityRepository
+
+    with session_factory() as session:
+        entity_repo = GraphEntityRepository(session)
+        if query is not None and query.strip():
+            raw_entities = entity_repo.search_entities(
+                collection_id=col_uuid,
+                query=query.strip(),
+                entity_type=entity_type,
+                limit=limit,
+            )
+            entities = list(raw_entities)
+            total_count = len(entities)
+        else:
+            raw_entities = entity_repo.list_by_collection_id(
+                col_uuid,
+                entity_type=entity_type,
+                offset=offset,
+                limit=limit,
+            )
+            entities = list(raw_entities)
+            if entity_type is not None:
+                type_counts = entity_repo.count_by_type(col_uuid)
+                total_count = type_counts.get(entity_type.strip().lower(), 0)
+            else:
+                total_count = entity_repo.count_by_collection(col_uuid)
+
+        items = [
+            GraphEntityItemResponseBody(
+                id=str(e.id),
+                collection_id=str(e.collection_id),
+                name=e.name,
+                canonical_name=e.canonical_name,
+                entity_type=e.entity_type,
+                description=e.description,
+                aliases=list(e.aliases or []),
+                metadata=dict(e.entity_metadata or {}),
+                created_at=e.created_at.isoformat() if e.created_at else None,
+                updated_at=e.updated_at.isoformat() if e.updated_at else None,
+            )
+            for e in entities
+        ]
+
+    return GraphEntityListResponseBody(
+        collection_id=str(col_uuid),
+        entities=items,
+        total_count=total_count,
+        offset=offset,
+        limit=limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. GET /api/v1/collections/{collection_id}/graph/entities/{entity_id}
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/entities/{entity_id}",
+    response_model=GraphEntityDetailResponseBody,
+    status_code=200,
+    summary="Get entity details and its direct relationships",
+    description="Retrieves specific entity metadata and direct relationships within an authorized collection.",
+    responses={
+        200: {"description": "Entity details returned successfully.", "model": GraphEntityDetailResponseBody},
+        400: {"description": "Invalid entity or collection UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced entity or collection was not found."},
+        500: {"description": "Failed to retrieve entity details."},
+    },
+)
+def get_graph_entity_detail(
+    collection_id: str,
+    entity_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> GraphEntityDetailResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    try:
+        ent_uuid = UUID(str(entity_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid entity_id: must be a valid UUID.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured")
+
+    from nexora.database.repository.graph_entity import GraphEntityRepository
+    from nexora.database.repository.graph_relationship import GraphRelationshipRepository
+
+    with session_factory() as session:
+        entity_repo = GraphEntityRepository(session)
+        rel_repo = GraphRelationshipRepository(session)
+
+        entity = entity_repo.get_by_id_scoped(ent_uuid, collection_id=col_uuid)
+        if entity is None:
+            raise DocumentNotFoundError(f"Entity '{entity_id}' not found in collection '{collection_id}'.")
+
+        relationships = rel_repo.list_by_entity_id(ent_uuid, collection_id=col_uuid, limit=100)
+        rel_items = [
+            GraphRelationshipItemResponseBody(
+                id=str(r.id),
+                collection_id=str(r.collection_id),
+                relationship_type=r.relationship_type,
+                source_type=r.source_type,
+                source_id=str(r.source_id),
+                target_type=r.target_type,
+                target_id=str(r.target_id),
+                confidence=r.confidence,
+                evidence_text=r.evidence_text,
+                chunk_id=str(r.chunk_id) if r.chunk_id else None,
+                page_number=r.page_number,
+                paper_id=str(r.paper_id) if r.paper_id else None,
+                extraction_method=r.extraction_method,
+                created_at=r.created_at.isoformat() if r.created_at else None,
+                updated_at=r.updated_at.isoformat() if r.updated_at else None,
+            )
+            for r in relationships
+        ]
+
+        return GraphEntityDetailResponseBody(
+            id=str(entity.id),
+            collection_id=str(entity.collection_id),
+            name=entity.name,
+            canonical_name=entity.canonical_name,
+            entity_type=entity.entity_type,
+            description=entity.description,
+            aliases=list(entity.aliases or []),
+            metadata=dict(entity.entity_metadata or {}),
+            created_at=entity.created_at.isoformat() if entity.created_at else None,
+            updated_at=entity.updated_at.isoformat() if entity.updated_at else None,
+            relationships=rel_items,
+            relationship_count=len(rel_items),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. POST /api/v1/collections/{collection_id}/graph/neighborhood
+# ---------------------------------------------------------------------------
+
+@v1_router.post(
+    "/collections/{collection_id}/graph/neighborhood",
+    response_model=GraphSubgraphResponseBody,
+    status_code=200,
+    summary="Explore bounded neighborhood around a seed node",
+    description="Explores 1-hop or bounded multi-hop neighborhood around an entity or paper within an authorized collection.",
+    responses={
+        200: {"description": "Neighborhood explored successfully.", "model": GraphSubgraphResponseBody},
+        400: {"description": "Invalid parameters, seed type, or UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced seed node or collection was not found."},
+        500: {"description": "Failed to explore graph neighborhood."},
+    },
+)
+def explore_graph_neighborhood_endpoint(
+    collection_id: str,
+    body: GraphNeighborhoodRequestBody,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+    traversal_service: Any = Depends(get_graph_traversal_service),
+) -> GraphSubgraphResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    try:
+        node_uuid = UUID(str(body.node_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid node_id: must be a valid UUID.")
+
+    node_type = body.node_type.strip().lower()
+    if node_type not in ("entity", "paper"):
+        raise InvalidRequestError("node_type must be either 'entity' or 'paper'.")
+
+    direction = body.direction.strip().lower()
+    if direction not in ("outgoing", "incoming", "both"):
+        raise InvalidRequestError("direction must be 'outgoing', 'incoming', or 'both'.")
+
+    try:
+        subgraph = traversal_service.explore_multihop(
+            start_id=node_uuid,
+            start_type=node_type,
+            collection_id=col_uuid,
+            max_depth=body.max_depth,
+            max_nodes=body.max_nodes,
+            max_edges=body.max_edges,
+            direction=direction,
+            relationship_types=body.relationship_types,
+            min_confidence=body.min_confidence,
+            include_unscored=body.include_unscored,
+        )
+    except (ValueError, TypeError) as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    except Exception as exc:
+        raise GraphServiceError(f"Failed to explore graph neighborhood: {exc}") from exc
+
+    return GraphSubgraphResponseBody(
+        seed_id=str(subgraph.seed_id),
+        seed_type=subgraph.seed_type,
+        depth=subgraph.depth,
+        nodes=[
+            GraphNodeResponseBody(
+                id=str(n.id),
+                node_type=n.node_type,
+                name=n.name,
+                entity_type=n.entity_type,
+                metadata=dict(n.metadata or {}),
+            )
+            for n in subgraph.nodes
+        ],
+        edges=[
+            GraphEdgeResponseBody(
+                id=str(e.id),
+                relationship_type=e.relationship_type,
+                source_type=e.source_type,
+                source_id=str(e.source_id),
+                target_type=e.target_type,
+                target_id=str(e.target_id),
+                confidence=e.confidence,
+                evidence_text=e.evidence_text,
+                chunk_id=str(e.chunk_id) if e.chunk_id else None,
+                page_number=e.page_number,
+                paper_id=str(e.paper_id) if e.paper_id else None,
+                extraction_method=e.extraction_method,
+                relationship_metadata=dict(e.relationship_metadata) if e.relationship_metadata else None,
+            )
+            for e in subgraph.edges
+        ],
+        is_truncated=subgraph.is_truncated,
+        truncation_reason=subgraph.truncation_reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. POST /api/v1/collections/{collection_id}/graph/paths
+# ---------------------------------------------------------------------------
+
+@v1_router.post(
+    "/collections/{collection_id}/graph/paths",
+    response_model=GraphPathsResponseBody,
+    status_code=200,
+    summary="Find connecting paths between two research nodes",
+    description="Finds deterministic paths between source and target nodes with multiplicative confidence scoring.",
+    responses={
+        200: {"description": "Paths discovered successfully.", "model": GraphPathsResponseBody},
+        400: {"description": "Invalid parameters, endpoint types, or UUIDs."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced endpoints or collection was not found."},
+        500: {"description": "Failed to discover graph paths."},
+    },
+)
+def find_graph_paths_endpoint(
+    collection_id: str,
+    body: GraphPathsRequestBody,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+    traversal_service: Any = Depends(get_graph_traversal_service),
+) -> GraphPathsResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    try:
+        src_uuid = UUID(str(body.source_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid source_id: must be a valid UUID.")
+    try:
+        tgt_uuid = UUID(str(body.target_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid target_id: must be a valid UUID.")
+
+    src_type = body.source_type.strip().lower()
+    tgt_type = body.target_type.strip().lower()
+    if src_type not in ("entity", "paper"):
+        raise InvalidRequestError("source_type must be either 'entity' or 'paper'.")
+    if tgt_type not in ("entity", "paper"):
+        raise InvalidRequestError("target_type must be either 'entity' or 'paper'.")
+
+    direction = body.direction.strip().lower()
+    if direction not in ("outgoing", "incoming", "both"):
+        raise InvalidRequestError("direction must be 'outgoing', 'incoming', or 'both'.")
+
+    try:
+        paths = traversal_service.find_paths(
+            source_id=src_uuid,
+            source_type=src_type,
+            target_id=tgt_uuid,
+            target_type=tgt_type,
+            collection_id=col_uuid,
+            max_depth=body.max_depth,
+            max_paths=body.max_paths,
+            direction=direction,
+            relationship_types=body.relationship_types,
+            min_confidence=body.min_confidence,
+            include_unscored=body.include_unscored,
+        )
+    except (ValueError, TypeError) as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    except Exception as exc:
+        raise GraphServiceError(f"Failed to find graph paths: {exc}") from exc
+
+    path_items = [
+        GraphPathResponseBody(
+            nodes=[
+                GraphNodeResponseBody(
+                    id=str(n.id),
+                    node_type=n.node_type,
+                    name=n.name,
+                    entity_type=n.entity_type,
+                    metadata=dict(n.metadata or {}),
+                )
+                for n in p.nodes
+            ],
+            edges=[
+                GraphEdgeResponseBody(
+                    id=str(e.id),
+                    relationship_type=e.relationship_type,
+                    source_type=e.source_type,
+                    source_id=str(e.source_id),
+                    target_type=e.target_type,
+                    target_id=str(e.target_id),
+                    confidence=e.confidence,
+                    evidence_text=e.evidence_text,
+                    chunk_id=str(e.chunk_id) if e.chunk_id else None,
+                    page_number=e.page_number,
+                    paper_id=str(e.paper_id) if e.paper_id else None,
+                    extraction_method=e.extraction_method,
+                    relationship_metadata=dict(e.relationship_metadata) if e.relationship_metadata else None,
+                )
+                for e in p.edges
+            ],
+            length=p.length,
+            confidence_score=p.confidence_score,
+            is_partially_unscored=p.is_partially_unscored,
+        )
+        for p in paths
+    ]
+
+    return GraphPathsResponseBody(
+        source_id=str(src_uuid),
+        source_type=src_type,
+        target_id=str(tgt_uuid),
+        target_type=tgt_type,
+        paths=path_items,
+        path_count=len(path_items),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. GET /api/v1/collections/{collection_id}/graph/collaborations
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/collaborations",
+    response_model=AuthorCollaborationsResponseBody,
+    status_code=200,
+    summary="Get author collaboration pairs in a collection",
+    description="Returns aggregated co-authorship collaboration pairs within an authorized collection.",
+    responses={
+        200: {"description": "Collaborations returned successfully.", "model": AuthorCollaborationsResponseBody},
+        400: {"description": "Invalid parameters or collection UUID."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not own or have access to this collection."},
+        404: {"description": "Referenced collection was not found."},
+        500: {"description": "Failed to retrieve author collaborations."},
+    },
+)
+def get_author_collaborations_endpoint(
+    collection_id: str,
+    request: Request,
+    author_id: str | None = Query(default=None, description="Optional author entity UUID filter."),
+    min_shared_papers: int = Query(default=1, ge=1, description="Minimum shared papers between authors."),
+    min_confidence: float | None = Query(default=None, ge=0.0, le=1.0, description="Minimum relationship confidence score."),
+    include_unscored: bool = Query(default=True, description="Whether to include unscored edges in collaboration counts."),
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum collaboration records to return."),
+    current_user: Any = Depends(get_current_user),
+    analytics_service: Any = Depends(get_graph_analytics_service),
+) -> AuthorCollaborationsResponseBody:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+    author_uuid: UUID | None = None
+    if author_id is not None:
+        try:
+            author_uuid = UUID(str(author_id).strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError("Invalid author_id: must be a valid UUID.")
+
+    try:
+        collaborations = analytics_service.get_author_collaborations(
+            col_uuid,
+            author_id=author_uuid,
+            min_shared_papers=min_shared_papers,
+            min_confidence=min_confidence,
+            include_unscored=include_unscored,
+            limit=limit,
+        )
+    except (ValueError, TypeError) as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    except Exception as exc:
+        raise GraphServiceError(f"Failed to retrieve author collaborations: {exc}") from exc
+
+    items = [
+        AuthorCollaborationResponseBody(
+            author_id=str(c.author_id),
+            author_name=c.author_name,
+            collaborator_id=str(c.collaborator_id),
+            collaborator_name=c.collaborator_name,
+            shared_paper_ids=[str(p) for p in c.shared_paper_ids],
+            collaboration_count=c.collaboration_count,
+        )
+        for c in collaborations
+    ]
+
+    return AuthorCollaborationsResponseBody(
+        collection_id=str(col_uuid),
+        collaborations=items,
+        total_count=len(items),
+    )

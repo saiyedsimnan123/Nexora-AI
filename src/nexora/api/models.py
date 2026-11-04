@@ -1083,6 +1083,138 @@ class AgentRunResponse:
         )
 
 
+@dataclass(frozen=True)
+class GraphNeighborhoodRequest:
+    """Domain request for bounded neighborhood graph exploration."""
+
+    node_id: str
+    node_type: str
+    max_depth: int | None = 1
+    max_nodes: int | None = 50
+    max_edges: int | None = 100
+    direction: str | None = "both"
+    relationship_types: list[str] | None = None
+    min_confidence: float | None = None
+    include_unscored: bool = True
+
+    def __post_init__(self) -> None:
+        from uuid import UUID
+
+        if not isinstance(self.node_id, str) or not self.node_id.strip():
+            raise InvalidRequestError("node_id must be a non-empty string")
+        try:
+            UUID(self.node_id.strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError(f"Invalid node_id: '{self.node_id}' is not a valid UUID")
+
+        if not isinstance(self.node_type, str) or self.node_type.strip().lower() not in ("entity", "paper"):
+            raise InvalidRequestError("node_type must be either 'entity' or 'paper'")
+
+        if self.max_depth is not None:
+            if not isinstance(self.max_depth, int) or isinstance(self.max_depth, bool):
+                raise InvalidRequestError("max_depth must be an integer")
+            if self.max_depth < 1 or self.max_depth > 3:
+                raise InvalidRequestError("max_depth must be between 1 and 3")
+
+        if self.max_nodes is not None:
+            if not isinstance(self.max_nodes, int) or isinstance(self.max_nodes, bool):
+                raise InvalidRequestError("max_nodes must be an integer")
+            if self.max_nodes < 1 or self.max_nodes > 100:
+                raise InvalidRequestError("max_nodes must be between 1 and 100")
+
+        if self.max_edges is not None:
+            if not isinstance(self.max_edges, int) or isinstance(self.max_edges, bool):
+                raise InvalidRequestError("max_edges must be an integer")
+            if self.max_edges < 1 or self.max_edges > 200:
+                raise InvalidRequestError("max_edges must be between 1 and 200")
+
+        if self.direction is not None:
+            if self.direction.strip().lower() not in ("outgoing", "incoming", "both"):
+                raise InvalidRequestError("direction must be 'outgoing', 'incoming', or 'both'")
+
+        if self.min_confidence is not None:
+            if not isinstance(self.min_confidence, (int, float)) or isinstance(self.min_confidence, bool):
+                raise InvalidRequestError("min_confidence must be a number between 0.0 and 1.0")
+            if self.min_confidence < 0.0 or self.min_confidence > 1.0:
+                raise InvalidRequestError("min_confidence must be between 0.0 and 1.0")
+
+
+@dataclass(frozen=True)
+class GraphPathsRequest:
+    """Domain request for finding connecting relationship paths between two nodes."""
+
+    source_id: str
+    source_type: str
+    target_id: str
+    target_type: str
+    max_depth: int | None = 2
+    max_paths: int | None = 5
+    direction: str | None = "outgoing"
+    relationship_types: list[str] | None = None
+    min_confidence: float | None = None
+    include_unscored: bool = False
+
+    def __post_init__(self) -> None:
+        from uuid import UUID
+
+        for param_name, param_val in (("source_id", self.source_id), ("target_id", self.target_id)):
+            if not isinstance(param_val, str) or not param_val.strip():
+                raise InvalidRequestError(f"{param_name} must be a non-empty string")
+            try:
+                UUID(param_val.strip())
+            except (ValueError, AttributeError):
+                raise InvalidRequestError(f"Invalid {param_name}: '{param_val}' is not a valid UUID")
+
+        for param_name, param_val in (("source_type", self.source_type), ("target_type", self.target_type)):
+            if not isinstance(param_val, str) or param_val.strip().lower() not in ("entity", "paper"):
+                raise InvalidRequestError(f"{param_name} must be either 'entity' or 'paper'")
+
+        if self.max_depth is not None:
+            if not isinstance(self.max_depth, int) or isinstance(self.max_depth, bool):
+                raise InvalidRequestError("max_depth must be an integer")
+            if self.max_depth < 1 or self.max_depth > 3:
+                raise InvalidRequestError("max_depth must be between 1 and 3")
+
+        if self.max_paths is not None:
+            if not isinstance(self.max_paths, int) or isinstance(self.max_paths, bool):
+                raise InvalidRequestError("max_paths must be an integer")
+            if self.max_paths < 1 or self.max_paths > 10:
+                raise InvalidRequestError("max_paths must be between 1 and 10")
+
+        if self.direction is not None:
+            if self.direction.strip().lower() not in ("outgoing", "incoming", "both"):
+                raise InvalidRequestError("direction must be 'outgoing', 'incoming', or 'both'")
+
+        if self.min_confidence is not None:
+            if not isinstance(self.min_confidence, (int, float)) or isinstance(self.min_confidence, bool):
+                raise InvalidRequestError("min_confidence must be a number between 0.0 and 1.0")
+            if self.min_confidence < 0.0 or self.min_confidence > 1.0:
+                raise InvalidRequestError("min_confidence must be between 0.0 and 1.0")
+
+
+@dataclass(frozen=True)
+class GraphEntitiesRequest:
+    """Domain request for listing or searching graph entities."""
+
+    query: str | None = None
+    entity_type: str | None = None
+    offset: int = 0
+    limit: int = 20
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.offset, int) or isinstance(self.offset, bool) or self.offset < 0:
+            raise InvalidRequestError("offset must be a non-negative integer")
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit <= 0:
+            raise InvalidRequestError("limit must be a positive integer")
+
+        if self.query is not None and self.query.strip():
+            if self.limit > 20:
+                raise InvalidRequestError("limit cannot exceed 20 when query is provided")
+        else:
+            if self.limit > 100:
+                raise InvalidRequestError("limit cannot exceed 100")
+
+
 # Re-export RAG contracts for external consumers of the API package
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
 
@@ -1097,6 +1229,9 @@ __all__ = [
     "DiscoverySearchRequest",
     "DiscoverySearchResponse",
     "DocumentIngestResponse",
+    "GraphEntitiesRequest",
+    "GraphNeighborhoodRequest",
+    "GraphPathsRequest",
     "PaperAnalysisRequest",
     "PaperAnalysisResponse",
     "PaperComparisonRequest",

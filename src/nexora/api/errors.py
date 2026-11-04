@@ -51,6 +51,10 @@ class AgentServiceError(RuntimeError):
     """Autonomous agent orchestration or research planning failed; the original error is chained as __cause__."""
 
 
+class GraphServiceError(RuntimeError):
+    """Knowledge graph traversal or analytics failed; the original error is chained as __cause__."""
+
+
 class AuthenticationError(Exception):
     """Authentication credential is missing, malformed, invalid, expired, or revoked."""
 
