@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Sequence
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nexora.agents.models import (
     AgentContext,
@@ -20,6 +20,7 @@ from nexora.agents.models import (
 from nexora.api.errors import (
     DocumentNotFoundError,
     ForbiddenError,
+    InvalidConfigurationError,
     InvalidRequestError,
 )
 from nexora.research.verification import ClaimToEvidenceVerifier, RawClaim
@@ -188,6 +189,216 @@ class VerifyClaimInput(BaseModel):
         return _clean_uuid_str(v, "paper_id") if v is not None else None
 
 
+class SearchGraphEntitiesInput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the authorized collection to search.")
+    query: str | None = Field(default=None, max_length=200, description="Optional entity name substring to search.")
+    entity_type: str | None = Field(default=None, max_length=50, description="Optional entity classification filter (author, concept, dataset, method, metric, other).")
+    limit: int | None = Field(default=10, ge=1, le=20, description="Maximum number of entities to return (maximum 20).")
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "collection_id")
+
+    @field_validator("entity_type")
+    @classmethod
+    def validate_entity_type(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        cleaned = v.strip().lower()
+        if not cleaned:
+            return None
+        valid_types = ("author", "concept", "dataset", "method", "metric", "other")
+        if cleaned not in valid_types:
+            raise ValueError(f"Invalid entity_type: '{v}'. Must be one of: {list(valid_types)}")
+        return cleaned
+
+
+class ExploreGraphNeighborhoodInput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the authorized collection.")
+    node_id: str = Field(..., description="UUID of the seed entity or paper.")
+    node_type: str = Field(..., description="Type of seed node ('entity' or 'paper').")
+    max_depth: int | None = Field(default=1, ge=1, le=2, description="Exploration depth (1 or 2; agent hard ceiling: 2).")
+    max_nodes: int | None = Field(default=15, ge=1, le=25, description="Maximum total nodes to discover (maximum 25).")
+    max_edges: int | None = Field(default=30, ge=1, le=50, description="Maximum total edges to discover (maximum 50).")
+    direction: str | None = Field(default="both", description="Edge traversal direction ('outgoing', 'incoming', 'both').")
+    relationship_types: list[str] | None = Field(default=None, max_length=20, description="Optional relationship types filter.")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum edge confidence score.")
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "collection_id")
+
+    @field_validator("node_id")
+    @classmethod
+    def validate_node_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "node_id")
+
+    @field_validator("node_type")
+    @classmethod
+    def validate_node_type(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("node_type must be a string.")
+        cleaned = v.strip().lower()
+        if cleaned not in ("entity", "paper"):
+            raise ValueError("node_type must be either 'entity' or 'paper'.")
+        return cleaned
+
+    @field_validator("direction")
+    @classmethod
+    def validate_direction(cls, v: str | None) -> str:
+        if v is None:
+            return "both"
+        cleaned = v.strip().lower()
+        if cleaned not in ("outgoing", "incoming", "both"):
+            raise ValueError("direction must be 'outgoing', 'incoming', or 'both'.")
+        return cleaned
+
+    @field_validator("relationship_types")
+    @classmethod
+    def validate_relationship_types(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("relationship_types must be a list of strings.")
+        if len(v) == 0:
+            raise ValueError("relationship_types cannot be an empty list; omit the field to include all types.")
+        cleaned = []
+        for r in v:
+            if not isinstance(r, str) or not r.strip():
+                raise ValueError("relationship_types entries must be non-empty strings.")
+            cleaned_r = r.strip().lower()
+            if len(cleaned_r) > 100:
+                raise ValueError("relationship_types entries must not exceed 100 characters.")
+            cleaned.append(cleaned_r)
+        return cleaned
+
+
+class FindGraphPathInput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the authorized collection.")
+    source_id: str = Field(..., description="Source node UUID.")
+    source_type: str = Field(..., description="Source node type ('entity' or 'paper').")
+    target_id: str = Field(..., description="Target node UUID.")
+    target_type: str = Field(..., description="Target node type ('entity' or 'paper').")
+    max_depth: int | None = Field(default=2, ge=1, le=3, description="Maximum traversal depth (maximum 3).")
+    max_paths: int | None = Field(default=2, ge=1, le=3, description="Maximum paths to discover (maximum 3).")
+    direction: str | None = Field(default="outgoing", description="Traversal direction ('outgoing', 'incoming', 'both').")
+    relationship_types: list[str] | None = Field(default=None, max_length=20, description="Optional relationship types filter.")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum edge confidence score.")
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "collection_id")
+
+    @field_validator("source_id")
+    @classmethod
+    def validate_source_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "source_id")
+
+    @field_validator("target_id")
+    @classmethod
+    def validate_target_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "target_id")
+
+    @field_validator("source_type")
+    @classmethod
+    def validate_source_type(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("source_type must be a string.")
+        cleaned = v.strip().lower()
+        if cleaned not in ("entity", "paper"):
+            raise ValueError("source_type must be either 'entity' or 'paper'.")
+        return cleaned
+
+    @field_validator("target_type")
+    @classmethod
+    def validate_target_type(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("target_type must be a string.")
+        cleaned = v.strip().lower()
+        if cleaned not in ("entity", "paper"):
+            raise ValueError("target_type must be either 'entity' or 'paper'.")
+        return cleaned
+
+    @field_validator("direction")
+    @classmethod
+    def validate_direction(cls, v: str | None) -> str:
+        if v is None:
+            return "outgoing"
+        cleaned = v.strip().lower()
+        if cleaned not in ("outgoing", "incoming", "both"):
+            raise ValueError("direction must be 'outgoing', 'incoming', or 'both'.")
+        return cleaned
+
+    @field_validator("relationship_types")
+    @classmethod
+    def validate_relationship_types(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("relationship_types must be a list of strings.")
+        if len(v) == 0:
+            raise ValueError("relationship_types cannot be an empty list; omit the field to include all types.")
+        cleaned = []
+        for r in v:
+            if not isinstance(r, str) or not r.strip():
+                raise ValueError("relationship_types entries must be non-empty strings.")
+            cleaned_r = r.strip().lower()
+            if len(cleaned_r) > 100:
+                raise ValueError("relationship_types entries must not exceed 100 characters.")
+            cleaned.append(cleaned_r)
+        return cleaned
+
+
+class QueryGraphAnalyticsInput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    collection_id: str = Field(..., description="UUID of the authorized collection.")
+    query_type: str = Field(default="overview", description="Analytics query type: 'overview', 'summary', 'collaborations', or 'connectivity'.")
+    top_n: int | None = Field(default=5, ge=1, le=15, description="Maximum top rankings to return (maximum 15).")
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Minimum relationship confidence threshold.")
+    include_unscored: bool = Field(default=False, description="Whether to include unscored relationships when threshold is active.")
+    author_id: str | None = Field(default=None, description="Optional author UUID to filter collaborations or connectivity.")
+
+    @field_validator("collection_id")
+    @classmethod
+    def validate_collection_id(cls, v: str) -> str:
+        return _clean_uuid_str(v, "collection_id")
+
+    @field_validator("author_id")
+    @classmethod
+    def validate_author_id(cls, v: str | None) -> str | None:
+        return _clean_uuid_str(v, "author_id") if v is not None else None
+
+    @field_validator("query_type")
+    @classmethod
+    def validate_query_type(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("query_type must be a string.")
+        cleaned = v.strip().lower()
+        valid_queries = ("overview", "summary", "collaborations", "connectivity")
+        if cleaned not in valid_queries:
+            raise ValueError(f"Invalid query_type: '{v}'. Must be one of: {list(valid_queries)}")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_author_id_usage(self) -> QueryGraphAnalyticsInput:
+        if self.author_id is not None and self.query_type in ("overview", "summary"):
+            raise ValueError(
+                f"author_id filter is not supported for '{self.query_type}' query type; "
+                "author_id is only valid for 'collaborations' and 'connectivity'."
+            )
+        return self
+
+
 # ---------------------------------------------------------------------------
 # Authorization Helpers
 # ---------------------------------------------------------------------------
@@ -219,6 +430,41 @@ def _verify_collection_access(context: AgentContext, collection_id: str) -> None
     if context.user_id is None:
         raise AgentSecurityError("Authentication required.")
     context.auth_service.verify_collection_ownership(UUID(collection_id), context.user_id)
+
+
+def _verify_graph_collection_access(context: AgentContext, collection_id: str | UUID) -> UUID:
+    """Verify that the caller is authenticated and owns the specified collection for graph access.
+
+    Knowledge graph data is strictly collection-scoped and tenant-private.
+    Security invariants:
+    1. Missing context.user_id must fail closed with AgentSecurityError.
+    2. Missing context.auth_service must fail closed with AgentSecurityError.
+    3. auth_enforced=False is NEVER an authorization bypass.
+    4. Successful verification strictly calls context.auth_service.verify_collection_ownership(col_uuid, context.user_id).
+    """
+    if not isinstance(context, AgentContext):
+        raise AgentSecurityError("Operation requires a valid AgentContext.")
+
+    if context.user_id is None:
+        raise AgentSecurityError(
+            "Authentication required: collection knowledge graph data is private and cannot be accessed anonymously."
+        )
+
+    if context.auth_service is None:
+        raise AgentSecurityError(
+            "Authorization service unavailable: cannot verify collection ownership."
+        )
+
+    if not isinstance(collection_id, UUID):
+        try:
+            col_uuid = UUID(str(collection_id).strip())
+        except (ValueError, AttributeError):
+            raise InvalidToolArgumentError(f"collection_id must be a valid UUID, got {collection_id!r}")
+    else:
+        col_uuid = collection_id
+
+    context.auth_service.verify_collection_ownership(col_uuid, context.user_id)
+    return col_uuid
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +1024,506 @@ class VerifyClaimTool(AgentTool):
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Graph Agent Tools (Stage 5 Step 4.2)
+# ---------------------------------------------------------------------------
+
+class SearchGraphEntitiesTool(AgentTool):
+    """Tool for searching and listing entities in a collection's knowledge graph."""
+
+    def __init__(self, session_factory: Any = None, *, repository: Any = None) -> None:
+        if session_factory is None and repository is None:
+            raise TypeError("session_factory or repository must be provided")
+        self._session_factory = session_factory
+        self._repository = repository
+
+    @property
+    def name(self) -> str:
+        return "search_graph_entities"
+
+    @property
+    def description(self) -> str:
+        return "Search or list entities (methods, concepts, datasets, authors) in a collection's knowledge graph."
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return SearchGraphEntitiesInput.model_json_schema()
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = SearchGraphEntitiesInput.model_validate(arguments)
+            return parsed.model_dump(exclude_unset=True)
+        except ValidationError as exc:
+            raise InvalidToolArgumentError(str(exc)) from exc
+
+    def execute(self, arguments: dict[str, Any], context: AgentContext) -> ToolResult:
+        start_time = time.perf_counter()
+        try:
+            args = SearchGraphEntitiesInput.model_validate(arguments)
+            col_uuid = _verify_graph_collection_access(context, args.collection_id)
+        except (ValidationError, InvalidToolArgumentError) as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="validation_error")
+        except AgentSecurityError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="unauthorized")
+        except ForbiddenError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="forbidden")
+        except DocumentNotFoundError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="not_found")
+
+        try:
+            from nexora.database.repository.graph_entity import GraphEntityRepository
+
+            eff_limit = min(args.limit or 10, 20)
+            if self._repository is not None:
+                if args.query and args.query.strip():
+                    entities = self._repository.search_entities(
+                        collection_id=col_uuid,
+                        query=args.query.strip(),
+                        entity_type=args.entity_type,
+                        limit=eff_limit,
+                    )
+                else:
+                    entities = self._repository.list_by_collection_id(
+                        collection_id=col_uuid,
+                        entity_type=args.entity_type,
+                        limit=eff_limit,
+                    )
+            elif self._session_factory is not None:
+                with self._session_factory() as session:
+                    repo = GraphEntityRepository(session)
+                    if args.query and args.query.strip():
+                        entities = repo.search_entities(
+                            collection_id=col_uuid,
+                            query=args.query.strip(),
+                            entity_type=args.entity_type,
+                            limit=eff_limit,
+                        )
+                    else:
+                        entities = repo.list_by_collection_id(
+                            collection_id=col_uuid,
+                            entity_type=args.entity_type,
+                            limit=eff_limit,
+                        )
+            else:
+                return ToolResult.failure(self.name, "Database session factory unavailable.", error_type="execution_error")
+
+            dur = (time.perf_counter() - start_time) * 1000
+            data = [
+                {
+                    "id": str(e.id),
+                    "collection_id": str(e.collection_id),
+                    "name": e.name,
+                    "canonical_name": e.canonical_name,
+                    "entity_type": e.entity_type,
+                    "description": e.description,
+                    "aliases": list(e.aliases or []),
+                    "metadata": dict(e.entity_metadata or {}),
+                }
+                for e in entities
+            ]
+            summary = (
+                f"Found {len(data)} entities in collection graph matching query '{args.query}'."
+                if args.query and args.query.strip()
+                else f"Listed {len(data)} entities in collection graph."
+            )
+            return ToolResult.ok(self.name, data=data, summary=summary, duration_ms=dur)
+        except Exception as exc:
+            return ToolResult.failure(self.name, f"Entity search failed: {type(exc).__name__}", error_type="execution_error")
+
+
+class ExploreGraphNeighborhoodTool(AgentTool):
+    """Tool for exploring bounded 1- or 2-hop local graph topology around an entity or paper."""
+
+    def __init__(self, traversal_service: Any) -> None:
+        if not callable(getattr(traversal_service, "explore_multihop", None)):
+            raise TypeError("traversal_service must provide explore_multihop")
+        self._service = traversal_service
+
+    @property
+    def name(self) -> str:
+        return "explore_graph_neighborhood"
+
+    @property
+    def description(self) -> str:
+        return "Explore bounded 1- or 2-hop local graph topology around an entity or paper with full evidence grounding."
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return ExploreGraphNeighborhoodInput.model_json_schema()
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = ExploreGraphNeighborhoodInput.model_validate(arguments)
+            return parsed.model_dump(exclude_unset=True)
+        except ValidationError as exc:
+            raise InvalidToolArgumentError(str(exc)) from exc
+
+    def execute(self, arguments: dict[str, Any], context: AgentContext) -> ToolResult:
+        start_time = time.perf_counter()
+        try:
+            args = ExploreGraphNeighborhoodInput.model_validate(arguments)
+            col_uuid = _verify_graph_collection_access(context, args.collection_id)
+        except (ValidationError, InvalidToolArgumentError) as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="validation_error")
+        except AgentSecurityError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="unauthorized")
+        except ForbiddenError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="forbidden")
+        except DocumentNotFoundError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="not_found")
+
+        try:
+            subgraph = self._service.explore_multihop(
+                start_id=UUID(args.node_id),
+                start_type=args.node_type,
+                collection_id=col_uuid,
+                max_depth=min(args.max_depth or 1, 2),
+                max_nodes=min(args.max_nodes or 15, 25),
+                max_edges=min(args.max_edges or 30, 50),
+                direction=args.direction or "both",
+                relationship_types=args.relationship_types,
+                min_confidence=args.min_confidence,
+                include_unscored=False,
+            )
+            dur = (time.perf_counter() - start_time) * 1000
+
+            nodes_data = [
+                {
+                    "id": str(n.id),
+                    "node_type": n.node_type.value if hasattr(n.node_type, "value") else str(n.node_type),
+                    "name": n.name,
+                    "entity_type": n.entity_type,
+                    "description": getattr(n, "description", (n.metadata or {}).get("description") if getattr(n, "metadata", None) else None),
+                    "metadata": dict(n.metadata or {}),
+                }
+                for n in subgraph.nodes
+            ]
+            edges_data = [
+                {
+                    "id": str(e.id),
+                    "source_type": e.source_type.value if hasattr(e.source_type, "value") else str(e.source_type),
+                    "source_id": str(e.source_id),
+                    "target_type": e.target_type.value if hasattr(e.target_type, "value") else str(e.target_type),
+                    "target_id": str(e.target_id),
+                    "relationship_type": e.relationship_type,
+                    "confidence": e.confidence,
+                    "evidence_text": e.evidence_text,
+                    "chunk_id": str(e.chunk_id) if e.chunk_id else None,
+                    "paper_id": str(e.paper_id) if e.paper_id else None,
+                    "page_number": e.page_number,
+                    "extraction_method": e.extraction_method,
+                }
+                for e in subgraph.edges
+            ]
+
+            data = {
+                "seed_id": str(subgraph.seed_id),
+                "seed_type": subgraph.seed_type.value if hasattr(subgraph.seed_type, "value") else str(subgraph.seed_type),
+                "depth": subgraph.depth,
+                "nodes": nodes_data,
+                "edges": edges_data,
+                "is_truncated": subgraph.is_truncated,
+                "truncation_reason": subgraph.truncation_reason,
+            }
+            summary = (
+                f"Explored neighborhood around {args.node_type} '{args.node_id}': "
+                f"{len(nodes_data)} nodes, {len(edges_data)} edges (depth: {subgraph.depth}, "
+                f"truncated: {subgraph.is_truncated})."
+            )
+            return ToolResult.ok(
+                self.name,
+                data=data,
+                summary=summary,
+                evidence_labels=[],
+                duration_ms=dur,
+            )
+        except Exception as exc:
+            return ToolResult.failure(self.name, f"Neighborhood exploration failed: {type(exc).__name__}", error_type="execution_error")
+
+
+class FindGraphPathTool(AgentTool):
+    """Tool for finding multi-hop connecting relationship paths between two nodes."""
+
+    def __init__(self, traversal_service: Any) -> None:
+        if not callable(getattr(traversal_service, "find_paths", None)):
+            raise TypeError("traversal_service must provide find_paths")
+        self._service = traversal_service
+
+    @property
+    def name(self) -> str:
+        return "find_graph_path"
+
+    @property
+    def description(self) -> str:
+        return "Discover multi-hop connecting paths between two entities or papers within an authorized collection."
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return FindGraphPathInput.model_json_schema()
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = FindGraphPathInput.model_validate(arguments)
+            return parsed.model_dump(exclude_unset=True)
+        except ValidationError as exc:
+            raise InvalidToolArgumentError(str(exc)) from exc
+
+    def execute(self, arguments: dict[str, Any], context: AgentContext) -> ToolResult:
+        start_time = time.perf_counter()
+        try:
+            args = FindGraphPathInput.model_validate(arguments)
+            col_uuid = _verify_graph_collection_access(context, args.collection_id)
+        except (ValidationError, InvalidToolArgumentError) as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="validation_error")
+        except AgentSecurityError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="unauthorized")
+        except ForbiddenError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="forbidden")
+        except DocumentNotFoundError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="not_found")
+
+        try:
+            paths = self._service.find_paths(
+                source_id=UUID(args.source_id),
+                source_type=args.source_type,
+                target_id=UUID(args.target_id),
+                target_type=args.target_type,
+                collection_id=col_uuid,
+                max_depth=min(args.max_depth or 2, 3),
+                max_paths=min(args.max_paths or 2, 3),
+                direction=args.direction or "outgoing",
+                relationship_types=args.relationship_types,
+                min_confidence=args.min_confidence,
+                include_unscored=False,
+            )
+            dur = (time.perf_counter() - start_time) * 1000
+
+            paths_data = []
+            for p in paths:
+                nodes_data = [
+                    {
+                        "id": str(n.id),
+                        "node_type": n.node_type.value if hasattr(n.node_type, "value") else str(n.node_type),
+                        "name": n.name,
+                        "entity_type": n.entity_type,
+                    }
+                    for n in p.nodes
+                ]
+                edges_data = [
+                    {
+                        "id": str(e.id),
+                        "source_type": e.source_type.value if hasattr(e.source_type, "value") else str(e.source_type),
+                        "source_id": str(e.source_id),
+                        "target_type": e.target_type.value if hasattr(e.target_type, "value") else str(e.target_type),
+                        "target_id": str(e.target_id),
+                        "relationship_type": e.relationship_type,
+                        "confidence": e.confidence,
+                        "evidence_text": e.evidence_text,
+                        "chunk_id": str(e.chunk_id) if e.chunk_id else None,
+                        "paper_id": str(e.paper_id) if e.paper_id else None,
+                        "page_number": e.page_number,
+                    }
+                    for e in p.edges
+                ]
+
+                paths_data.append(
+                    {
+                        "hops": getattr(p, "hops", getattr(p, "length", len(p.edges))),
+                        "length": getattr(p, "length", getattr(p, "hops", len(p.edges))),
+                        "cumulative_confidence": getattr(p, "cumulative_confidence", getattr(p, "confidence_score", None)),
+                        "confidence_score": getattr(p, "confidence_score", getattr(p, "cumulative_confidence", None)),
+                        "nodes": nodes_data,
+                        "edges": edges_data,
+                    }
+                )
+
+            summary = (
+                f"Discovered {len(paths_data)} path(s) connecting {args.source_type} '{args.source_id}' "
+                f"to {args.target_type} '{args.target_id}'."
+            )
+            return ToolResult.ok(
+                self.name,
+                data=paths_data,
+                summary=summary,
+                evidence_labels=[],
+                duration_ms=dur,
+            )
+        except Exception as exc:
+            return ToolResult.failure(self.name, f"Path finding failed: {type(exc).__name__}", error_type="execution_error")
+
+
+class QueryGraphAnalyticsTool(AgentTool):
+    """Tool for querying collection-wide knowledge graph statistics, author collaboration networks, or connectivity metrics."""
+
+    def __init__(self, analytics_service: Any) -> None:
+        if (
+            not callable(getattr(analytics_service, "get_collection_analytics", None))
+            or not callable(getattr(analytics_service, "get_author_collaborations", None))
+            or not callable(getattr(analytics_service, "get_author_connectivity", None))
+            or not callable(getattr(analytics_service, "get_summary", None))
+        ):
+            raise TypeError("analytics_service must provide analytics methods")
+        self._service = analytics_service
+
+    @property
+    def name(self) -> str:
+        return "query_graph_analytics"
+
+    @property
+    def description(self) -> str:
+        return "Query collection-wide knowledge graph statistics, author collaboration networks, or connectivity metrics."
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return QueryGraphAnalyticsInput.model_json_schema()
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = QueryGraphAnalyticsInput.model_validate(arguments)
+            return parsed.model_dump(exclude_unset=True)
+        except ValidationError as exc:
+            raise InvalidToolArgumentError(str(exc)) from exc
+
+    def execute(self, arguments: dict[str, Any], context: AgentContext) -> ToolResult:
+        start_time = time.perf_counter()
+        try:
+            args = QueryGraphAnalyticsInput.model_validate(arguments)
+            col_uuid = _verify_graph_collection_access(context, args.collection_id)
+            if args.author_id is not None and args.query_type in ("overview", "summary"):
+                raise InvalidToolArgumentError(
+                    f"author_id filter is not supported for '{args.query_type}' query type; "
+                    "author_id is only valid for 'collaborations' and 'connectivity'."
+                )
+        except (ValidationError, InvalidToolArgumentError) as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="validation_error")
+        except AgentSecurityError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="unauthorized")
+        except ForbiddenError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="forbidden")
+        except DocumentNotFoundError as exc:
+            return ToolResult.failure(self.name, str(exc), error_type="not_found")
+
+        try:
+            top_n = min(args.top_n or 5, 15)
+            author_uuid = UUID(args.author_id) if args.author_id else None
+
+            if args.query_type == "overview":
+                res = self._service.get_collection_analytics(
+                    collection_id=col_uuid,
+                    top_collaborations_limit=top_n,
+                    author_connectivity_limit=top_n,
+                    min_confidence=args.min_confidence,
+                    include_unscored=args.include_unscored,
+                )
+                data = {
+                    "collection_id": str(res.collection_id),
+                    "summary": {
+                        "total_entities": res.summary.total_entities,
+                        "total_relationships": res.summary.total_relationships,
+                        "entity_counts_by_type": dict(res.summary.entity_counts_by_type),
+                        "relationship_counts_by_type": dict(res.summary.relationship_counts_by_type),
+                    },
+                    "entity_distribution": [
+                        {"entity_type": d.entity_type, "count": d.count}
+                        for d in res.entity_distribution
+                    ],
+                    "relationship_distribution": [
+                        {"relationship_type": d.relationship_type, "count": d.count}
+                        for d in res.relationship_distribution
+                    ],
+                    "top_collaborations": [
+                        {
+                            "author_id": str(c.author_id),
+                            "author_name": c.author_name,
+                            "collaborator_id": str(c.collaborator_id),
+                            "collaborator_name": c.collaborator_name,
+                            "collaboration_count": c.collaboration_count,
+                            "shared_paper_ids": [str(p) for p in c.shared_paper_ids],
+                        }
+                        for c in res.top_collaborations
+                    ],
+                    "author_connectivity": [
+                        {
+                            "author_id": str(m.author_id),
+                            "author_name": m.author_name,
+                            "paper_count": m.paper_count,
+                            "collaborator_count": getattr(m, "collaborator_count", getattr(m, "coauthor_count", 0)),
+                            "total_collaborations": getattr(m, "total_collaborations", getattr(m, "total_degree", 0)),
+                            "coauthor_count": getattr(m, "collaborator_count", getattr(m, "coauthor_count", 0)),
+                            "total_degree": getattr(m, "total_collaborations", getattr(m, "total_degree", 0)),
+                        }
+                        for m in res.author_connectivity
+                    ],
+                }
+                summary = (
+                    f"Collection graph overview: {res.summary.total_entities} entities, "
+                    f"{res.summary.total_relationships} relationships across {len(res.entity_distribution)} entity types."
+                )
+
+            elif args.query_type == "summary":
+                s = self._service.get_summary(collection_id=col_uuid)
+                data = {
+                    "collection_id": str(s.collection_id),
+                    "total_entities": s.total_entities,
+                    "total_relationships": s.total_relationships,
+                    "entity_counts_by_type": dict(s.entity_counts_by_type),
+                    "relationship_counts_by_type": dict(s.relationship_counts_by_type),
+                }
+                summary = f"Collection graph summary: {s.total_entities} entities, {s.total_relationships} relationships."
+
+            elif args.query_type == "collaborations":
+                collabs = self._service.get_author_collaborations(
+                    collection_id=col_uuid,
+                    author_id=author_uuid,
+                    min_shared_papers=1,
+                    min_confidence=args.min_confidence,
+                    include_unscored=args.include_unscored,
+                    limit=top_n,
+                )
+                data = [
+                    {
+                        "author_id": str(c.author_id),
+                        "author_name": c.author_name,
+                        "collaborator_id": str(c.collaborator_id),
+                        "collaborator_name": c.collaborator_name,
+                        "collaboration_count": c.collaboration_count,
+                        "shared_paper_ids": [str(p) for p in c.shared_paper_ids],
+                    }
+                    for c in collabs
+                ]
+                summary = f"Retrieved {len(data)} author collaboration pairs (top_n={top_n})."
+
+            elif args.query_type == "connectivity":
+                author_ids = [author_uuid] if author_uuid else None
+                conn = self._service.get_author_connectivity(
+                    collection_id=col_uuid,
+                    author_ids=author_ids,
+                    min_confidence=args.min_confidence,
+                    include_unscored=args.include_unscored,
+                    limit=top_n,
+                )
+                data = [
+                    {
+                        "author_id": str(m.author_id),
+                        "author_name": m.author_name,
+                        "paper_count": m.paper_count,
+                        "collaborator_count": getattr(m, "collaborator_count", getattr(m, "coauthor_count", 0)),
+                        "total_collaborations": getattr(m, "total_collaborations", getattr(m, "total_degree", 0)),
+                        "coauthor_count": getattr(m, "collaborator_count", getattr(m, "coauthor_count", 0)),
+                        "total_degree": getattr(m, "total_collaborations", getattr(m, "total_degree", 0)),
+                    }
+                    for m in conn
+                ]
+                summary = f"Retrieved {len(data)} author connectivity metrics (top_n={top_n})."
+            else:
+                return ToolResult.failure(self.name, f"Unsupported query_type '{args.query_type}'.", error_type="validation_error")
+
+            dur = (time.perf_counter() - start_time) * 1000
+            return ToolResult.ok(self.name, data=data, summary=summary, duration_ms=dur)
+        except Exception as exc:
+            return ToolResult.failure(self.name, f"Analytics query failed: {type(exc).__name__}", error_type="execution_error")
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry
 # ---------------------------------------------------------------------------
 
@@ -837,8 +1583,11 @@ def create_default_tool_registry(
     trend_service: Any = None,
     verifier: Any = None,
     session_factory: Any = None,
+    graph_entity_repository: Any = None,
+    graph_traversal_service: Any = None,
+    graph_analytics_service: Any = None,
 ) -> ToolRegistry:
-    """Factory creating a populated ToolRegistry with all available research domain tools."""
+    """Factory creating a populated ToolRegistry with all available research and knowledge graph domain tools."""
     registry = ToolRegistry()
 
     if query_service is not None:
@@ -854,5 +1603,42 @@ def create_default_tool_registry(
         registry.register(SynthesizeLiteratureTool(trend_service))
     if verifier is not None:
         registry.register(VerifyClaimTool(verifier, session_factory=session_factory))
+
+    # Knowledge Graph Tools (Stage 5 Step 4.2)
+    # 1. SearchGraphEntitiesTool: registered if session_factory or repository is provided
+    if session_factory is not None:
+        registry.register(SearchGraphEntitiesTool(session_factory=session_factory))
+    elif graph_entity_repository is not None:
+        registry.register(SearchGraphEntitiesTool(repository=graph_entity_repository))
+
+    # 2. Instantiate graph traversal and analytics services from session_factory if not explicitly injected
+    if graph_traversal_service is None and session_factory is not None:
+        try:
+            from nexora.graph.traversal import KnowledgeGraphTraversalService
+
+            graph_traversal_service = KnowledgeGraphTraversalService(session_factory=session_factory)
+        except Exception as exc:
+            raise InvalidConfigurationError(
+                f"Failed to initialize KnowledgeGraphTraversalService with provided session_factory: {exc}"
+            ) from exc
+
+    if graph_analytics_service is None and session_factory is not None:
+        try:
+            from nexora.graph.analytics_service import KnowledgeGraphAnalyticsService
+
+            graph_analytics_service = KnowledgeGraphAnalyticsService(session_factory=session_factory)
+        except Exception as exc:
+            raise InvalidConfigurationError(
+                f"Failed to initialize KnowledgeGraphAnalyticsService with provided session_factory: {exc}"
+            ) from exc
+
+    # 3. ExploreGraphNeighborhoodTool & FindGraphPathTool: registered if traversal service is available
+    if graph_traversal_service is not None:
+        registry.register(ExploreGraphNeighborhoodTool(graph_traversal_service))
+        registry.register(FindGraphPathTool(graph_traversal_service))
+
+    # 4. QueryGraphAnalyticsTool: registered if analytics service is available
+    if graph_analytics_service is not None:
+        registry.register(QueryGraphAnalyticsTool(graph_analytics_service))
 
     return registry

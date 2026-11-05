@@ -348,6 +348,9 @@ def build_tool_registry(
     trend_service: Any = None,
     verifier: Any = None,
     session_factory: Any = None,
+    graph_entity_repository: Any = None,
+    graph_traversal_service: Any = None,
+    graph_analytics_service: Any = None,
 ) -> Any:
     """Assemble default ToolRegistry using injected research and domain services."""
     from nexora.agents.tools import create_default_tool_registry
@@ -360,6 +363,9 @@ def build_tool_registry(
         trend_service=trend_service,
         verifier=verifier,
         session_factory=session_factory,
+        graph_entity_repository=graph_entity_repository,
+        graph_traversal_service=graph_traversal_service,
+        graph_analytics_service=graph_analytics_service,
     )
 
 
@@ -602,6 +608,9 @@ def build_http_app(
                 trend_service=trend_service,
                 verifier=verifier,
                 session_factory=session_factory,
+                graph_entity_repository=dependencies.get("graph_entity_repository"),
+                graph_traversal_service=dependencies.get("graph_traversal_service"),
+                graph_analytics_service=dependencies.get("graph_analytics_service"),
             )
 
     if planner_agent is None:
@@ -637,6 +646,8 @@ def build_http_app(
         tool_registry=tool_registry,
         orchestrator=orchestrator,
         planner_agent=planner_agent,
+        graph_traversal_service=dependencies.get("graph_traversal_service"),
+        graph_analytics_service=dependencies.get("graph_analytics_service"),
         session_factory=session_factory,
         vector_store=vector_store,
         vector_client=qdrant_client,
