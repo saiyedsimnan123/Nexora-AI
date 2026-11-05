@@ -736,7 +736,7 @@ class GraphRelationshipRepository(BaseRepository[GraphRelationship]):
         min_confidence: float | None = None,
         include_unscored: bool = True,
         offset: int = 0,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[AuthorPaperConnection]:
         """Aggregate connections between author graph entities and papers in an authorized collection.
 
@@ -757,8 +757,9 @@ class GraphRelationshipRepository(BaseRepository[GraphRelationship]):
 
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("offset must be a non-negative integer")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise ValueError("limit must be a positive integer")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError("limit must be a positive integer")
 
         clean_author_ids: list[UUID] = []
         if author_ids is not None:
@@ -906,8 +907,10 @@ class GraphRelationshipRepository(BaseRepository[GraphRelationship]):
                 combined.c.paper_id.asc(),
             )
             .offset(offset)
-            .limit(limit)
         )
+
+        if limit is not None:
+            final_stmt = final_stmt.limit(limit)
 
         rows = self._session.execute(final_stmt).all()
         return [
@@ -956,78 +959,196 @@ class GraphRelationshipRepository(BaseRepository[GraphRelationship]):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
 
-        # Fetch all distinct author-paper connections in this collection
-        connections = self.list_author_paper_connections(
-            collection_id=collection_id,
-            min_confidence=min_confidence,
-            include_unscored=include_unscored,
-            offset=0,
-            limit=50000,
+        # 1. Base authorship query: Standard (Paper -> Author)
+        stmt1 = (
+            select(
+                GraphEntity.id.label("author_id"),
+                GraphEntity.name.label("author_name"),
+                Paper.id.label("paper_id"),
+            )
+            .select_from(GraphRelationship)
+            .join(
+                Paper,
+                and_(
+                    Paper.id == GraphRelationship.source_paper_id,
+                    Paper.collection_id == collection_id,
+                ),
+            )
+            .join(
+                GraphEntity,
+                and_(
+                    GraphEntity.id == GraphRelationship.target_entity_id,
+                    GraphEntity.collection_id == collection_id,
+                    GraphEntity.entity_type == "author",
+                ),
+            )
+            .where(
+                GraphRelationship.collection_id == collection_id,
+                GraphRelationship.relationship_type == "authored_by",
+            )
         )
-        if not connections:
+
+        # 2. Base authorship query: Inverse (Author -> Paper)
+        stmt2 = (
+            select(
+                GraphEntity.id.label("author_id"),
+                GraphEntity.name.label("author_name"),
+                Paper.id.label("paper_id"),
+            )
+            .select_from(GraphRelationship)
+            .join(
+                Paper,
+                and_(
+                    Paper.id == GraphRelationship.target_paper_id,
+                    Paper.collection_id == collection_id,
+                ),
+            )
+            .join(
+                GraphEntity,
+                and_(
+                    GraphEntity.id == GraphRelationship.source_entity_id,
+                    GraphEntity.collection_id == collection_id,
+                    GraphEntity.entity_type == "author",
+                ),
+            )
+            .where(
+                GraphRelationship.collection_id == collection_id,
+                GraphRelationship.relationship_type == "authored_by",
+            )
+        )
+
+        # 3. Apply confidence threshold
+        if min_confidence is not None:
+            conf_val = float(min_confidence)
+            if include_unscored:
+                conf_filter = or_(
+                    GraphRelationship.confidence.is_(None),
+                    GraphRelationship.confidence >= conf_val,
+                )
+            else:
+                conf_filter = and_(
+                    GraphRelationship.confidence.is_not(None),
+                    GraphRelationship.confidence >= conf_val,
+                )
+            stmt1 = stmt1.where(conf_filter)
+            stmt2 = stmt2.where(conf_filter)
+
+        # Deduplicated (author_id, author_name, paper_id) subquery
+        ap = stmt1.union(stmt2).subquery("ap")
+        ap1 = ap.alias("ap1")
+        ap2 = ap.alias("ap2")
+
+        # 4. Group by author pair and aggregate collaboration count
+        base_collab = (
+            select(
+                ap1.c.author_id.label("author_id"),
+                ap1.c.author_name.label("author_name"),
+                ap2.c.author_id.label("collaborator_id"),
+                ap2.c.author_name.label("collaborator_name"),
+                func.count(func.distinct(ap1.c.paper_id)).label("collaboration_count"),
+            )
+            .select_from(ap1)
+            .join(ap2, ap1.c.paper_id == ap2.c.paper_id)
+        )
+
+        if author_id is not None:
+            base_collab = base_collab.where(
+                ap1.c.author_id == author_id,
+                ap2.c.author_id != author_id,
+            )
+        else:
+            base_collab = base_collab.where(
+                ap1.c.author_id < ap2.c.author_id,
+            )
+
+        base_collab = base_collab.group_by(
+            ap1.c.author_id,
+            ap1.c.author_name,
+            ap2.c.author_id,
+            ap2.c.author_name,
+        )
+        if min_shared_papers > 1:
+            base_collab = base_collab.having(
+                func.count(func.distinct(ap1.c.paper_id)) >= min_shared_papers
+            )
+
+        grouped_sub = base_collab.subquery("grouped_pairs")
+
+        # 5. Rank by collaboration count to include all boundary ties in a single query
+        ranked_sub = (
+            select(
+                grouped_sub.c.author_id,
+                grouped_sub.c.author_name,
+                grouped_sub.c.collaborator_id,
+                grouped_sub.c.collaborator_name,
+                grouped_sub.c.collaboration_count,
+                func.rank().over(order_by=grouped_sub.c.collaboration_count.desc()).label("collab_rank"),
+            )
+            .select_from(grouped_sub)
+            .subquery("ranked_pairs")
+        )
+
+        collab_stmt = (
+            select(
+                ranked_sub.c.author_id,
+                ranked_sub.c.author_name,
+                ranked_sub.c.collaborator_id,
+                ranked_sub.c.collaborator_name,
+                ranked_sub.c.collaboration_count,
+            )
+            .select_from(ranked_sub)
+            .where(ranked_sub.c.collab_rank <= limit)
+            .order_by(ranked_sub.c.collaboration_count.desc())
+        )
+
+        rows = self._session.execute(collab_stmt).all()
+        if not rows:
             return []
 
-        # Map paper_id -> list of (author_id, author_name)
-        paper_authors: dict[UUID, list[tuple[UUID, str]]] = {}
-        author_names: dict[UUID, str] = {}
-        for conn in connections:
-            author_names[conn.author_id] = conn.author_name
-            paper_authors.setdefault(conn.paper_id, []).append((conn.author_id, conn.author_name))
+        # Sort candidate rows in Python using exact previous ordering key:
+        # (-collaboration_count, author_name.lower(), collaborator_name.lower(), str(author_id), str(collaborator_id))
+        rows.sort(
+            key=lambda r: (
+                -r[4],            # -collaboration_count
+                r[1].lower(),     # author_name.lower()
+                r[3].lower(),     # collaborator_name.lower()
+                str(r[0]),        # str(author_id)
+                str(r[2]),        # str(collaborator_id)
+            )
+        )
+        top_rows = rows[:limit]
 
-        # Collect shared papers per pair
-        pair_shared_papers: dict[tuple[UUID, UUID], list[UUID]] = {}
+        # 6. Retrieve shared_paper_ids only for the selected top pairs
+        relevant_author_ids = list({r[0] for r in top_rows} | {r[2] for r in top_rows})
+        author_papers: dict[UUID, set[UUID]] = {}
+        batch_size = 500
+        for i in range(0, len(relevant_author_ids), batch_size):
+            batch_ids = relevant_author_ids[i : i + batch_size]
+            papers_query = (
+                select(ap.c.author_id, ap.c.paper_id)
+                .select_from(ap)
+                .where(ap.c.author_id.in_(batch_ids))
+            )
+            paper_rows = self._session.execute(papers_query).all()
+            for aid, pid in paper_rows:
+                author_papers.setdefault(aid, set()).add(pid)
 
-        for pid, authors in paper_authors.items():
-            if len(authors) < 2:
-                continue
-            unique_authors = list({a_id: a_name for a_id, a_name in authors}.items())
-            num_authors = len(unique_authors)
-            for i in range(num_authors):
-                for j in range(i + 1, num_authors):
-                    a1_id, a1_name = unique_authors[i]
-                    a2_id, a2_name = unique_authors[j]
-
-                    if author_id is not None:
-                        if a1_id == author_id:
-                            pair_key = (a1_id, a2_id)
-                        elif a2_id == author_id:
-                            pair_key = (a2_id, a1_id)
-                        else:
-                            continue
-                    else:
-                        pair_key = (a1_id, a2_id) if a1_id < a2_id else (a2_id, a1_id)
-
-                    pair_shared_papers.setdefault(pair_key, []).append(pid)
-
-        # Build records
         records: list[AuthorCollaborationRecord] = []
-        for (a1_id, a2_id), pids in pair_shared_papers.items():
-            unique_pids = sorted(set(pids))
-            if len(unique_pids) < min_shared_papers:
-                continue
+        for r in top_rows:
+            a1_id, a1_name, a2_id, a2_name, count = r
+            shared_pids = sorted(author_papers.get(a1_id, set()) & author_papers.get(a2_id, set()))
             records.append(
                 AuthorCollaborationRecord(
                     author_id=a1_id,
-                    author_name=author_names[a1_id],
+                    author_name=a1_name,
                     collaborator_id=a2_id,
-                    collaborator_name=author_names[a2_id],
-                    shared_paper_ids=unique_pids,
-                    collaboration_count=len(unique_pids),
+                    collaborator_name=a2_name,
+                    shared_paper_ids=shared_pids,
+                    collaboration_count=len(shared_pids),
                 )
             )
 
-        # Deterministic sorting:
-        # collaboration_count DESC, author_name ASC, collaborator_name ASC, author_id ASC, collaborator_id ASC
-        records.sort(
-            key=lambda r: (
-                -r.collaboration_count,
-                r.author_name.lower(),
-                r.collaborator_name.lower(),
-                str(r.author_id),
-                str(r.collaborator_id),
-            )
-        )
-        return records[:limit]
+        return records
 
     def get_author_connectivity_metrics(
         self,
@@ -1072,14 +1193,41 @@ class GraphRelationshipRepository(BaseRepository[GraphRelationship]):
         if not author_rows:
             return []
 
-        # 2. Fetch all author-paper connections for this collection
-        connections = self.list_author_paper_connections(
-            collection_id=collection_id,
-            min_confidence=min_confidence,
-            include_unscored=include_unscored,
-            offset=0,
-            limit=50000,
-        )
+        # 2. Fetch author-paper connections (scoped to relevant papers when author_ids are provided)
+        if clean_author_ids:
+            target_author_conns = self.list_author_paper_connections(
+                collection_id=collection_id,
+                author_ids=clean_author_ids,
+                min_confidence=min_confidence,
+                include_unscored=include_unscored,
+                offset=0,
+                limit=None,
+            )
+            if not target_author_conns:
+                connections = []
+            else:
+                relevant_paper_ids = list({c.paper_id for c in target_author_conns})
+                connections = []
+                batch_size = 500
+                for i in range(0, len(relevant_paper_ids), batch_size):
+                    batch_pids = relevant_paper_ids[i : i + batch_size]
+                    batch_conns = self.list_author_paper_connections(
+                        collection_id=collection_id,
+                        paper_ids=batch_pids,
+                        min_confidence=min_confidence,
+                        include_unscored=include_unscored,
+                        offset=0,
+                        limit=None,
+                    )
+                    connections.extend(batch_conns)
+        else:
+            connections = self.list_author_paper_connections(
+                collection_id=collection_id,
+                min_confidence=min_confidence,
+                include_unscored=include_unscored,
+                offset=0,
+                limit=None,
+            )
 
         # 3. Build lookup maps: author_id -> set of paper_ids, paper_id -> set of author_ids
         author_papers: dict[UUID, set[UUID]] = {}
