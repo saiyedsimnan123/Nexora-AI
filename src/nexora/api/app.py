@@ -1,5 +1,6 @@
 """FastAPI application factory and centralized error handling."""
 
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 import logging
@@ -251,10 +252,35 @@ def _run_shutdown_cleanup(app: FastAPI) -> None:
             app_logger.warning("Error running custom shutdown hook: %s", exc)
 
 
+def should_start_background_worker(environ: Mapping[str, str] | None = None) -> bool:
+    """Determine whether the continuous background worker thread should be started."""
+    env = os.environ if environ is None else environ
+    if env.get("VERCEL") == "1":
+        return False
+    val = env.get("ENABLE_BACKGROUND_WORKER", "").strip().lower()
+    if val in ("false", "0", "no"):
+        return False
+    return True
+
+
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
-    yield
-    _run_shutdown_cleanup(app)
+    worker = getattr(app.state, "graph_worker", None)
+    start_worker = should_start_background_worker()
+    if start_worker and worker is not None and hasattr(worker, "start"):
+        try:
+            worker.start()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to start graph_worker on app startup: %s", exc)
+    try:
+        yield
+    finally:
+        if start_worker and worker is not None and hasattr(worker, "stop"):
+            try:
+                worker.stop()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to stop graph_worker on app shutdown: %s", exc)
+        _run_shutdown_cleanup(app)
 
 
 def _resolve_docs_enabled(enable_docs: bool | None = None) -> bool:
@@ -287,6 +313,8 @@ def create_app(
     planner_agent: Any = None,
     graph_traversal_service: Any = None,
     graph_analytics_service: Any = None,
+    graph_extraction_service: Any = None,
+    graph_worker: Any = None,
     session_factory: Any = None,
     vector_store: Any = None,
     vector_client: Any = None,
@@ -364,6 +392,8 @@ def create_app(
     app.state.planner_agent = planner_agent
     app.state.graph_traversal_service = graph_traversal_service
     app.state.graph_analytics_service = graph_analytics_service
+    app.state.graph_extraction_service = graph_extraction_service
+    app.state.graph_worker = graph_worker
     app.state.session_factory = session_factory
     app.state.vector_store = vector_store
     app.state.vector_client = vector_client
@@ -430,6 +460,8 @@ def create_app(
 
             class _SPAMount(Mount):
                 def matches(self, scope: Any) -> tuple[Match, Any]:
+                    if scope.get("type") != "http":
+                        return Match.NONE, {}
                     path = scope.get("path", "")
                     if (
                         path.startswith("/api")
