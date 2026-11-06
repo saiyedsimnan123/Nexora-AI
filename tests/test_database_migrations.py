@@ -36,6 +36,7 @@ def test_migrations(tmp_path, monkeypatch):
         "api_keys",
         "graph_entities",
         "graph_relationships",
+        "graph_extraction_jobs",
     }
 
     for t in expected_tables:
@@ -109,6 +110,26 @@ def test_migrations(tmp_path, monkeypatch):
     assert any("ix_graph_entities_collection_id" in name for name in entity_index_names)
     assert any("ix_graph_entities_canonical_name" in name for name in entity_index_names)
     assert any("ix_graph_entities_entity_type" in name for name in entity_index_names)
+
+    cursor.execute("PRAGMA table_info(graph_extraction_jobs);")
+    job_columns = {r[1] for r in cursor.fetchall()}
+    assert "id" in job_columns
+    assert "collection_id" in job_columns
+    assert "paper_id" in job_columns
+    assert "document_id" in job_columns
+    assert "status" in job_columns
+    assert "metadata_extracted" in job_columns
+    assert "attempts" in job_columns
+    assert "max_attempts" in job_columns
+    assert "lease_expires_at" in job_columns
+    assert "claimed_at" in job_columns
+    assert "claimed_by" in job_columns
+
+    cursor.execute("PRAGMA index_list(graph_extraction_jobs);")
+    job_index_names = {r[1] for r in cursor.fetchall()}
+    assert any("ix_graph_jobs_claim" in name for name in job_index_names)
+    assert any("ix_graph_jobs_sweeper" in name for name in job_index_names)
+    assert any("uq_graph_jobs_active_paper" in name for name in job_index_names)
 
     conn.close()
 
@@ -245,17 +266,18 @@ def test_migration_preserves_existing_data(tmp_path, monkeypatch):
 
 
 def test_alembic_linear_history_and_revisions():
-    """Verify Alembic history forms a strict linear sequence with 044c24ad4c34 as head."""
+    """Verify Alembic history forms a strict linear sequence with 044c24ad4c35 as head."""
     from alembic.script import ScriptDirectory
 
     alembic_cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(alembic_cfg)
 
     heads = script.get_heads()
-    assert heads == ["044c24ad4c34"], f"Expected single head '044c24ad4c34', got {heads}"
+    assert heads == ["044c24ad4c35"], f"Expected single head '044c24ad4c35', got {heads}"
 
     revisions = [rev.revision for rev in script.walk_revisions()]
     assert revisions == [
+        "044c24ad4c35",
         "044c24ad4c34",
         "044c24ad4c33",
         "044c24ad4c32",

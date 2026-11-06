@@ -20,6 +20,10 @@ from nexora.database.models.graph_entity import (
     GraphEntityType,
     normalize_entity_name,
 )
+from nexora.database.models.graph_extraction_job import (
+    GraphExtractionJob,
+    GraphExtractionStatus,
+)
 from nexora.database.models.graph_relationship import (
     GraphEndpointType,
     GraphRelationship,
@@ -40,6 +44,8 @@ __all__ = [
     "GraphEndpointType",
     "GraphEntity",
     "GraphEntityType",
+    "GraphExtractionJob",
+    "GraphExtractionStatus",
     "GraphRelationship",
     "IndexingStatus",
     "NAMING_CONVENTION",

@@ -18,11 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime
+import logging
 import threading
 from typing import TYPE_CHECKING, Any, Sequence
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
+
+logger = logging.getLogger(__name__)
 
 from nexora.database.models.document import Document, IndexingStatus
 from nexora.database.models.document_chunk import DocumentChunkRecord
@@ -164,6 +167,8 @@ class IngestionResult:
     vector_ids: list[str]
     document: Document
     chunk_records: list[DocumentChunkRecord]
+    graph_job_id: UUID | None = None
+    graph_status: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "vector_ids", list(self.vector_ids))
@@ -183,6 +188,8 @@ class DocumentIngestionService:
         *,
         embedding_service: Any = None,
         session_factory: Any = None,
+        graph_extraction_service: Any = None,
+        graph_job_repository: Any = None,
     ) -> None:
         if persistence_service is None and session_factory is None:
             raise TypeError("Either persistence_service or session_factory must be provided")
@@ -211,6 +218,8 @@ class DocumentIngestionService:
         self._session_factory = session_factory
         self._vector_store = vector_store
         self._embedding_service = embedding_service
+        self._graph_service = graph_extraction_service
+        self._graph_job_repo = graph_job_repository
 
     def _persist_and_index_records(
         self,
@@ -502,6 +511,9 @@ class DocumentIngestionService:
                     )
                     session.commit()
 
+                graph_job_id, graph_status = self._enqueue_graph_job_if_applicable(
+                    paper_id, processed_document
+                )
                 return IngestionResult(
                     document_id=doc_id,
                     paper_id=paper_id,
@@ -510,6 +522,8 @@ class DocumentIngestionService:
                     vector_ids=vector_ids,
                     document=doc,
                     chunk_records=chunk_records,
+                    graph_job_id=graph_job_id,
+                    graph_status=graph_status,
                 )
 
             # Standard non-durable mode: atomic rollback on any failure
@@ -550,6 +564,9 @@ class DocumentIngestionService:
                 )
                 doc_id = doc.id
 
+            graph_job_id, graph_status = self._enqueue_graph_job_if_applicable(
+                paper_id, processed_document
+            )
             return IngestionResult(
                 document_id=doc_id,
                 paper_id=paper_id,
@@ -558,7 +575,116 @@ class DocumentIngestionService:
                 vector_ids=vector_ids,
                 document=doc,
                 chunk_records=chunk_records,
+                graph_job_id=graph_job_id,
+                graph_status=graph_status,
             )
+
+    def _enqueue_graph_job_if_applicable(
+        self,
+        paper_id: UUID,
+        processed_document: ProcessedDocument,
+    ) -> tuple[UUID | None, str | None]:
+        """Optionally extract deterministic metadata and enqueue a background graph job.
+
+        Guaranteed fail-soft: any error is logged and returns (None, None) so document
+        ingestion and vector indexing are never blocked or invalidated.
+        """
+        try:
+            from nexora.database.repository.graph_extraction_job import (
+                GraphExtractionJobRepository,
+            )
+            from nexora.database.repository.paper import PaperRepository
+            from nexora.database.session import database_transaction
+
+            if self._session_factory is not None:
+                with database_transaction(self._session_factory) as session:
+                    paper = PaperRepository(session).get_by_id(paper_id)
+                    if paper is None:
+                        return None, None
+                    collection_id = paper.collection_id
+                    metadata_extracted = False
+
+                    # Tier 1 extraction if graph service is configured
+                    if self._graph_service is not None:
+                        try:
+                            authors_raw = processed_document.metadata.get("authors")
+                            authors_list = None
+                            if isinstance(authors_raw, (list, tuple)):
+                                authors_list = [str(a) for a in authors_raw if str(a).strip()]
+                            elif isinstance(authors_raw, str) and authors_raw.strip():
+                                authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
+
+                            self._graph_service.extract_metadata_deterministic(
+                                paper_id=paper_id,
+                                collection_id=collection_id,
+                                session=session,
+                                authors=authors_list,
+                            )
+                            metadata_extracted = True
+                        except Exception as meta_exc:
+                            logger.warning(
+                                "Tier 1 graph metadata extraction failed softly for paper %s: %s",
+                                paper_id,
+                                meta_exc,
+                            )
+                            metadata_extracted = False
+
+                    job_repo = GraphExtractionJobRepository(session)
+                    job, _ = job_repo.create_or_get_active_job(
+                        paper_id=paper_id,
+                        collection_id=collection_id,
+                        metadata_extracted=metadata_extracted,
+                    )
+                    status_str = job.status.value if hasattr(job.status, "value") else str(job.status)
+                    return job.id, status_str
+            elif self._persistence_service is not None and getattr(self._persistence_service, "_session", None) is not None:
+                session = self._persistence_service._session
+                with session.begin_nested():
+                    paper = PaperRepository(session).get_by_id(paper_id)
+                    if paper is None:
+                        return None, None
+                    collection_id = paper.collection_id
+                    metadata_extracted = False
+
+                    if self._graph_service is not None:
+                        try:
+                            authors_raw = processed_document.metadata.get("authors")
+                            authors_list = None
+                            if isinstance(authors_raw, (list, tuple)):
+                                authors_list = [str(a) for a in authors_raw if str(a).strip()]
+                            elif isinstance(authors_raw, str) and authors_raw.strip():
+                                authors_list = [a.strip() for a in authors_raw.split(",") if a.strip()]
+
+                            self._graph_service.extract_metadata_deterministic(
+                                paper_id=paper_id,
+                                collection_id=collection_id,
+                                session=session,
+                                authors=authors_list,
+                            )
+                            metadata_extracted = True
+                        except Exception as meta_exc:
+                            logger.warning(
+                                "Tier 1 graph metadata extraction failed softly for paper %s: %s",
+                                paper_id,
+                                meta_exc,
+                            )
+                            metadata_extracted = False
+
+                    job_repo = GraphExtractionJobRepository(session)
+                    job, _ = job_repo.create_or_get_active_job(
+                        paper_id=paper_id,
+                        collection_id=collection_id,
+                        metadata_extracted=metadata_extracted,
+                    )
+                    job_id = job.id
+                    job_status = job.status.value if hasattr(job.status, "value") else str(job.status)
+                    session.flush()
+                return job_id, job_status
+
+        except Exception as exc:
+            logger.warning("Graph extraction enqueueing soft-failed for paper %s: %s", paper_id, exc)
+
+        return None, None
 
     def process_and_ingest(
         self,

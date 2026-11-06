@@ -52,3 +52,30 @@ def database_transaction(session_factory: sessionmaker[Session]) -> Iterator[Ses
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def worker_database_transaction(session_factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Run a worker write block in one isolated transaction.
+
+    On SQLite, this establishes a connection with execution option
+    ``sqlite_immediate=True`` so the dialect listener issues ``BEGIN IMMEDIATE``
+    to acquire a write reservation upfront and avoid deadlocks. On other
+    databases (such as PostgreSQL), normal transaction semantics apply.
+
+    Commits on success. On any exception it rolls back and re-raises the
+    original exception unchanged. The Session is always closed. An invalid
+    factory is rejected before any database work.
+    """
+    session = create_database_session(session_factory)
+    try:
+        bind = session.get_bind()
+        if bind is not None and getattr(bind, "dialect", None) and bind.dialect.name == "sqlite":
+            session.connection(execution_options={"sqlite_immediate": True})
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()

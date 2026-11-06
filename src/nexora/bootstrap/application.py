@@ -128,6 +128,7 @@ def build_ingestion_service(
     vector_store: VectorStore | None = None,
     embedding_service: Any,
     qdrant_client: Any = None,
+    graph_extraction_service: Any = None,
 ) -> Any:
     """Assemble DocumentIngestionService using settings and injected dependencies.
 
@@ -154,6 +155,7 @@ def build_ingestion_service(
             vector_store=vector_store,
             embedding_service=embedding_service,
             session_factory=session_factory,
+            graph_extraction_service=graph_extraction_service,
         )
 
     if persistence_service is None:
@@ -171,7 +173,9 @@ def build_ingestion_service(
         persistence_service,
         vector_store=vector_store,
         embedding_service=embedding_service,
+        graph_extraction_service=graph_extraction_service,
     )
+
 
 
 def build_analysis_service(
@@ -429,6 +433,66 @@ def build_orchestrator(
     )
 
 
+def build_graph_extraction_service(
+    settings: AppSettings,
+    *,
+    llm_provider: Any = None,
+    session_factory: Any = None,
+    prompt_builder: Any = None,
+    max_evidence_characters: int | None = None,
+) -> Any:
+    """Assemble KnowledgeGraphExtractionService using settings and injected dependencies."""
+    from nexora.graph.service import KnowledgeGraphExtractionService
+
+    if not isinstance(settings, AppSettings):
+        raise ConfigurationError("settings must be an AppSettings")
+
+    llm_service = None
+    if getattr(settings, "llm", None) is not None:
+        if llm_provider is None:
+            llm_provider = create_llm_provider(settings.llm)
+        llm_service = LLMService(llm_provider)
+
+    max_chars = (
+        max_evidence_characters
+        if max_evidence_characters is not None
+        else getattr(settings, "max_evidence_characters", 40000)
+    )
+
+    return KnowledgeGraphExtractionService(
+        llm_service=llm_service,
+        session_factory=session_factory,
+        prompt_builder=prompt_builder,
+        max_evidence_characters=max_chars,
+    )
+
+
+def build_graph_worker(
+    settings: AppSettings,
+    *,
+    graph_service: Any,
+    session_factory: Any,
+    worker_token: str | None = None,
+    poll_interval_seconds: float = 2.0,
+    lease_duration_seconds: int = 300,
+    heartbeat_interval_seconds: float = 30.0,
+    max_attempts: int = 3,
+) -> Any:
+    """Assemble GraphExtractionWorker using settings and injected dependencies."""
+    from nexora.graph.worker import GraphExtractionWorker
+
+    return GraphExtractionWorker(
+        session_factory=session_factory,
+        graph_service=graph_service,
+        worker_token=worker_token,
+        poll_interval_seconds=poll_interval_seconds,
+        lease_duration_seconds=lease_duration_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        max_attempts=max_attempts,
+        batch_size=1,
+    )
+
+
 def build_http_app(
     settings: AppSettings,
     *,
@@ -479,6 +543,24 @@ def build_http_app(
         engine = create_database_engine(settings.database)
         session_factory = create_session_factory(engine)
 
+    graph_extraction_service = dependencies.get("graph_extraction_service")
+    if graph_extraction_service is None and session_factory is not None:
+        graph_extraction_service = build_graph_extraction_service(
+            settings,
+            llm_provider=llm_provider,
+            session_factory=session_factory,
+        )
+
+    graph_worker = dependencies.get("graph_worker")
+    if graph_worker is None and graph_extraction_service is not None and session_factory is not None:
+        enable_worker = getattr(settings, "enable_graph_worker", True)
+        if enable_worker:
+            graph_worker = build_graph_worker(
+                settings,
+                graph_service=graph_extraction_service,
+                session_factory=session_factory,
+            )
+
     if ingestion_service is None:
         session = dependencies.get("session")
         if session_factory is not None or persistence_service is not None or session is not None:
@@ -490,6 +572,7 @@ def build_http_app(
                 vector_store=vector_store,
                 embedding_service=embedding_service,
                 qdrant_client=qdrant_client,
+                graph_extraction_service=graph_extraction_service,
             )
 
     if analysis_service is None:
@@ -648,6 +731,8 @@ def build_http_app(
         planner_agent=planner_agent,
         graph_traversal_service=dependencies.get("graph_traversal_service"),
         graph_analytics_service=dependencies.get("graph_analytics_service"),
+        graph_extraction_service=graph_extraction_service,
+        graph_worker=graph_worker,
         session_factory=session_factory,
         vector_store=vector_store,
         vector_client=qdrant_client,

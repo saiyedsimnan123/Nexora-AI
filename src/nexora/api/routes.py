@@ -132,6 +132,33 @@ class DocumentIngestResponseBody(BaseModel):
         description="Total number of chunks indexed in the vector index.",
         examples=[12],
     )
+    graph_job_id: str | None = Field(
+        default=None,
+        description="UUID of the enqueued durable graph extraction job, if active.",
+    )
+    graph_status: str | None = Field(
+        default=None,
+        description="Status of the graph extraction job (e.g. pending, completed).",
+    )
+
+
+class GraphExtractionJobResponseBody(BaseModel):
+    """Wire format of durable graph extraction job details."""
+
+    model_config = ConfigDict(strict=False)
+
+    job_id: str
+    paper_id: str
+    collection_id: str
+    status: str
+    attempts: int
+    max_attempts: int
+    metadata_extracted: bool
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    claimed_by: str | None = None
+    lease_expires_at: str | None = None
 
 
 class PaperAnalysisRequestBody(BaseModel):
@@ -2998,3 +3025,187 @@ def get_author_collaborations_endpoint(
         collaborations=items,
         total_count=len(items),
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. Graph Extraction Jobs Endpoints
+# ---------------------------------------------------------------------------
+
+@v1_router.get(
+    "/graph/jobs/{job_id}",
+    response_model=GraphExtractionJobResponseBody,
+    status_code=200,
+    summary="Get status of a graph extraction job",
+    description="Returns lifecycle status, attempts, error details, and claim metadata for a graph extraction job.",
+    responses={
+        200: {"description": "Job details returned successfully.", "model": GraphExtractionJobResponseBody},
+        400: {"description": "Invalid job UUID format."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not have access to this collection's job."},
+        404: {"description": "Job not found."},
+        500: {"description": "Database or unexpected error."},
+    },
+)
+def get_graph_job_endpoint(
+    job_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> GraphExtractionJobResponseBody:
+    try:
+        job_uuid = UUID(str(job_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid job_id: must be a valid UUID.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured for graph jobs")
+
+    from nexora.database.repository.graph_extraction_job import GraphExtractionJobRepository
+
+    with session_factory() as session:
+        job_repo = GraphExtractionJobRepository(session)
+        job = job_repo.get_by_id(job_uuid)
+        if job is None:
+            raise RecordNotFoundError(f"Graph extraction job {job_uuid} not found.")
+
+        _verify_graph_collection_access(str(job.collection_id), request, current_user)
+
+        return GraphExtractionJobResponseBody(
+            job_id=str(job.id),
+            paper_id=str(job.paper_id),
+            collection_id=str(job.collection_id),
+            status=job.status.value if hasattr(job.status, "value") else str(job.status),
+            attempts=job.attempts,
+            max_attempts=job.max_attempts,
+            metadata_extracted=job.metadata_extracted,
+            error_message=job.last_error,
+            created_at=job.created_at.isoformat() if job.created_at else None,
+            updated_at=job.updated_at.isoformat() if job.updated_at else None,
+            claimed_by=job.claimed_by,
+            lease_expires_at=job.lease_expires_at.isoformat() if job.lease_expires_at else None,
+        )
+
+
+@v1_router.post(
+    "/graph/jobs/{job_id}/retry",
+    response_model=GraphExtractionJobResponseBody,
+    status_code=200,
+    summary="Manually retry a failed graph extraction job",
+    description="Resets a failed or stalled graph extraction job back to pending status for retry.",
+    responses={
+        200: {"description": "Job reset for retry successfully.", "model": GraphExtractionJobResponseBody},
+        400: {"description": "Invalid job UUID format or job cannot be retried."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not have access to this collection's job."},
+        404: {"description": "Job not found."},
+        500: {"description": "Database or unexpected error."},
+    },
+)
+def retry_graph_job_endpoint(
+    job_id: str,
+    request: Request,
+    current_user: Any = Depends(get_current_user),
+) -> GraphExtractionJobResponseBody:
+    try:
+        job_uuid = UUID(str(job_id).strip())
+    except (ValueError, AttributeError):
+        raise InvalidRequestError("Invalid job_id: must be a valid UUID.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured for graph jobs")
+
+    from nexora.database.repository.graph_extraction_job import GraphExtractionJobRepository
+
+    with session_factory() as session:
+        job_repo = GraphExtractionJobRepository(session)
+        job = job_repo.get_by_id(job_uuid)
+        if job is None:
+            raise RecordNotFoundError(f"Graph extraction job {job_uuid} not found.")
+
+        _verify_graph_collection_access(str(job.collection_id), request, current_user)
+
+        retried_job = job_repo.reset_job_for_retry(job_uuid)
+        session.commit()
+
+        return GraphExtractionJobResponseBody(
+            job_id=str(retried_job.id),
+            paper_id=str(retried_job.paper_id),
+            collection_id=str(retried_job.collection_id),
+            status=retried_job.status.value if hasattr(retried_job.status, "value") else str(retried_job.status),
+            attempts=retried_job.attempts,
+            max_attempts=retried_job.max_attempts,
+            metadata_extracted=retried_job.metadata_extracted,
+            error_message=retried_job.last_error,
+            created_at=retried_job.created_at.isoformat() if retried_job.created_at else None,
+            updated_at=retried_job.updated_at.isoformat() if retried_job.updated_at else None,
+            claimed_by=retried_job.claimed_by,
+            lease_expires_at=retried_job.lease_expires_at.isoformat() if retried_job.lease_expires_at else None,
+        )
+
+
+@v1_router.get(
+    "/collections/{collection_id}/graph/jobs",
+    response_model=list[GraphExtractionJobResponseBody],
+    status_code=200,
+    summary="List graph extraction jobs in a collection",
+    description="Returns graph extraction jobs within an authorized collection, optionally filtered by paper or status.",
+    responses={
+        200: {"description": "List of jobs returned successfully."},
+        400: {"description": "Invalid collection UUID format."},
+        401: {"description": "Authentication credentials required."},
+        403: {"description": "Caller does not have access to this collection."},
+        500: {"description": "Database or unexpected error."},
+    },
+)
+def list_graph_jobs_endpoint(
+    collection_id: str,
+    request: Request,
+    paper_id: str | None = Query(default=None, description="Optional paper UUID filter."),
+    status: str | None = Query(default=None, description="Optional status filter (e.g. pending, completed, failed)."),
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum jobs to return."),
+    current_user: Any = Depends(get_current_user),
+) -> list[GraphExtractionJobResponseBody]:
+    col_uuid, _ = _verify_graph_collection_access(collection_id, request, current_user)
+
+    target_paper_uuid: UUID | None = None
+    if paper_id is not None:
+        try:
+            target_paper_uuid = UUID(str(paper_id).strip())
+        except (ValueError, AttributeError):
+            raise InvalidRequestError("Invalid paper_id: must be a valid UUID.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured for graph jobs")
+
+    from nexora.database.models.graph_extraction_job import GraphExtractionJob
+    from sqlalchemy import select
+
+    with session_factory() as session:
+        stmt = select(GraphExtractionJob).where(GraphExtractionJob.collection_id == col_uuid)
+        if target_paper_uuid is not None:
+            stmt = stmt.where(GraphExtractionJob.paper_id == target_paper_uuid)
+        if status is not None and status.strip():
+            stmt = stmt.where(GraphExtractionJob.status == status.strip().lower())
+
+        stmt = stmt.order_by(GraphExtractionJob.created_at.desc()).limit(limit)
+        jobs = session.scalars(stmt).all()
+
+        return [
+            GraphExtractionJobResponseBody(
+                job_id=str(j.id),
+                paper_id=str(j.paper_id),
+                collection_id=str(j.collection_id),
+                status=j.status.value if hasattr(j.status, "value") else str(j.status),
+                attempts=j.attempts,
+                max_attempts=j.max_attempts,
+                metadata_extracted=j.metadata_extracted,
+                error_message=j.last_error,
+                created_at=j.created_at.isoformat() if j.created_at else None,
+                updated_at=j.updated_at.isoformat() if j.updated_at else None,
+                claimed_by=j.claimed_by,
+                lease_expires_at=j.lease_expires_at.isoformat() if j.lease_expires_at else None,
+            )
+            for j in jobs
+        ]

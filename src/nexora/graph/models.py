@@ -30,6 +30,10 @@ class InvalidExtractionPayloadError(GraphExtractionError):
     """Raised when an extraction payload fails schema validation."""
 
 
+class FencingTokenError(GraphExtractionError):
+    """Raised when a worker's claim fencing token or lease expires before persistence."""
+
+
 class ExtractedEntityCandidate(BaseModel):
     """A scientific entity candidate proposed by extraction."""
 

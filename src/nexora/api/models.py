@@ -87,6 +87,8 @@ class DocumentIngestResponse:
     paper_id: str
     chunks_count: int
     indexed_chunks_count: int
+    graph_job_id: str | None = None
+    graph_status: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.document_id, str) or not self.document_id.strip():
@@ -105,15 +107,56 @@ class DocumentIngestResponse:
             paper_id=str(result.paper_id),
             chunks_count=int(result.chunks_count),
             indexed_chunks_count=int(result.indexed_chunks_count),
+            graph_job_id=str(result.graph_job_id) if getattr(result, "graph_job_id", None) else None,
+            graph_status=str(result.graph_status) if getattr(result, "graph_status", None) else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready representation."""
-        return {
+        data: dict[str, Any] = {
             "document_id": self.document_id,
             "paper_id": self.paper_id,
             "chunks_count": self.chunks_count,
             "indexed_chunks_count": self.indexed_chunks_count,
+        }
+        if self.graph_job_id is not None:
+            data["graph_job_id"] = self.graph_job_id
+        if self.graph_status is not None:
+            data["graph_status"] = self.graph_status
+        return data
+
+
+@dataclass(frozen=True)
+class GraphExtractionJobResponse:
+    """Public representation of a durable graph extraction job."""
+
+    job_id: str
+    paper_id: str
+    collection_id: str
+    status: str
+    attempts: int
+    max_attempts: int
+    metadata_extracted: bool
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    claimed_by: str | None = None
+    lease_expires_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "paper_id": self.paper_id,
+            "collection_id": self.collection_id,
+            "status": self.status,
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
+            "metadata_extracted": self.metadata_extracted,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "claimed_by": self.claimed_by,
+            "lease_expires_at": self.lease_expires_at,
         }
 
 
@@ -1230,6 +1273,7 @@ __all__ = [
     "DiscoverySearchResponse",
     "DocumentIngestResponse",
     "GraphEntitiesRequest",
+    "GraphExtractionJobResponse",
     "GraphNeighborhoodRequest",
     "GraphPathsRequest",
     "PaperAnalysisRequest",

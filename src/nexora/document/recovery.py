@@ -419,3 +419,64 @@ class DocumentRecoveryService:
         claim_token = f"manual-reindex-{uuid4()}"
         with get_paper_ingestion_lock(paper_id):
             return self._execute_document_indexing(doc_id, paper_id, claim_token, attempts)
+
+    def reconcile_missing_graph_jobs(self, limit: int = 100) -> list[UUID]:
+        """Find completed documents that lack an active or completed graph extraction job,
+        and enqueue background jobs for them.
+
+        This guarantees that historical documents ingested prior to knowledge graph
+        support or documents whose enqueueing step was interrupted get backfilled.
+
+        Returns:
+            List of enqueued GraphExtractionJob UUIDs.
+        """
+        enqueued_ids: list[UUID] = []
+        with database_transaction(self._session_factory) as session:
+            from sqlalchemy import select
+            from nexora.database.models.document import Document
+            from nexora.database.models.graph_extraction_job import (
+                GraphExtractionJob,
+                GraphExtractionStatus,
+            )
+            from nexora.database.repository.graph_extraction_job import (
+                GraphExtractionJobRepository,
+            )
+            from nexora.database.repository.paper import PaperRepository
+
+            existing_job_paper_ids = (
+                select(GraphExtractionJob.paper_id)
+                .where(
+                    GraphExtractionJob.status.in_([
+                        GraphExtractionStatus.PENDING.value,
+                        GraphExtractionStatus.PROCESSING.value,
+                        GraphExtractionStatus.COMPLETED.value,
+                    ])
+                )
+                .distinct()
+            )
+
+            stmt = (
+                select(Document.paper_id)
+                .where(
+                    Document.indexing_status == IndexingStatus.COMPLETED.value,
+                    Document.paper_id.not_in(existing_job_paper_ids),
+                )
+                .distinct()
+                .limit(limit)
+            )
+            candidate_paper_ids = list(session.scalars(stmt).all())
+
+            paper_repo = PaperRepository(session)
+            job_repo = GraphExtractionJobRepository(session)
+
+            for pid in candidate_paper_ids:
+                paper = paper_repo.get_by_id(pid)
+                if paper is not None:
+                    job, _ = job_repo.create_or_get_active_job(
+                        paper_id=paper.id,
+                        collection_id=paper.collection_id,
+                        metadata_extracted=False,
+                    )
+                    enqueued_ids.append(job.id)
+
+        return enqueued_ids

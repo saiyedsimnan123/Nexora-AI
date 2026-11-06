@@ -205,6 +205,8 @@ class DiscoveryImportResult:
     indexed_chunks_count: int = 0
     doi: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    graph_job_id: str | None = None
+    graph_status: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.paper_id, str) or not self.paper_id.strip():
@@ -242,7 +244,7 @@ class DiscoveryImportResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize import result to a JSON-compatible dictionary."""
-        return {
+        data: dict[str, Any] = {
             "paper_id": self.paper_id,
             "collection_id": self.collection_id,
             "external_id": self.external_id,
@@ -255,3 +257,8 @@ class DiscoveryImportResult:
             "doi": self.doi,
             "metadata": dict(self.metadata),
         }
+        if self.graph_job_id is not None:
+            data["graph_job_id"] = self.graph_job_id
+        if self.graph_status is not None:
+            data["graph_status"] = self.graph_status
+        return data

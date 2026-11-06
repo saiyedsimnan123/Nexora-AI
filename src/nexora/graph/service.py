@@ -184,34 +184,15 @@ class KnowledgeGraphExtractionService:
 
             # Protect graph extraction in a nested savepoint
             with db_session.begin_nested():
-                # 1. Deterministic author extraction & linking
-                self._extract_authors(
-                    paper=paper,
+                self.extract_metadata_deterministic(
+                    paper_id=paper.id,
                     collection_id=collection_id,
-                    authors=authors,
                     session=db_session,
+                    authors=authors,
+                    citations=citations,
+                    analysis=analysis,
                     result=result,
                 )
-
-                # 2. Deterministic citation extraction & linking
-                if citations:
-                    self._extract_citations(
-                        paper=paper,
-                        collection_id=collection_id,
-                        citations=citations,
-                        session=db_session,
-                        result=result,
-                    )
-
-                # 3. Deterministic extraction from StructuredPaperAnalysis if provided
-                if analysis is not None:
-                    self._extract_from_structured_analysis(
-                        paper=paper,
-                        collection_id=collection_id,
-                        analysis=analysis,
-                        session=db_session,
-                        result=result,
-                    )
 
                 # 4. LLM-assisted extraction from document chunks if requested
                 if run_llm and self._llm is not None:
@@ -245,6 +226,86 @@ class KnowledgeGraphExtractionService:
         finally:
             if owns_session:
                 db_session.close()
+
+        return result
+
+    def extract_metadata_deterministic(
+        self,
+        paper_id: UUID,
+        *,
+        collection_id: UUID,
+        session: Session,
+        authors: Sequence[str] | None = None,
+        citations: Sequence[UUID | str] | None = None,
+        analysis: StructuredPaperAnalysis | None = None,
+        result: GraphExtractionResult | None = None,
+    ) -> GraphExtractionResult:
+        """Deterministically extract and persist author, citation, and analysis graph data."""
+        if not isinstance(paper_id, UUID):
+            raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
+        if not isinstance(collection_id, UUID):
+            raise TypeError(f"collection_id must be a UUID, got {type(collection_id).__name__}")
+
+        paper_repo = PaperRepository(session)
+        paper = paper_repo.get_by_id(paper_id)
+        if paper is None:
+            raise RecordNotFoundError(f"Paper with id {paper_id} not found.")
+        if paper.collection_id != collection_id:
+            raise ConstraintError(
+                f"Cross-collection extraction prohibited: Paper {paper_id} belongs to "
+                f"collection {paper.collection_id}, not requested collection {collection_id}."
+            )
+
+        if result is None:
+            result = GraphExtractionResult(
+                paper_id=paper_id,
+                collection_id=collection_id,
+            )
+
+        # Self-healing: if authors not provided, discover existing authors for paper
+        if authors is None:
+            paper_author_repo = PaperAuthorRepository(session)
+            author_repo = AuthorRepository(session)
+            pa_records = paper_author_repo.list_by_paper_id(paper.id)
+            if pa_records:
+                discovered_authors: list[str] = []
+                for pa in pa_records:
+                    a = author_repo.get_by_id(pa.author_id)
+                    if a and a.name and a.name not in discovered_authors:
+                        discovered_authors.append(a.name)
+                authors = discovered_authors
+
+        with session.begin_nested():
+            # 1. Deterministic author extraction & linking
+            self._extract_authors(
+                paper=paper,
+                collection_id=collection_id,
+                authors=authors,
+                session=session,
+                result=result,
+            )
+
+            # 2. Deterministic citation extraction & linking
+            if citations:
+                self._extract_citations(
+                    paper=paper,
+                    collection_id=collection_id,
+                    citations=citations,
+                    session=session,
+                    result=result,
+                )
+
+            # 3. Deterministic extraction from StructuredPaperAnalysis if provided
+            if analysis is not None:
+                self._extract_from_structured_analysis(
+                    paper=paper,
+                    collection_id=collection_id,
+                    analysis=analysis,
+                    session=session,
+                    result=result,
+                )
+
+            session.flush()
 
         return result
 
@@ -475,20 +536,34 @@ class KnowledgeGraphExtractionService:
                 result.relationships_reused += 1
             result.relationships.append(rel)
 
-    def _extract_from_chunks_with_llm(
+    def prepare_llm_evidence_context(
         self,
+        paper_id: UUID,
         *,
-        paper: Paper,
         collection_id: UUID,
         session: Session,
-        result: GraphExtractionResult,
-    ) -> None:
-        """Perform grounded LLM extraction over document chunks."""
+    ) -> tuple[Paper, EvidenceContext, list[dict[str, Any]]]:
+        """Prepare grounded EvidenceContext and prompt messages from paper chunks without holding locks."""
+        if not isinstance(paper_id, UUID):
+            raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
+        if not isinstance(collection_id, UUID):
+            raise TypeError(f"collection_id must be a UUID, got {type(collection_id).__name__}")
+
+        paper_repo = PaperRepository(session)
+        paper = paper_repo.get_by_id(paper_id)
+        if paper is None:
+            raise RecordNotFoundError(f"Paper with id {paper_id} not found.")
+        if paper.collection_id != collection_id:
+            raise ConstraintError(
+                f"Cross-collection extraction prohibited: Paper {paper_id} belongs to "
+                f"collection {paper.collection_id}, not requested collection {collection_id}."
+            )
+
         doc_repo = DocumentRepository(session)
         chunk_repo = DocumentChunkRepository(session)
         documents = doc_repo.list_by_paper_id(paper.id)
         if not documents:
-            return
+            return paper, EvidenceContext(query=paper.title or "", items=[]), []
 
         items: list[EvidenceItem] = []
         used_chars = 0
@@ -515,7 +590,7 @@ class KnowledgeGraphExtractionService:
                 )
 
         if not items:
-            return
+            return paper, EvidenceContext(query=paper.title or "", items=[]), []
 
         context = EvidenceContext(query=paper.title, items=items)
         messages = self._prompt_builder.build(
@@ -524,21 +599,56 @@ class KnowledgeGraphExtractionService:
             title=paper.title,
             abstract=paper.abstract,
         )
+        return paper, context, messages
 
-        response = self._llm.generate(messages, temperature=0.0)
-        cleaned_json = _clean_json_text(response.text)
-
+    def parse_llm_extraction_response(
+        self,
+        response_text: str,
+    ) -> ExtractedGraphPayload:
+        """Parse and validate LLM output into ExtractedGraphPayload."""
+        cleaned_json = _clean_json_text(response_text)
         try:
             raw_dict = json.loads(cleaned_json)
         except Exception as exc:
             raise InvalidExtractionPayloadError(f"LLM returned invalid JSON: {exc}") from exc
 
         try:
-            payload = ExtractedGraphPayload.model_validate(raw_dict)
+            return ExtractedGraphPayload.model_validate(raw_dict)
         except ValidationError as exc:
             raise InvalidExtractionPayloadError(
                 f"Extraction payload failed schema validation: {exc}"
             ) from exc
+
+    def persist_llm_extracted_payload(
+        self,
+        paper_id: UUID,
+        *,
+        collection_id: UUID,
+        session: Session,
+        payload: ExtractedGraphPayload,
+        context: EvidenceContext,
+        result: GraphExtractionResult | None = None,
+    ) -> GraphExtractionResult:
+        """Persist entities and relationships from parsed LLM payload inside a transaction."""
+        if not isinstance(paper_id, UUID):
+            raise TypeError(f"paper_id must be a UUID, got {type(paper_id).__name__}")
+        if not isinstance(collection_id, UUID):
+            raise TypeError(f"collection_id must be a UUID, got {type(collection_id).__name__}")
+
+        paper = PaperRepository(session).get_by_id(paper_id)
+        if paper is None:
+            raise RecordNotFoundError(f"Paper with id {paper_id} not found.")
+        if paper.collection_id != collection_id:
+            raise ConstraintError(
+                f"Cross-collection extraction prohibited: Paper {paper_id} belongs to "
+                f"collection {paper.collection_id}, not requested collection {collection_id}."
+            )
+
+        if result is None:
+            result = GraphExtractionResult(
+                paper_id=paper_id,
+                collection_id=collection_id,
+            )
 
         ent_repo = GraphEntityRepository(session)
         rel_repo = GraphRelationshipRepository(session)
@@ -662,3 +772,31 @@ class KnowledgeGraphExtractionService:
             else:
                 result.relationships_reused += 1
             result.relationships.append(rel)
+
+        return result
+
+    def _extract_from_chunks_with_llm(
+        self,
+        *,
+        paper: Paper,
+        collection_id: UUID,
+        session: Session,
+        result: GraphExtractionResult,
+    ) -> None:
+        """Perform grounded LLM extraction over document chunks."""
+        _, context, messages = self.prepare_llm_evidence_context(
+            paper.id, collection_id=collection_id, session=session
+        )
+        if not messages:
+            return
+
+        response = self._llm.generate(messages, temperature=0.0)
+        payload = self.parse_llm_extraction_response(response.text)
+        self.persist_llm_extracted_payload(
+            paper.id,
+            collection_id=collection_id,
+            session=session,
+            payload=payload,
+            context=context,
+            result=result,
+        )

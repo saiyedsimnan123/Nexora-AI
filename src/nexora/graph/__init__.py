@@ -18,6 +18,7 @@ from nexora.graph.models import (
     ExtractedEntityCandidate,
     ExtractedGraphPayload,
     ExtractedRelationshipCandidate,
+    FencingTokenError,
     GraphExtractionError,
     GraphExtractionResult,
     InvalidExtractionPayloadError,
@@ -34,6 +35,7 @@ from nexora.graph.traversal_models import (
     GraphPath,
     GraphSubgraph,
 )
+from nexora.graph.worker import GraphExtractionWorker, KnowledgeGraphWorker
 
 __all__ = [
     "AuthorCollaborationRecord",
@@ -45,11 +47,13 @@ __all__ = [
     "ExtractedEntityCandidate",
     "ExtractedGraphPayload",
     "ExtractedRelationshipCandidate",
+    "FencingTokenError",
     "GRAPH_EXTRACTION_SYSTEM_INSTRUCTION",
     "GraphEdge",
     "GraphExtractionError",
     "GraphExtractionPromptBuilder",
     "GraphExtractionResult",
+    "GraphExtractionWorker",
     "GraphNode",
     "GraphPath",
     "GraphSubgraph",
@@ -57,5 +61,6 @@ __all__ = [
     "KnowledgeGraphAnalyticsService",
     "KnowledgeGraphExtractionService",
     "KnowledgeGraphTraversalService",
+    "KnowledgeGraphWorker",
     "RelationshipTypeCount",
 ]

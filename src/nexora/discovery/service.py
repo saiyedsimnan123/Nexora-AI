@@ -21,10 +21,12 @@ from nexora.api.errors import (
     InvalidRequestError,
 )
 from nexora.database.models.document import IndexingStatus
+from nexora.database.repository.author import AuthorRepository
 from nexora.database.repository.collection import CollectionRepository
 from nexora.database.repository.document import DocumentRepository
 from nexora.database.repository.document_chunk import DocumentChunkRepository
 from nexora.database.repository.paper import PaperRepository
+from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.discovery.arxiv import ArxivClient, normalize_and_validate_arxiv_id
 from nexora.discovery.downloader import SafePDFDownloader
 from nexora.discovery.errors import (
@@ -213,6 +215,10 @@ class DiscoveryService:
                     chunk_repo = DocumentChunkRepository(db_session)
                     chunks = chunk_repo.list_by_document_id(completed_doc.id)
                     chunk_count = len(chunks)
+                    from nexora.database.repository.graph_extraction_job import GraphExtractionJobRepository
+                    active_job = GraphExtractionJobRepository(db_session).get_active_by_paper_id(existing_paper.id)
+                    g_job_id = str(active_job.id) if active_job else None
+                    g_status = active_job.status.value if active_job else None
                     return DiscoveryImportResult(
                         paper_id=str(existing_paper.id),
                         collection_id=str(collection_uuid),
@@ -225,6 +231,8 @@ class DiscoveryService:
                         indexed_chunks_count=chunk_count,
                         doi=existing_paper.doi,
                         metadata=metadata.to_dict(),
+                        graph_job_id=g_job_id,
+                        graph_status=g_status,
                     )
 
             if self._ingestion_service is None:
@@ -249,6 +257,20 @@ class DiscoveryService:
                     external_id=metadata.external_id,
                     publication_date=metadata.publication_date,
                 )
+
+                # Link authors if provided in metadata
+                if metadata.authors:
+                    author_repo = AuthorRepository(db_session)
+                    pa_repo = PaperAuthorRepository(db_session)
+                    for idx, auth_name in enumerate(metadata.authors):
+                        cleaned_auth = auth_name.strip() if isinstance(auth_name, str) else ""
+                        if cleaned_auth:
+                            auth = author_repo.get_by_name(cleaned_auth)
+                            if auth is None:
+                                auth = author_repo.create(name=cleaned_auth)
+                            if pa_repo.get_by_paper_and_author(paper.id, auth.id) is None:
+                                pa_repo.create(paper_id=paper.id, author_id=auth.id, author_order=idx + 1)
+
                 db_session.flush()
                 if owns_session:
                     db_session.commit()
@@ -298,6 +320,8 @@ class DiscoveryService:
                 doc_id = getattr(ingest_res, "document_id", None)
                 chunks_count = getattr(ingest_res, "chunks_count", 0)
                 indexed_count = getattr(ingest_res, "indexed_chunks_count", 0)
+                graph_job_id = getattr(ingest_res, "graph_job_id", None)
+                graph_status = getattr(ingest_res, "graph_status", None)
 
                 return DiscoveryImportResult(
                     paper_id=str(paper.id),
@@ -311,7 +335,10 @@ class DiscoveryService:
                     indexed_chunks_count=indexed_count,
                     doi=paper.doi,
                     metadata=metadata.to_dict(),
+                    graph_job_id=str(graph_job_id) if graph_job_id else None,
+                    graph_status=str(graph_status) if graph_status else None,
                 )
+
             finally:
                 downloaded.cleanup()
 

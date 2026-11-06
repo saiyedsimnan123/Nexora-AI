@@ -13,6 +13,7 @@ from nexora.database.session import (
     create_database_session,
     create_session_factory,
     database_transaction,
+    worker_database_transaction,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "create_database_session",
     "create_session_factory",
     "database_transaction",
+    "worker_database_transaction",
 ]
