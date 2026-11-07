@@ -133,7 +133,12 @@ def create_production_app(
         )
 
     # 2. Database requirement check for production auth/persistence
-    db_url = env.get("NEXORA_DATABASE_URL") or env.get("DATABASE_URL")
+    db_url = (
+        env.get("NEXORA_DATABASE_URL")
+        or env.get("DATABASE_URL")
+        or env.get("POSTGRES_URL")
+        or env.get("POSTGRES_PRISMA_URL")
+    )
     has_db = bool(db_url and db_url.strip())
     has_session_override = "session_factory" in overrides or "auth_service" in overrides
     if not has_db and not has_session_override:

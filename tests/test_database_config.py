@@ -216,3 +216,7 @@ def test_from_env_prefers_prefixed_pool_variables():
     assert c.pool_size == 20
     assert c.max_overflow == 8
 
+
+def test_from_env_fallback_to_postgres_url():
+    c = DatabaseConfig.from_env({"POSTGRES_URL": URL})
+    assert c.url == URL

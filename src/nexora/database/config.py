@@ -109,6 +109,10 @@ class DatabaseConfig:
         if url is None or not url.strip():
             url = env.get("DATABASE_URL")
         if url is None or not url.strip():
+            url = env.get("POSTGRES_URL")
+        if url is None or not url.strip():
+            url = env.get("POSTGRES_PRISMA_URL")
+        if url is None or not url.strip():
             raise DatabaseConfigurationError("NEXORA_DATABASE_URL is required")
 
         kwargs: dict[str, Any] = {}
