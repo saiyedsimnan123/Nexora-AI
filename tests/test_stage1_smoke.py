@@ -137,7 +137,7 @@ def test_smoke_vercel_subscriber_and_config():
     assert vercel_file.exists()
     vercel_data = json.loads(vercel_file.read_text(encoding="utf-8"))
     assert vercel_data["services"]["frontend"]["root"] == "frontend"
-    assert vercel_data["services"]["backend"]["entrypoint"] == "src/nexora/server.py:app"
+    assert vercel_data["services"]["backend"]["entrypoint"] == "src/nexora/server.py"
     assert "rewrites" in vercel_data
     assert "crons" not in vercel_data
 
