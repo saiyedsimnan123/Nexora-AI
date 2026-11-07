@@ -182,7 +182,12 @@ class AppSettings:
             enable_docs = _env_bool(env, "NEXORA_ENABLE_DOCS", default=False)
 
         db_config = None
-        db_url = env.get("NEXORA_DATABASE_URL") or env.get("DATABASE_URL")
+        db_url = (
+            env.get("NEXORA_DATABASE_URL")
+            or env.get("DATABASE_URL")
+            or env.get("POSTGRES_URL")
+            or env.get("POSTGRES_PRISMA_URL")
+        )
         if db_url and db_url.strip():
             from nexora.database.config import DatabaseConfig, DatabaseConfigurationError
 

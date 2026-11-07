@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
 from typing import Any
+
+# Ensure 'src' is on sys.path for queue consumer serverless invocations
+_SRC_DIR = str(Path(__file__).resolve().parent.parent.parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 from vercel.queue import subscribe
 

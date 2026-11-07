@@ -220,3 +220,9 @@ def test_from_env_prefers_prefixed_pool_variables():
 def test_from_env_fallback_to_postgres_url():
     c = DatabaseConfig.from_env({"POSTGRES_URL": URL})
     assert c.url == URL
+
+
+def test_from_env_normalizes_postgres_scheme():
+    neon_url = "postgres://user:pass@ep-xyz.us-east-1.aws.neon.tech/neondb"
+    c = DatabaseConfig.from_env({"NEXORA_DATABASE_URL": neon_url})
+    assert c.url == "postgresql://user:pass@ep-xyz.us-east-1.aws.neon.tech/neondb"

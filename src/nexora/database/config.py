@@ -115,6 +115,10 @@ class DatabaseConfig:
         if url is None or not url.strip():
             raise DatabaseConfigurationError("NEXORA_DATABASE_URL is required")
 
+        url_str = url.strip()
+        if url_str.startswith("postgres://"):
+            url_str = "postgresql://" + url_str[len("postgres://"):]
+
         kwargs: dict[str, Any] = {}
         for name, key, parse in (
             ("NEXORA_DATABASE_POOL_SIZE", "pool_size", _parse_int),
@@ -129,7 +133,7 @@ class DatabaseConfig:
                 raw = env.get(alt_name)
             if raw is not None and raw.strip():
                 kwargs[key] = parse(name, raw.strip())
-        return cls(url=url.strip(), **kwargs)
+        return cls(url=url_str, **kwargs)
 
 
 def _parse_int(name: str, raw: str) -> int:

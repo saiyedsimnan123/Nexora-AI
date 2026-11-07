@@ -154,6 +154,19 @@ def create_production_app(
             "Please configure NEXORA_DATABASE_URL (or DATABASE_URL) with a valid connection string."
         )
 
+    if has_db:
+        auto_migrate = env.get("NEXORA_AUTO_MIGRATE", "true").strip().lower() in ("true", "1", "yes")
+        if auto_migrate:
+            try:
+                from nexora.database.config import DatabaseConfig
+                from nexora.database.migrations.runner import apply_pending_migrations
+
+                norm_db_config = DatabaseConfig.from_env(env)
+                apply_pending_migrations(norm_db_config.url)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning("Database auto-migration note: %s", exc)
+
     # 3. Embedding provider & service construction
     embedding_service = overrides.get("embedding_service")
     emb_config: Any = None
