@@ -29,7 +29,7 @@ dependencies = [
 where = ["src"]
 
 [tool.vercel]
-entrypoint = "nexora.server:app"
+entrypoint = "src.nexora.server:app"
 
 [[tool.vercel.subscribers]]
 topic = "graph-extraction-jobs"

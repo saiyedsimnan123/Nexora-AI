@@ -8,7 +8,7 @@
     "backend": {
       "root": ".",
       "framework": "fastapi",
-      "entrypoint": "nexora.server:app"
+      "entrypoint": "src.nexora.server:app"
     }
   },
   "rewrites": [

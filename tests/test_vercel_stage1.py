@@ -105,7 +105,7 @@ def test_vercel_json_services_schema_structure():
     assert "backend" in data["services"]
     assert data["services"]["backend"]["root"] == "."
     assert data["services"]["backend"]["framework"] == "fastapi"
-    assert data["services"]["backend"]["entrypoint"] == "nexora.server:app"
+    assert data["services"]["backend"]["entrypoint"] == "src.nexora.server:app"
 
     # Rewrites check
     assert "rewrites" in data
@@ -127,7 +127,7 @@ def test_pyproject_toml_configuration():
 
     # Tool vercel check
     assert "tool" in data and "vercel" in data["tool"]
-    assert data["tool"]["vercel"]["entrypoint"] == "nexora.server:app"
+    assert data["tool"]["vercel"]["entrypoint"] == "src.nexora.server:app"
 
     # Subscribers check
     subscribers = data.get("tool", {}).get("vercel", {}).get("subscribers", [])

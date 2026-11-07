@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+# Ensure 'src' is on sys.path so absolute 'nexora' imports work when loaded via 'src.nexora.server'
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 from fastapi import FastAPI
 
