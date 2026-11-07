@@ -105,7 +105,7 @@ def test_vercel_json_services_schema_structure():
     assert "backend" in data["services"]
     assert data["services"]["backend"]["root"] == "."
     assert data["services"]["backend"]["framework"] == "fastapi"
-    assert data["services"]["backend"]["entrypoint"] == "src/nexora/server.py"
+    assert data["services"]["backend"]["entrypoint"] == "nexora.server:app"
 
     # Rewrites check
     assert "rewrites" in data
