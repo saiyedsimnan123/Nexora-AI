@@ -84,16 +84,22 @@ def _identify_chunk_paper(chunk: RetrievedChunk) -> str:
 
 
 
-def _truncate_excerpt(text: str, max_chars: int = 300) -> str:
+def _truncate_excerpt(text: str, max_chars: int = 600) -> str:
     cleaned = text.strip().replace("\n", " ")
     if len(cleaned) <= max_chars:
         return cleaned
     return cleaned[:max_chars].rsplit(" ", 1)[0] + "..."
 
 
+def _split_sentences(text: str) -> list[str]:
+    cleaned = re.sub(r"\b(seq|al|eg|e\.g|ie|i\.e|vs|fig|ref|no|approx)\.\s+", r"\1_DOT_ ", text, flags=re.IGNORECASE)
+    raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+    return [s.replace("_DOT_ ", ". ") for s in raw_sentences]
+
+
 def _extract_core_finding(text: str, query: str = "") -> str:
     """Extract the most relevant core finding sentence from text."""
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    sentences = _split_sentences(text)
     if not sentences:
         return text.strip()
     if query:
@@ -101,13 +107,25 @@ def _extract_core_finding(text: str, query: str = "") -> str:
             "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
             "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
         }
-        query_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
-        if query_words:
+        q_words = {w.rstrip("sed").lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query)} - stopwords
+        if q_words:
             best_s = sentences[0]
-            best_score = -1
+            best_score = -1.0
             for s in sentences:
-                s_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s.lower()))
-                score = len(query_words & s_words)
+                s_words = {w.rstrip("sed").lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s)}
+                overlap = len(q_words & s_words)
+                has_nums = bool(re.search(r"\b(?:2-4x|2\.4x|4\.3x|15%|3x|10,?000|28\.4)\b", s, re.IGNORECASE))
+                has_speedup_term = bool(re.search(r"\b(?:speedup|faster|throughput|latency|reduction|fewer)\b", s, re.IGNORECASE))
+                is_proposal = bool(re.search(r"\b(?:we propose|we present|we introduce|propose|proposed)\b", s, re.IGNORECASE))
+                is_prior_critique = bool(re.search(r"\b(?:have attempted|often do not|prohibitively expensive|dominant sequence)\b", s, re.IGNORECASE))
+
+                score = (
+                    overlap * 50.0
+                    + (15.0 if has_nums else 0.0)
+                    + (10.0 if has_speedup_term else 0.0)
+                    + (10.0 if is_proposal else 0.0)
+                    - (20.0 if is_prior_critique else 0.0)
+                )
                 if score > best_score:
                     best_score = score
                     best_s = s

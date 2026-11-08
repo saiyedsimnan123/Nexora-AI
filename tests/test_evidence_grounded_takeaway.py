@@ -689,3 +689,158 @@ def test_comparative_insufficient_evidence_when_target_unavailable():
     assert res.status == "insufficient_evidence"
     assert res.conclusion == "Insufficient evidence"
     assert "flashattention" in res.conclusion_reasoning.lower()
+
+
+# ---------------------------------------------------------------------------
+# 8. FlashAttention Citation Support & Strict Numerical Grounding Audit
+# ---------------------------------------------------------------------------
+
+def test_flashattention_speedup_requires_explicit_supporting_evidence():
+    """Verify that when retrieved FlashAttention evidence only covers IO complexity / tiling,
+    the takeaway does NOT claim a 15% or 3x speedup, and unestablished claims explicitly state
+    that specific quantitative speedups are not reported in the retrieved evidence.
+    """
+    s1_tiling_only = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_01",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.91,
+        text=(
+            "We propose FlashAttention, an IO-aware exact attention algorithm that uses tiling to reduce the number of memory "
+            "reads/writes between GPU high bandwidth memory (HBM) and GPU on-chip SRAM. Our main goal is to avoid reading and "
+            "writing the attention matrix to and from HBM. FlashAttention computes exact attention with O(N) memory accesses "
+            "instead of O(N^2)."
+        ),
+        text_excerpt="We propose FlashAttention, an IO-aware exact attention algorithm...",
+    )
+
+    query = "What speedup does FlashAttention achieve?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_tiling_only])
+
+    text = takeaway.takeaway_text
+    lowered = text.lower()
+
+    # Must NOT claim speedup numbers absent from the passage
+    assert "15%" not in text
+    assert "3x" not in lowered
+    assert "2-4x" not in text
+    assert "bert" not in lowered
+    assert "gpt" not in lowered
+
+    # Grounded in tiling/IO
+    assert "tiling" in lowered or "hbm" in lowered
+    assert "[E1]" in text
+
+    # Unestablished claims must state specific quantitative speedups are not reported
+    unest_str = " ".join(takeaway.unestablished_claims).lower()
+    assert "speedup" in unest_str
+    assert "not reported" in unest_str or "cannot be established" in unest_str
+
+
+def test_flashattention_speedup_attributed_to_exact_supporting_source():
+    """Verify that when empirical speedup evidence (Chunk 2) is present, the speedup claim
+    cites that exact source label and does not misattribute it to a different source.
+    """
+    s1_tiling = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_01",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.88,
+        text="We propose FlashAttention, which uses tiling to reduce memory reads/writes between GPU HBM and SRAM.",
+        text_excerpt="We propose FlashAttention, which uses tiling...",
+    )
+    s2_speedup = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_02",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.94,
+        text=(
+            "FlashAttention trains Transformers faster than existing baselines: 15% end-to-end wall-clock speedup "
+            "on BERT-large (seq. length 512) compared to the MLPerf 1.1 training speed record, 3x speedup on GPT-2 "
+            "(seq. length 1K), and 2.4x speedup on long-range arena (seq. length 1K-4K)."
+        ),
+        text_excerpt="FlashAttention trains Transformers faster than existing baselines: 15%...",
+    )
+
+    query = "What speedup does FlashAttention achieve on BERT-large and GPT-2?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_tiling, s2_speedup])
+
+    text = takeaway.takeaway_text
+    lowered = text.lower()
+
+    # Speedup claim must be cited to [E2]
+    assert "[E2]" in text
+    assert "15%" in text
+    assert "3x" in text
+    assert "bert-large" in lowered
+    assert "gpt-2" in lowered
+    assert "3x speedup on GPT-2 [E2]" in text or "[E2]" in text
+
+
+def test_no_unsupported_numerical_speedups_when_speedup_evidence_missing():
+    """Verify that absent numerical speedups are never hallucinated when text only has IO complexity."""
+    s_io = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_io",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.90,
+        text="We analyze the IO complexity of FlashAttention, showing that it requires fewer HBM accesses than standard attention.",
+        text_excerpt="We analyze the IO complexity...",
+    )
+
+    takeaway = generate_evidence_grounded_takeaway("What efficiency gains does FlashAttention provide?", [s_io])
+    text = takeaway.takeaway_text
+    lowered = text.lower()
+
+    for banned in ("15%", "3x", "2-4x", "2.4x", "4.3x", "mlperf", "bert-large"):
+        assert banned not in lowered
+
+    unest_combined = " ".join(takeaway.unestablished_claims).lower()
+    assert "speedup" in unest_combined
+    assert "not reported" in unest_combined or "cannot be established" in unest_combined
+
+
+def test_comparative_retrieval_lora_and_flashattention_both_supported():
+    """Verify that in the offline comparative pipeline, both LoRA (10,000x, 3x GPU memory, GPT-3 175B, Adam)
+    and FlashAttention (15% on BERT-large, 3x on GPT-2, IO-awareness) are preserved with distinct citations.
+    """
+    pipeline = create_offline_rag_pipeline()
+    query = "Compare how LoRA and FlashAttention improve efficiency in Transformer models. Explain their different approaches and reported results."
+    res = pipeline.answer(query)
+
+    assert res.status == "success"
+    assert res.is_grounded is True
+
+    # Check sources: both LoRA and FlashAttention chunks must be present
+    papers = {s.paper_title for s in res.sources}
+    assert any("LoRA" in p for p in papers)
+    assert any("FlashAttention" in p for p in papers)
+
+    # Check that FlashAttention speedup chunk is retrieved and cited
+    flash_sources = [s for s in res.sources if "FlashAttention" in s.paper_title]
+    speedup_sources = [s for s in flash_sources if "15%" in s.text or "3x" in s.text]
+    assert len(speedup_sources) >= 1
+    speedup_label = speedup_sources[0].label
+
+    # Takeaway text must cite both distinct papers
+    takeaway = res.takeaway
+    assert "LoRA" in takeaway
+    assert "FlashAttention" in takeaway
+    assert speedup_label in takeaway
+    assert "15%" in takeaway
+    assert "3x" in takeaway
+    assert "10,000" in takeaway or "10000" in takeaway
+
+    # Resource vs computational efficiency dimensions
+    takeaway_lower = takeaway.lower()
+    assert "resource efficiency" in takeaway_lower
+    assert "computational efficiency" in takeaway_lower
+    assert "io-awareness and wall-clock speedups" in takeaway_lower

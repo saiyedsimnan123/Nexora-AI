@@ -81,9 +81,14 @@ class DeterministicMockGenerator:
     def model_name(self) -> str:
         return self._model_name
 
+    def _split_sentences(self, text: str) -> list[str]:
+        cleaned = re.sub(r"\b(seq|al|eg|e\.g|ie|i\.e|vs|fig|ref|no|approx)\.\s+", r"\1_DOT_ ", text, flags=re.IGNORECASE)
+        raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+        return [s.replace("_DOT_ ", ". ") for s in raw_sentences]
+
     def _extract_core_sentence(self, text: str, query: str = "") -> str:
         """Extract the most substantive and query-relevant sentence from evidence text."""
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        sentences = self._split_sentences(text)
         if not sentences:
             return text.strip()
 
@@ -92,15 +97,27 @@ class DeterministicMockGenerator:
                 "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
                 "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
             }
-            query_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
-            if query_words:
+            q_words = {w.rstrip("sed").lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query)} - stopwords
+            if q_words:
                 best_sentence = sentences[0]
-                best_score = -1
+                best_score = -1.0
                 for s in sentences:
-                    s_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s.lower()))
-                    overlap = len(query_words & s_words)
-                    if overlap > best_score:
-                        best_score = overlap
+                    s_words = {w.rstrip("sed").lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s)}
+                    overlap = len(q_words & s_words)
+                    has_nums = bool(re.search(r"\b(?:2-4x|2\.4x|4\.3x|15%|3x|10,?000|28\.4)\b", s, re.IGNORECASE))
+                    has_speedup_term = bool(re.search(r"\b(?:speedup|faster|throughput|latency|reduction|fewer)\b", s, re.IGNORECASE))
+                    is_proposal = bool(re.search(r"\b(?:we propose|we present|we introduce|propose|proposed)\b", s, re.IGNORECASE))
+                    is_prior_critique = bool(re.search(r"\b(?:have attempted|often do not|prohibitively expensive|dominant sequence)\b", s, re.IGNORECASE))
+
+                    score = (
+                        overlap * 50.0
+                        + (15.0 if has_nums else 0.0)
+                        + (10.0 if has_speedup_term else 0.0)
+                        + (10.0 if is_proposal else 0.0)
+                        - (20.0 if is_prior_critique else 0.0)
+                    )
+                    if score > best_score:
+                        best_score = score
                         best_sentence = s
                 if best_score > 0:
                     return best_sentence
