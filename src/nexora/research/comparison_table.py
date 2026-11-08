@@ -179,6 +179,14 @@ UUID_TO_BENCHMARK: dict[str, str] = {
     data["uuid"]: key for key, data in BENCHMARK_PAPERS.items()
 }
 
+# Known aliases and client benchmark UUID mappings
+BENCHMARK_UUID_ALIASES: dict[str, str] = {
+    "541c4d4f-4d6b-592f-981f-7e9b04f3ce37": "arxiv_1706.03762",
+    "553e414c-112f-59ea-96b0-7d7d3d756b19": "arxiv_2106.09685",
+    "a1877e5e-6536-51f6-ae8e-ca92c6bf7be5": "arxiv_2205.14135",
+}
+UUID_TO_BENCHMARK.update(BENCHMARK_UUID_ALIASES)
+
 
 def normalize_paper_identifier(identifier: str) -> tuple[str, str]:
     """Normalize paper identifier to (canonical_uuid, lookup_key)."""
@@ -186,7 +194,8 @@ def normalize_paper_identifier(identifier: str) -> tuple[str, str]:
     if cleaned in BENCHMARK_PAPERS:
         return BENCHMARK_PAPERS[cleaned]["uuid"], cleaned
     if cleaned in UUID_TO_BENCHMARK:
-        return cleaned, UUID_TO_BENCHMARK[cleaned]
+        bm_key = UUID_TO_BENCHMARK[cleaned]
+        return BENCHMARK_PAPERS[bm_key]["uuid"], bm_key
     try:
         parsed_uuid = str(uuid.UUID(cleaned))
         return parsed_uuid, parsed_uuid

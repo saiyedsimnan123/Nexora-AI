@@ -308,8 +308,8 @@ class CrossPaperComparisonService:
                 from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
                 bm_key = UUID_TO_BENCHMARK.get(str(paper_uuid))
                 if bm_key and bm_key in BENCHMARK_PAPERS:
-                    from nexora.retrieval.dataset import get_pilot_benchmark_dataset
-                    ds = get_pilot_benchmark_dataset()
+                    from nexora.retrieval.dataset import get_default_research_dataset
+                    ds = get_default_research_dataset()
                     bm_data = BENCHMARK_PAPERS[bm_key]
                     items = []
                     for c in ds.chunks:
@@ -459,8 +459,8 @@ class CrossPaperComparisonService:
             from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
             bm_key = UUID_TO_BENCHMARK.get(paper_id_str) or (paper_id_str if paper_id_str in BENCHMARK_PAPERS else None)
             if bm_key and bm_key in BENCHMARK_PAPERS:
-                from nexora.retrieval.dataset import get_pilot_benchmark_dataset
-                ds = get_pilot_benchmark_dataset()
+                from nexora.retrieval.dataset import get_default_research_dataset
+                ds = get_default_research_dataset()
                 bm_data = BENCHMARK_PAPERS[bm_key]
                 for c in ds.chunks:
                     if c.get("paper_id") == bm_key:
@@ -484,14 +484,12 @@ class CrossPaperComparisonService:
         self, paper_id_str: str, query: str | None = None
     ) -> tuple[str | None, list[EvidenceItem]]:
         """Load ordered evidence items and title strictly scoped to paper_id_str."""
+        from nexora.research.comparison_table import normalize_paper_identifier
+        canonical_uuid_str, _ = normalize_paper_identifier(paper_id_str)
         try:
-            paper_uuid = UUID(paper_id_str)
+            paper_uuid = UUID(canonical_uuid_str)
         except (ValueError, AttributeError):
-            from nexora.research.comparison_table import BENCHMARK_PAPERS
-            if paper_id_str in BENCHMARK_PAPERS:
-                paper_uuid = UUID(BENCHMARK_PAPERS[paper_id_str]["uuid"])
-            else:
-                raise InvalidRequestError(f"Invalid paper_id {paper_id_str!r}: must be a valid UUID.")
+            raise InvalidRequestError(f"Invalid paper_id {paper_id_str!r}: must be a valid UUID.")
 
         if self._session_factory is not None:
             return self._load_evidence_from_database(paper_uuid)
@@ -520,15 +518,13 @@ class CrossPaperComparisonService:
         for idx, pid in enumerate(paper_ids):
             if not isinstance(pid, str) or not pid.strip():
                 raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
-            from nexora.research.comparison_table import BENCHMARK_PAPERS
-            if pid.strip() in BENCHMARK_PAPERS:
-                cleaned_ids.append(BENCHMARK_PAPERS[pid.strip()]["uuid"])
-                continue
+            from nexora.research.comparison_table import normalize_paper_identifier
+            canon_uuid, _ = normalize_paper_identifier(pid.strip())
             try:
-                UUID(pid.strip())
+                UUID(canon_uuid)
             except (ValueError, AttributeError):
                 raise InvalidRequestError(f"Invalid paper_id {pid!r}: must be a valid UUID.")
-            cleaned_ids.append(str(UUID(pid.strip())))
+            cleaned_ids.append(canon_uuid)
 
         if len(set(cleaned_ids)) != len(cleaned_ids):
             raise InvalidRequestError("paper_ids must be unique with no duplicates.")
@@ -608,7 +604,7 @@ class CrossPaperComparisonService:
             )
         except Exception as exc:
             raise ComparisonServiceError(
-                f"Cross-paper comparison LLM call failed ({type(exc).__name__})"
+                f"Cross-paper comparison LLM call failed ({type(exc).__name__}): {exc}"
             ) from exc
 
         # 4. Parse comparative JSON
@@ -617,7 +613,7 @@ class CrossPaperComparisonService:
             parsed = json.loads(cleaned)
         except Exception as exc:
             raise ComparisonServiceError(
-                f"Malformed comparison response; failed to parse JSON ({type(exc).__name__})"
+                f"Malformed comparison response; failed to parse JSON ({type(exc).__name__}): {exc}"
             ) from exc
 
         if not isinstance(parsed, dict):

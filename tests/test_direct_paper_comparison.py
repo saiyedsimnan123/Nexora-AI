@@ -221,3 +221,79 @@ def test_api_rag_query_structured_insights():
         "Insufficient evidence",
     )
     assert data["conclusion_reasoning"] is not None
+
+
+def test_api_research_compare_attention_and_lora_canonical_and_alias_uuids():
+    """Verify POST /api/v1/research/compare succeeds for Attention vs LoRA with both canonical and alias UUIDs."""
+    from nexora.research.analysis_service import PaperAnalysisService, PaperComparisonService
+    from nexora.llm.service import LLMService
+
+    llm_service = LLMService(MockLLMProvider())
+    analysis_service = PaperAnalysisService(llm_service)
+    comparison_service = PaperComparisonService(analysis_service, llm_service)
+
+    app = create_app(
+        MockResearchService(),
+        analysis_service=analysis_service,
+        comparison_service=comparison_service,
+        enforce_auth=False,
+    )
+    client = TestClient(app)
+
+    # 1. Canonical benchmark UUIDs
+    p1 = BENCHMARK_PAPERS["arxiv_1706.03762"]["uuid"]
+    p2 = BENCHMARK_PAPERS["arxiv_2106.09685"]["uuid"]
+
+    res_canonical = client.post("/api/v1/research/compare", json={"paper_ids": [p1, p2]})
+    assert res_canonical.status_code == 200
+    data_canonical = res_canonical.json()
+    assert "comparison_table" in data_canonical
+    assert len(data_canonical["comparison_table"]["rows"]) == 11
+    assert data_canonical["paper_titles"][p1] == "Attention Is All You Need"
+    assert data_canonical["paper_titles"][p2] == "LoRA: Low-Rank Adaptation of Large Language Models"
+
+    # 2. Legacy / preview alias UUIDs
+    alias1 = "541c4d4f-4d6b-592f-981f-7e9b04f3ce37"
+    alias2 = "553e414c-112f-59ea-96b0-7d7d3d756b19"
+
+    res_alias = client.post("/api/v1/research/compare", json={"paper_ids": [alias1, alias2]})
+    assert res_alias.status_code == 200
+    data_alias = res_alias.json()
+    assert "comparison_table" in data_alias
+    assert len(data_alias["comparison_table"]["rows"]) == 11
+    assert data_alias["paper_titles"][p1] == "Attention Is All You Need"
+    assert data_alias["paper_titles"][p2] == "LoRA: Low-Rank Adaptation of Large Language Models"
+
+
+def test_api_research_compare_error_propagation_and_detail():
+    """Verify that when comparison fails, HTTP 500 contains descriptive error details and is not masked."""
+    from nexora.research.analysis_service import PaperAnalysisService, PaperComparisonService
+    from nexora.llm.service import LLMService
+
+    class FailingLLMProvider(LLMProvider):
+        def generate(self, messages, **kwargs):
+            raise RuntimeError("Upstream model rate limit exceeded: try again in 20s")
+
+    llm_service = LLMService(FailingLLMProvider())
+    analysis_service = PaperAnalysisService(llm_service)
+    comparison_service = PaperComparisonService(analysis_service, llm_service)
+
+    app = create_app(
+        MockResearchService(),
+        analysis_service=analysis_service,
+        comparison_service=comparison_service,
+        enforce_auth=False,
+    )
+    client = TestClient(app)
+
+    p1 = BENCHMARK_PAPERS["arxiv_1706.03762"]["uuid"]
+    p2 = BENCHMARK_PAPERS["arxiv_2106.09685"]["uuid"]
+
+    res = client.post("/api/v1/research/compare", json={"paper_ids": [p1, p2]})
+    assert res.status_code == 500
+    data = res.json()
+    assert "error" in data
+    assert data["error"]["code"] == "comparison_failed"
+    # Ensure error message is useful and includes the upstream failure cause
+    assert "The paper comparison could not be completed" in data["error"]["message"]
+    assert "Upstream model rate limit exceeded" in data["error"]["message"]

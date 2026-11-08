@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitCompare,
   Search,
@@ -36,7 +36,7 @@ interface ComparePapersProps {
 // Curated benchmark papers for quick 1-click selection
 const QUICK_BENCHMARK_PAPERS = [
   {
-    id: '541c4d4f-4d6b-592f-981f-7e9b04f3ce37',
+    id: '454c9c86-28c0-5fa5-a15d-cbc6a2e72234',
     canonicalKey: 'arxiv_1706.03762',
     title: 'Attention Is All You Need',
     year: 2017,
@@ -44,7 +44,7 @@ const QUICK_BENCHMARK_PAPERS = [
     badge: 'Foundation (2017)'
   },
   {
-    id: '553e414c-112f-59ea-96b0-7d7d3d756b19',
+    id: 'f92484a7-8fa9-580d-a3a8-fb0807c11c30',
     canonicalKey: 'arxiv_2106.09685',
     title: 'LoRA: Low-Rank Adaptation of Large Language Models',
     year: 2021,
@@ -52,7 +52,7 @@ const QUICK_BENCHMARK_PAPERS = [
     badge: 'Adaptation (2021)'
   },
   {
-    id: 'a1877e5e-6536-51f6-ae8e-ca92c6bf7be5',
+    id: '2ef30728-fe34-53ba-9664-c16acaf3c364',
     canonicalKey: 'arxiv_2205.14135',
     title: 'FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness',
     year: 2022,
@@ -158,9 +158,14 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
+  const hasAttemptedRef = useRef<string | null>(null);
+
   // Handle adding a paper to comparison selection
   const handleSelectPaper = (paper: PaperItem) => {
     if (selectedPapers.some((p) => p.id === paper.id)) return;
+    setError(null);
+    setComparisonResult(null);
+    hasAttemptedRef.current = null;
     if (selectedPapers.length >= 2) {
       // Replace the second paper if already have 2 selected
       setSelectedPapers([selectedPapers[0], paper]);
@@ -169,13 +174,14 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
     }
     setSearchQuery('');
     setSearchResults([]);
-    setComparisonResult(null);
   };
 
   // Handle removing a paper from selection
   const handleRemovePaper = (id: string) => {
-    setSelectedPapers(selectedPapers.filter((p) => p.id !== id));
+    setError(null);
     setComparisonResult(null);
+    hasAttemptedRef.current = null;
+    setSelectedPapers(selectedPapers.filter((p) => p.id !== id));
   };
 
   // Run direct comparison
@@ -221,12 +227,18 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
     }
   };
 
-  // Auto-run comparison when two papers are selected on load
+  // Auto-run comparison when two papers are selected on load (guarded against re-trigger loop)
   useEffect(() => {
-    if (selectedPapers.length === 2 && !comparisonResult && !isComparing) {
-      handleExecuteComparison();
+    if (selectedPapers.length === 2) {
+      const pairKey = `${selectedPapers[0].id}:${selectedPapers[1].id}`;
+      if (hasAttemptedRef.current !== pairKey && !comparisonResult && !isComparing && !error) {
+        hasAttemptedRef.current = pairKey;
+        handleExecuteComparison();
+      }
+    } else {
+      hasAttemptedRef.current = null;
     }
-  }, [selectedPapers, comparisonResult, isComparing, handleExecuteComparison]);
+  }, [selectedPapers, comparisonResult, isComparing, error, handleExecuteComparison]);
 
   const p1 = selectedPapers[0];
   const p2 = selectedPapers[1];
@@ -497,9 +509,9 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
         {/* Execute Comparison Button */}
         <div className="flex items-center justify-between pt-2">
           {error && (
-            <div className="text-xs text-rose-400 flex items-center gap-1.5 font-sans">
-              <AlertCircle className="w-4 h-4" />
-              {error}
+            <div className="text-xs text-rose-300 flex items-center gap-2 font-sans bg-rose-500/15 border border-rose-500/30 px-3.5 py-2.5 rounded-xl max-w-xl">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{error}</span>
             </div>
           )}
           <div className="ml-auto">
@@ -520,7 +532,7 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
               ) : (
                 <>
                   <Sparkles className="w-4 h-4 text-slate-900" />
-                  <span>Run Comparison</span>
+                  <span>{error ? 'Retry Comparison' : 'Run Comparison'}</span>
                 </>
               )}
             </button>

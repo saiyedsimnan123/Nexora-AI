@@ -100,7 +100,9 @@ async def _analysis_failed(request: Request, exc: Exception) -> JSONResponse:
 
 
 async def _comparison_failed(request: Request, exc: Exception) -> JSONResponse:
-    return _error_response(500, "comparison_failed", "The paper comparison could not be completed.")
+    detail = str(exc).strip()
+    message = f"The paper comparison could not be completed: {detail}" if detail else "The paper comparison could not be completed."
+    return _error_response(500, "comparison_failed", message)
 
 
 async def _verification_failed(request: Request, exc: Exception) -> JSONResponse:

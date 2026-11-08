@@ -1420,9 +1420,9 @@ def compare_papers_endpoint(
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
-            from nexora.research.comparison_table import BENCHMARK_PAPERS
+            from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
             for pid in body.paper_ids:
-                if pid not in BENCHMARK_PAPERS:
+                if pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK:
                     auth_service.verify_paper_ownership(pid, current_user.id)
     req = PaperComparisonRequest(
         paper_ids=body.paper_ids,
@@ -1461,9 +1461,9 @@ def research_compare_endpoint(
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
-            from nexora.research.comparison_table import BENCHMARK_PAPERS
+            from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
             for pid in body.paper_ids:
-                if pid not in BENCHMARK_PAPERS:
+                if pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK:
                     auth_service.verify_paper_ownership(pid, current_user.id)
     req = ResearchCompareRequest(
         paper_ids=body.paper_ids,

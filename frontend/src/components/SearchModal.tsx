@@ -50,7 +50,7 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
       label: '[E1]',
       document_id: 'doc_dao2022_flashattention',
       chunk_id: 'chunk_dao_io_sram_04',
-      paper_id: 'a1877e5e-6536-51f6-ae8e-ca92c6bf7be5',
+      paper_id: '2ef30728-fe34-53ba-9664-c16acaf3c364',
       paper_title: 'FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (Dao et al., 2022)',
       score: 0.0320,
       text: 'We evaluate BERT-large on MLPerf 1.1... FlashAttention yields a 2.4x speedup over standard HuggingFace attention while computing exact attention without approximation. On GPT-2 models with sequence length up to 4K, FlashAttention achieves up to 4.3x speedup on A100 GPUs by optimizing SRAM read/write access.',
@@ -62,7 +62,7 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
       label: '[E2]',
       document_id: 'doc_vaswani2017_transformer',
       chunk_id: 'chunk_vaswani_complexity_05',
-      paper_id: '541c4d4f-4d6b-592f-981f-7e9b04f3ce37',
+      paper_id: '454c9c86-28c0-5fa5-a15d-cbc6a2e72234',
       paper_title: 'Attention Is All You Need (Vaswani et al., 2017)',
       score: 0.0315,
       text: 'Self-attention layers require computing an N by N attention matrix, yielding an O(N^2) computational and memory footprint per layer.',
@@ -74,7 +74,7 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
   cited_sources: [],
   evidence_by_paper: [
     {
-      paper_id: 'a1877e5e-6536-51f6-ae8e-ca92c6bf7be5',
+      paper_id: '2ef30728-fe34-53ba-9664-c16acaf3c364',
       paper_title: 'FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness',
       findings: [
         'FlashAttention achieves up to 4.3x speedup on A100 GPUs by optimizing SRAM read/write access without intermediate matrix materialization.'
@@ -86,7 +86,7 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
       sources: []
     },
     {
-      paper_id: '541c4d4f-4d6b-592f-981f-7e9b04f3ce37',
+      paper_id: '454c9c86-28c0-5fa5-a15d-cbc6a2e72234',
       paper_title: 'Attention Is All You Need',
       findings: [
         'Self-attention layers require computing an N by N attention matrix, yielding an O(N^2) computational and memory footprint per layer.'
