@@ -268,3 +268,167 @@ def test_pipeline_generates_grounded_takeaway_for_lora():
     d = response.to_dict()
     assert "takeaway" in d
     assert d["takeaway"] == response.takeaway
+
+
+# ---------------------------------------------------------------------------
+# 6. Critical Evidence Isolation & Leakage Prevention Tests
+# ---------------------------------------------------------------------------
+
+def test_lora_query_with_lora_and_flashattention_both_retrieved_excludes_flashattention():
+    """Observed production-preview bug regression test:
+
+    Research query:
+    'What parameter reduction and memory efficiency does LoRA provide compared with full fine-tuning?'
+
+    Even when FlashAttention chunks occupy [E1] and [E2] in retrieval context,
+    the takeaway MUST isolate LoRA evidence exclusively, cite [E3], and strictly
+    exclude FlashAttention.
+    """
+    s1_flash = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_01",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.92,
+        text="Transformers are slow and memory-hungry on long sequences, since the time and memory complexity of self-attention are quadratic in sequence length.",
+        text_excerpt="Transformers are slow and memory-hungry...",
+    )
+    s2_flash = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_2205.14135",
+        chunk_id="chunk_2205_14135_02",
+        paper_id="arxiv_2205.14135",
+        paper_title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        score=0.88,
+        text="We analyze the IO complexity of FlashAttention, showing that it requires fewer HBM accesses than standard attention.",
+        text_excerpt="We analyze the IO complexity...",
+    )
+    s3_lora = AttributedSource(
+        label="[E3]",
+        document_id="doc_arxiv_2106.09685",
+        chunk_id="chunk_2106_09685_02",
+        paper_id="arxiv_2106.09685",
+        paper_title="LoRA: Low-Rank Adaptation of Large Language Models",
+        score=0.81,
+        text="Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and the GPU memory requirement by 3 times.",
+        text_excerpt="Compared to GPT-3 175B fine-tuned with Adam...",
+    )
+
+    query = "What parameter reduction and memory efficiency does LoRA provide compared with full fine-tuning?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_flash, s2_flash, s3_lora])
+
+    expected_takeaway = (
+        "The authors of LoRA report that, compared with GPT-3 175B full fine-tuning using Adam, "
+        "LoRA reduces trainable parameters by 10,000 times and GPU memory requirements by 3 times [E3]. "
+        "These results demonstrate reported efficiency improvements under the stated comparison configuration. "
+        "They do not establish universal improvements across all models or tasks."
+    )
+
+    assert takeaway.takeaway_text == expected_takeaway
+    # Strict isolation: Zero FlashAttention leakage
+    assert "flashattention" not in takeaway.takeaway_text.lower()
+    assert "[E1]" not in takeaway.takeaway_text
+    assert "[E2]" not in takeaway.takeaway_text
+    assert "[E3]" in takeaway.takeaway_text
+
+
+def test_transformer_query_with_multiple_papers_retrieved():
+    """Verify Transformer query excludes LoRA and FlashAttention passages."""
+    s1_lora = _make_source("[E1]", "LoRA freezes pre-trained weights W0.", title="LoRA", paper_id="p-lora")
+    s2_flash = _make_source("[E2]", "FlashAttention tiles blocks in SRAM.", title="FlashAttention", paper_id="p-flash")
+    s3_trans = _make_source(
+        "[E3]",
+        "Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task.",
+        title="Attention Is All You Need",
+        paper_id="p-trans",
+    )
+
+    query = "What BLEU score does Attention Is All You Need achieve?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_lora, s2_flash, s3_trans])
+
+    assert "28.4 BLEU" in takeaway.takeaway_text
+    assert "[E3]" in takeaway.takeaway_text
+    assert "LoRA" not in takeaway.takeaway_text
+    assert "FlashAttention" not in takeaway.takeaway_text
+
+
+def test_irrelevant_distractor_evidence_strictly_excluded():
+    """Verify distractor evidence sharing superficial terms is filtered out."""
+    s1_distractor = AttributedSource(
+        label="[E1]",
+        document_id="doc_distractor",
+        chunk_id="chunk_distractor_01",
+        paper_id="p-distractor-2020",
+        paper_title="Biological and Hardware Near-Match Distractors",
+        score=0.99,
+        text="Biological Attention in Primate Vision: Studies visual saccades and selective attention in macaque visual cortex V1 and V4.",
+        text_excerpt="Biological Attention in Primate Vision...",
+    )
+    s2_lora = _make_source(
+        "[E2]",
+        "Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and the GPU memory requirement by 3 times.",
+        title="LoRA: Low-Rank Adaptation of Large Language Models",
+        paper_id="p-lora",
+    )
+
+    query = "What parameter reduction does LoRA achieve?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_distractor, s2_lora])
+
+    assert "10,000 times" in takeaway.takeaway_text
+    assert "[E2]" in takeaway.takeaway_text
+    assert "primate" not in takeaway.takeaway_text.lower()
+    assert "saccades" not in takeaway.takeaway_text.lower()
+
+
+def test_multiple_papers_in_comparative_query_maintain_isolated_boundaries():
+    """When query is explicitly comparative, each paper is represented separately with its own citation."""
+    s1_lora = _make_source(
+        "[E1]",
+        "Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and the GPU memory requirement by 3 times.",
+        title="LoRA: Low-Rank Adaptation of Large Language Models",
+        paper_id="p-lora",
+    )
+    s2_flash = _make_source(
+        "[E2]",
+        "Speedup Results: FlashAttention yields 2-4x wall-clock speedup on BERT and GPT-2 models while scaling to 64k sequences with strictly linear memory footprint relative to sequence length.",
+        title="FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+        paper_id="p-flash",
+    )
+
+    query = "Compare the efficiency of LoRA and FlashAttention"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_lora, s2_flash])
+
+    assert "The authors of LoRA" in takeaway.takeaway_text
+    assert "[E1]" in takeaway.takeaway_text
+    assert "The authors of FlashAttention" in takeaway.takeaway_text
+    assert "[E2]" in takeaway.takeaway_text
+    assert "universal" in takeaway.takeaway_text
+
+
+def test_citation_id_consistency_across_answer_and_takeaway():
+    """Verify original citation IDs are preserved without renumbering."""
+    s = _make_source(
+        "[E7]",
+        "Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times and the GPU memory requirement by 3 times.",
+    )
+    takeaway = generate_evidence_grounded_takeaway("How does LoRA reduce parameters?", [s])
+
+    assert "[E7]" in takeaway.takeaway_text
+    assert "[E1]" not in takeaway.takeaway_text
+
+
+def test_offline_pipeline_full_integration_excludes_leakage():
+    """Verify that full create_offline_rag_pipeline() executes the LoRA query with zero FlashAttention leakage."""
+    pipeline = create_offline_rag_pipeline()
+    res = pipeline.answer("What parameter reduction and memory efficiency does LoRA provide compared with full fine-tuning?")
+
+    assert res.status == "success"
+    # Takeaway must NOT contain FlashAttention
+    assert "flashattention" not in res.takeaway.lower()
+    assert "the authors of lora" in res.takeaway.lower()
+    assert "universal" in res.takeaway.lower()
+
+    # Evidence by paper must only contain LoRA
+    paper_titles = [p["paper_title"].lower() for p in res.evidence_by_paper]
+    assert all("flashattention" not in pt for pt in paper_titles)

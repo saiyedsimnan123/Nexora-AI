@@ -25,7 +25,10 @@ from nexora.rag.generator import (
     LLMAnswerGenerator,
 )
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
-from nexora.rag.takeaway import generate_evidence_grounded_takeaway
+from nexora.rag.takeaway import (
+    _filter_relevant_sources,
+    generate_evidence_grounded_takeaway,
+)
 from nexora.retrieval.bm25 import BM25Index
 from nexora.retrieval.dataset import (
     get_pilot_benchmark_dataset,
@@ -97,6 +100,8 @@ def _build_structured_research_insights(
     query: str,
     sources: list[AttributedSource],
     is_insufficient: bool,
+    *,
+    cited_sources: list[AttributedSource] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, dict[str, Any] | None, str, str]:
     """Build structured research insights: evidence by paper, comparison of findings, limitations, and conclusion."""
     if is_insufficient or not sources:
@@ -108,9 +113,14 @@ def _build_structured_research_insights(
             "The indexed research papers do not contain sufficient evidence to answer this question.",
         )
 
-    # 1. Group evidence strictly by individual paper to isolate excerpts and citations
+    # 1. Filter sources to only relevant papers/excerpts for strict evidence isolation
+    relevant_sources = _filter_relevant_sources(query, sources, cited_sources)
+    if not relevant_sources:
+        relevant_sources = sources
+
+    # 2. Group evidence strictly by individual paper to isolate excerpts and citations
     paper_groups: dict[str, dict[str, Any]] = {}
-    for src in sources:
+    for src in relevant_sources:
         key = src.paper_id or src.paper_title
         if key not in paper_groups:
             paper_groups[key] = {
@@ -132,7 +142,7 @@ def _build_structured_research_insights(
 
     evidence_by_paper = list(paper_groups.values())
 
-    # 2. Synthesize comparison of findings
+    # 3. Synthesize comparison of findings
     paper_titles = [p["paper_title"] for p in evidence_by_paper]
     agreements: list[str] = []
     differences: list[str] = []
@@ -163,8 +173,13 @@ def _build_structured_research_insights(
         relationships.append(f"All reported findings originate from {paper_titles[0]}.")
         interpretation.append("Empirical claims are directly supported by the retrieved document passages.")
 
-    # 3. Generate Evidence-Grounded Takeaway & Objective Metric Audit
-    takeaway_obj = generate_evidence_grounded_takeaway(query, sources, is_insufficient=is_insufficient)
+    # 4. Generate Evidence-Grounded Takeaway & Objective Metric Audit with strict isolation
+    takeaway_obj = generate_evidence_grounded_takeaway(
+        query,
+        sources,
+        cited_sources=cited_sources,
+        is_insufficient=is_insufficient,
+    )
 
     comparison_of_findings = {
         "agreements": agreements,
@@ -523,7 +538,12 @@ class RAGPipeline:
         is_grounded = True if is_insufficient else verification.is_fully_grounded
 
         evidence_by_paper, comp_findings, lim_conflicts, conclusion, conclusion_reasoning = (
-            _build_structured_research_insights(query, sources, is_insufficient=is_insufficient)
+            _build_structured_research_insights(
+                query,
+                sources,
+                is_insufficient=is_insufficient,
+                cited_sources=cited_sources,
+            )
         )
 
         return RAGResponse(
