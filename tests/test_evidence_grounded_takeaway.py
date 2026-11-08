@@ -432,3 +432,139 @@ def test_offline_pipeline_full_integration_excludes_leakage():
     # Evidence by paper must only contain LoRA
     paper_titles = [p["paper_title"].lower() for p in res.evidence_by_paper]
     assert all("flashattention" not in pt for pt in paper_titles)
+
+
+# ---------------------------------------------------------------------------
+# 7. Quantitative Finding Prioritization & Anti-Hallucination Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_lora_takeaway_prioritizes_quantitative_e3_over_motivation_e1():
+    """Regression test for E1 motivation repetition vs E3 quantitative findings:
+
+    When both the general motivation chunk [E1] and the quantitative findings chunk [E3]
+    are retrieved:
+    1. The takeaway directly answers the user's inquiry regarding parameter reduction and memory efficiency.
+    2. It includes both quantitative findings: 10,000x fewer trainable parameters and 3x lower GPU memory requirement.
+    3. It preserves comparison context: GPT-3 175B full fine-tuning with Adam.
+    4. It cites [E3] for both numerical findings and does NOT attribute them to [E1].
+    5. It does not repeat only the general motivation ('full fine-tuning becomes less feasible').
+    6. It does not claim unsupported throughput, latency, or accuracy improvements.
+    7. Single-paper evidence isolation is maintained.
+    """
+    s1_motivation = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2106.09685",
+        chunk_id="chunk_2106_09685_01",
+        paper_id="arxiv_2106.09685",
+        paper_title="LoRA: Low-Rank Adaptation of Large Language Models",
+        score=0.91,
+        text=(
+            "An important paradigm of natural language processing consists of large-scale pre-training on general domain data "
+            "and adaptation to particular tasks or domains. As we pre-train larger models, full fine-tuning, which retrains all model "
+            "parameters, becomes less feasible. Using GPT-3 175B as an example -- deploying independent instances of fine-tuned models, "
+            "each with 175B parameters, is prohibitively expensive. We propose Low-Rank Adaptation, or LoRA, which freezes the pre-trained "
+            "model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture, greatly "
+            "reducing the number of trainable parameters for downstream tasks."
+        ),
+        text_excerpt="An important paradigm of natural language processing...",
+    )
+    s3_quantitative = AttributedSource(
+        label="[E3]",
+        document_id="doc_arxiv_2106.09685",
+        chunk_id="chunk_2106_09685_02",
+        paper_id="arxiv_2106.09685",
+        paper_title="LoRA: Low-Rank Adaptation of Large Language Models",
+        score=0.82,
+        text=(
+            "Compared to GPT-3 175B fine-tuned with Adam, LoRA can reduce the number of trainable parameters by 10,000 times "
+            "and the GPU memory requirement by 3 times. LoRA performs on-par or better than fine-tuning in model quality on "
+            "RoBERTa, DeBERTa, GPT-2, and GPT-3, despite having fewer trainable parameters, a higher training throughput, and, "
+            "unlike adapters, no additional inference latency. We also provide an empirical investigation into rank-deficiency "
+            "in language model adaptation, which sheds light on the efficacy of LoRA."
+        ),
+        text_excerpt="Compared to GPT-3 175B fine-tuned with Adam...",
+    )
+
+    query = "What parameter reduction and memory efficiency does LoRA provide compared with full fine-tuning?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_motivation, s3_quantitative])
+
+    text = takeaway.takeaway_text
+    lowered = text.lower()
+
+    # 1. Directly answers inquiry
+    assert "the authors of lora report" in lowered
+
+    # 2. Both quantitative findings included
+    assert "10,000 times" in text or "10,000x" in text or "10000" in text
+    assert "3 times" in text or "3x" in text
+    assert "parameter" in lowered
+    assert "gpu memory" in lowered or "memory requirement" in lowered
+
+    # 3. Preserves comparison context
+    assert "gpt-3 175b" in lowered
+    assert "adam" in lowered
+
+    # 4. Attributed to [E3], not misattributed to [E1]
+    assert "[E3]" in text
+    # The primary quantitative claim in takeaway_text must cite [E3]
+    assert "3 times [E3]" in text or "requirements by 3 times [E3]" in text or "Adam, LoRA reduces trainable parameters by 10,000 times and GPU memory requirements by 3 times [E3]" in text
+
+    # 5. Does not merely repeat general motivation from [E1]
+    assert "full fine-tuning becomes less feasible [e1]" not in lowered
+    assert "prohibitively expensive [e1]" not in lowered
+
+    # 6. Tripartite distinction
+    assert len(takeaway.reported_findings) >= 1
+    assert "[E3]" in takeaway.reported_findings[0]
+    assert len(takeaway.interpretations) >= 1
+    assert len(takeaway.unestablished_claims) >= 1
+
+    # 7. No unsupported metrics claimed as improvements
+    assert "throughput improvement" not in lowered
+    assert "accuracy improvement" not in lowered
+    assert "latency improvement" not in lowered
+
+
+def test_takeaway_does_not_invent_quantitative_findings_when_evidence_is_absent():
+    """Regression test ensuring takeaway does not hallucinate 10,000x or 3x when evidence lacks them:
+
+    When evidence consists exclusively of a motivation passage lacking numerical reductions:
+    1. Takeaway does not claim 10,000x parameter reduction or 3x GPU memory reduction.
+    2. Takeaway does not claim comparison with Adam when Adam is absent.
+    3. Unestablished claims explicitly note that specific quantitative reductions or memory metrics cannot be established.
+    """
+    s1_motivation_only = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_2106.09685",
+        chunk_id="chunk_2106_09685_01",
+        paper_id="arxiv_2106.09685",
+        paper_title="LoRA: Low-Rank Adaptation of Large Language Models",
+        score=0.91,
+        text=(
+            "An important paradigm of natural language processing consists of large-scale pre-training on general domain data "
+            "and adaptation to particular tasks or domains. As we pre-train larger models, full fine-tuning, which retrains all model "
+            "parameters, becomes less feasible. Using GPT-3 175B as an example -- deploying independent instances of fine-tuned models, "
+            "each with 175B parameters, is prohibitively expensive. We propose Low-Rank Adaptation, or LoRA, which freezes the pre-trained "
+            "model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture, greatly "
+            "reducing the number of trainable parameters for downstream tasks."
+        ),
+        text_excerpt="An important paradigm of natural language processing...",
+    )
+
+    query = "What parameter reduction and memory efficiency does LoRA provide compared with full fine-tuning?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s1_motivation_only])
+
+    text = takeaway.takeaway_text
+    lowered = text.lower()
+
+    # Must NOT invent numbers or comparison algorithm not present in the excerpt
+    assert "10,000" not in text
+    assert "10000" not in text
+    assert "3x" not in lowered
+    assert "3 times" not in lowered
+    assert "adam" not in lowered
+
+    # Must explicitly state in unestablished claims that quantitative reductions or GPU memory are not established
+    unest_str = " ".join(takeaway.unestablished_claims).lower()
+    assert "cannot be established" in unest_str or "not reported" in unest_str
+    assert "gpu memory" in unest_str or "quantitative" in unest_str

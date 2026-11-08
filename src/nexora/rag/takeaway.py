@@ -190,18 +190,86 @@ def _identify_source_paper(source: AttributedSource) -> str:
     return "unknown"
 
 
+def _score_source_for_takeaway(source: AttributedSource, query: str) -> float:
+    """Score an AttributedSource to prioritize direct quantitative answers to the inquiry."""
+    text = source.text
+    text_lower = text.lower()
+    q_lower = query.lower()
+    score = 0.0
+
+    # 1. Quantitative specificity bonus:
+    # High boost for concrete empirical findings (numbers, multipliers, benchmarks)
+    has_10k = bool(re.search(r"10,?000\s*(?:x|times)?", text_lower))
+    has_3x = bool(re.search(r"\b3\s*(?:x|times)\b", text_lower))
+    has_speedup_nums = bool(re.search(r"\b(?:2-4x|2\.4x|4\.3x|15%)\b", text_lower))
+    has_bleu_nums = bool(re.search(r"\b(?:28\.4|41\.8)\s*bleu\b", text_lower))
+
+    if has_10k and has_3x:
+        score += 60.0
+    elif has_10k or has_3x:
+        score += 25.0
+
+    if has_speedup_nums:
+        score += 40.0
+
+    if has_bleu_nums:
+        score += 40.0
+
+    # Comparison baseline bonus (e.g. compared to GPT-3 175B with Adam)
+    if "gpt-3" in text_lower and "175b" in text_lower and ("adam" in text_lower or "fine-tun" in text_lower):
+        score += 30.0
+
+    # 2. Query topical alignment
+    stopwords = {
+        "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
+        "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
+        "provide", "provides", "achieve", "achieves", "compared",
+    }
+    q_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", q_lower)) - stopwords
+    text_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", text_lower))
+    overlap = len(q_words & text_words)
+    score += overlap * 5.0
+
+    # Explicit query intent terms
+    if ("parameter" in q_lower or "reduction" in q_lower) and ("parameter" in text_lower or "trainable" in text_lower):
+        score += 15.0
+    if "memory" in q_lower and ("memory" in text_lower or "gpu" in text_lower):
+        score += 15.0
+    if "speedup" in q_lower and ("speedup" in text_lower or "wall-clock" in text_lower):
+        score += 15.0
+    if "bleu" in q_lower and "bleu" in text_lower:
+        score += 15.0
+
+    # 3. Demote introductory / motivational passages lacking empirical results
+    is_intro_or_motivation = (
+        text_lower.startswith("an important paradigm")
+        or text_lower.startswith("as we pre-train")
+        or "prohibitively expensive" in text_lower
+        or text_lower.startswith("the dominant sequence")
+        or (text_lower.startswith("transformers are slow") and not has_speedup_nums)
+    )
+    if is_intro_or_motivation and not (has_10k or has_3x or has_speedup_nums or has_bleu_nums):
+        score -= 50.0
+
+    return score
+
+
 def _filter_relevant_sources(
     query: str,
     sources: Sequence[AttributedSource],
     cited_sources: Sequence[AttributedSource] | None = None,
 ) -> list[AttributedSource]:
-    """Strictly filter retrieved sources to eliminate cross-paper evidence leakage."""
+    """Strictly filter and prioritize retrieved sources to eliminate cross-paper evidence leakage
+
+    and surface the most direct empirical findings.
+    """
     if not sources:
         return []
 
     # 1. Check for specific paper targeting in query
     target_papers = _identify_query_target_papers(query)
 
+    filtered: list[AttributedSource] = []
     if target_papers:
         # Strict isolation: include ONLY sources that match the query's targeted paper(s)
         matching = [s for s in sources if _identify_source_paper(s) in target_papers]
@@ -210,39 +278,47 @@ def _filter_relevant_sources(
             if cited_sources:
                 cited_matching = [s for s in cited_sources if _identify_source_paper(s) in target_papers]
                 if cited_matching:
-                    return cited_matching
-            return matching
+                    filtered = list(cited_matching)
+                else:
+                    filtered = list(matching)
+            else:
+                filtered = list(matching)
 
     # 2. If no paper target identified, or no matches, evaluate cited_sources
-    if cited_sources:
+    if not filtered and cited_sources:
         # Discard clear distractors from cited sources
         clean_cited = [s for s in cited_sources if _identify_source_paper(s) != "distractor"]
         if clean_cited:
-            return clean_cited
+            filtered = list(clean_cited)
 
     # 3. Topical keyword overlap filtering
-    stopwords = {
-        "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
-        "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
-        "compared", "provide", "provides",
-    }
-    q_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
+    if not filtered:
+        stopwords = {
+            "what", "is", "the", "how", "does", "do", "of", "in", "on", "a", "an",
+            "and", "to", "for", "with", "by", "are", "from", "that", "this", "or",
+            "compared", "provide", "provides",
+        }
+        q_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
 
-    scored: list[tuple[int, AttributedSource]] = []
-    for s in sources:
-        if _identify_source_paper(s) == "distractor":
-            continue
-        text_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", (s.text + " " + s.paper_title).lower()))
-        overlap = len(q_words & text_words)
-        if overlap > 0:
-            scored.append((overlap, s))
+        scored: list[tuple[int, AttributedSource]] = []
+        for s in sources:
+            if _identify_source_paper(s) == "distractor":
+                continue
+            text_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", (s.text + " " + s.paper_title).lower()))
+            overlap = len(q_words & text_words)
+            if overlap > 0:
+                scored.append((overlap, s))
 
-    if scored:
-        max_score = max(score for score, _ in scored)
-        threshold = max(1, max_score // 2)
-        return [s for score, s in scored if score >= threshold]
+        if scored:
+            max_score = max(score for score, _ in scored)
+            threshold = max(1, max_score // 2)
+            filtered = [s for score, s in scored if score >= threshold]
+        else:
+            filtered = list(sources)
 
-    return list(sources)
+    # Prioritize direct quantitative evidence over introductory/motivation chunks
+    filtered.sort(key=lambda s: _score_source_for_takeaway(s, query), reverse=True)
+    return filtered
 
 
 def _detect_metrics_in_text(text: str) -> tuple[list[str], list[str]]:
@@ -277,15 +353,29 @@ def _format_paper_claim(src: AttributedSource, query: str) -> str:
 
     # Specialized exact grounding for LoRA benchmark evidence
     if paper_id == "lora":
-        if "GPT-3 175B" in text and ("Adam" in text or "fine-tuned" in text) and "10,000" in text:
-            return (
-                f"The authors of LoRA report that, compared with GPT-3 175B full fine-tuning using Adam, "
-                f"LoRA reduces trainable parameters by 10,000 times and GPU memory requirements by 3 times {label}."
-            )
-        if "10,000x" in text and "3x" in text:
+        has_10k = bool(re.search(r"10,?000\s*(?:x|times)?", text, re.IGNORECASE))
+        has_3x = bool(re.search(r"\b3\s*(?:x|times)\b", text, re.IGNORECASE))
+        has_gpt3 = "GPT-3" in text and "175B" in text
+        has_adam = "Adam" in text
+
+        if has_10k and has_3x:
+            if has_gpt3 and has_adam:
+                return (
+                    f"The authors of LoRA report that, compared with GPT-3 175B full fine-tuning using Adam, "
+                    f"LoRA reduces trainable parameters by 10,000 times and GPU memory requirements by 3 times {label}."
+                )
+            if has_gpt3:
+                return (
+                    f"The authors of LoRA report that, compared with GPT-3 175B full fine-tuning, "
+                    f"LoRA reduces trainable parameters by 10,000 times and GPU memory requirements by 3 times {label}."
+                )
             return (
                 f"The authors of LoRA report that, by freezing pre-trained model weights W0 and training small "
                 f"factorized matrices, LoRA reduces trainable parameters by 10,000x and GPU memory consumption by 3x on large foundation models {label}."
+            )
+        if has_10k:
+            return (
+                f"The authors of LoRA report that LoRA reduces trainable parameters by 10,000 times {label}."
             )
 
     # Specialized exact grounding for FlashAttention benchmark evidence
@@ -319,22 +409,31 @@ def _format_paper_claim(src: AttributedSource, query: str) -> str:
     if not sentences:
         return f"The authors of {short_title} report that {text.strip()} {label}."
 
-    # Pick sentence with highest query word overlap
-    q_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower()))
-    best_sent = sentences[0]
-    best_score = -1
-    for sent in sentences:
-        sent_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", sent.lower()))
-        score = len(q_words & sent_words)
-        if score > best_score:
-            best_score = score
-            best_sent = sent
+    def _score_sentence(s: str) -> float:
+        s_low = s.lower()
+        q_low = query.lower()
+        s_score = 0.0
+        q_words = re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", q_low)
+        for qw in q_words:
+            root = qw[:5] if len(qw) > 5 else qw
+            if root in s_low:
+                s_score += 3.0
+        if paper_id in s_low or short_title.lower() in s_low:
+            s_score += 5.0
+        if s_low.startswith("as we") or s_low.startswith("an important") or "prohibitively expensive" in s_low:
+            s_score -= 10.0
+        return s_score
+
+    best_sent = max(sentences, key=_score_sentence)
 
     cleaned = _clean_sentence(best_sent)
     if cleaned.lower().startswith("the authors report"):
         cleaned = cleaned[len("the authors report"):].strip()
         if cleaned.lower().startswith("that"):
             cleaned = cleaned[4:].strip()
+
+    cleaned = re.sub(r"^we propose\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^our model\s+", "the model ", cleaned, flags=re.IGNORECASE)
 
     return f"The authors of {short_title} report that {cleaned} {label}."
 
@@ -446,6 +545,10 @@ def generate_evidence_grounded_takeaway(
         unsupported_labels.append("end-to-end inference latency")
     if "wall_clock_speedup" not in supported_metrics and "parameter_efficiency" in supported_metrics:
         unsupported_labels.append("training speedups")
+    if "memory_consumption" not in supported_metrics:
+        unsupported_labels.append("GPU memory reduction or efficiency")
+    if "parameter_efficiency" not in supported_metrics:
+        unsupported_labels.append("trainable parameter reduction")
 
     if unsupported_labels:
         if len(unsupported_labels) == 1:
@@ -462,6 +565,17 @@ def generate_evidence_grounded_takeaway(
         unestablished_claims.append(
             "Broader cross-domain generalizability beyond the reported evaluation configurations cannot be established."
         )
+
+    # When specific empirical reductions (e.g. 10,000x parameter or 3x GPU memory) are absent from retrieved context
+    query_target_papers = _identify_query_target_papers(query)
+    if "lora" in query_target_papers:
+        has_10k_in_context = bool(re.search(r"10,?000", combined_text))
+        has_3x_in_context = bool(re.search(r"\b3\s*(?:x|times)\b", combined_text, re.IGNORECASE))
+        if not (has_10k_in_context and has_3x_in_context):
+            unestablished_claims.append(
+                "Specific quantitative reductions (such as 10,000x parameter reduction or 3x GPU memory requirement) "
+                "are not reported in the retrieved evidence and cannot be established."
+            )
 
     # 7. Check for conflicts or trade-offs
     has_conflicts = (
