@@ -745,4 +745,5 @@ def build_http_app(
         enable_docs=enable_docs,
         settings=settings,
         embedding_service=embedding_service,
+        environ=dependencies.get("environ"),
     )

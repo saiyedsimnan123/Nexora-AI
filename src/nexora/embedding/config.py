@@ -141,7 +141,7 @@ class EmbeddingConfig:
                 resulting value fails validation.
         """
         env = os.environ if environ is None else environ
-        provider = _env_text(env, ENV_PROVIDER)
+        provider = _env_text(env, ENV_PROVIDER) or _env_text(env, "EMBEDDING_PROVIDER")
         if not provider:
             if _env_text(env, "OPENAI_API_KEY"):
                 provider = "openai"
@@ -151,14 +151,14 @@ class EmbeddingConfig:
                 provider = DEFAULT_PROVIDER
         prov_lower = provider.strip().lower()
 
-        api_key = _env_text(env, ENV_API_KEY)
+        api_key = _env_text(env, ENV_API_KEY) or _env_text(env, "EMBEDDING_API_KEY")
         if api_key is None:
             if prov_lower == "gemini":
                 api_key = _env_text(env, ENV_GEMINI_API_KEY) or _env_text(env, ENV_NEXORA_GEMINI_API_KEY)
             elif prov_lower == "openai":
                 api_key = _env_text(env, "OPENAI_API_KEY")
 
-        model = _env_text(env, ENV_MODEL)
+        model = _env_text(env, ENV_MODEL) or _env_text(env, "EMBEDDING_MODEL")
         if not model:
             if prov_lower == "openai":
                 model = "text-embedding-3-small"

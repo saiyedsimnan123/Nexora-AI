@@ -65,7 +65,7 @@ def test_get_expected_migration_heads_returns_current_head() -> None:
     heads = get_expected_migration_heads()
     assert isinstance(heads, tuple)
     assert len(heads) >= 1
-    assert "044c24ad4c34" in heads
+    assert "044c24ad4c35" in heads
 
 
 def test_get_applied_migration_heads_across_all_target_types() -> None:
@@ -112,7 +112,7 @@ def test_correctly_migrated_database_is_reported_ready() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c35')"))
 
     session_factory = create_session_factory(engine)
 
@@ -221,7 +221,7 @@ def test_missing_core_tables_returns_503() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c35')"))
         conn.execute(text("DROP TABLE api_keys"))
 
     session_factory = create_session_factory(engine)
@@ -310,7 +310,7 @@ def test_existing_qdrant_readiness_checks_continue_to_work() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c35')"))
     session_factory = create_session_factory(engine)
 
     class BrokenVectorStore:
@@ -357,7 +357,7 @@ def test_authentication_and_tenant_isolation_remain_unchanged() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c35')"))
     session_factory = create_session_factory(engine)
 
     # Bootstrap users
@@ -485,7 +485,7 @@ def test_readiness_fails_closed_503_when_migration_discovery_fails(monkeypatch: 
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c34')"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('044c24ad4c35')"))
     session_factory = create_session_factory(engine)
 
     def failing_heads(*args: Any, **kwargs: Any) -> Any:

@@ -218,7 +218,7 @@ class DiscoveryService:
                     from nexora.database.repository.graph_extraction_job import GraphExtractionJobRepository
                     active_job = GraphExtractionJobRepository(db_session).get_active_by_paper_id(existing_paper.id)
                     g_job_id = str(active_job.id) if active_job else None
-                    g_status = active_job.status.value if active_job else None
+                    g_status = getattr(active_job.status, "value", str(active_job.status)) if active_job and active_job.status is not None else None
                     return DiscoveryImportResult(
                         paper_id=str(existing_paper.id),
                         collection_id=str(collection_uuid),

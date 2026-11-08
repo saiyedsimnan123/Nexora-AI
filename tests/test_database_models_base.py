@@ -335,7 +335,7 @@ def test_fresh_interpreter_import_is_safe_offline_and_creates_no_engine():
     # Importing registers the current ORM tables on the metadata.
     # This is definitions only; no Engine is created.
     assert result.stdout.split() == [
-        "api_keys,authors,collections,document_chunks,documents,graph_entities,graph_relationships,paper_authors,paper_references,papers,users,workspaces",
+        "api_keys,authors,collections,document_chunks,documents,graph_entities,graph_extraction_jobs,graph_relationships,paper_authors,paper_references,papers,users,workspaces",
         "0",
     ]
 

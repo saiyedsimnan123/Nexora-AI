@@ -893,144 +893,21 @@ def health() -> dict[str, str]:
 @health_router.get("/ready")
 @health_router.get("/health/ready")
 def readiness(request: Request, response: Response) -> dict[str, Any]:
-    """Readiness probe: validates availability of required backend dependencies.
+    """Readiness probe: validates availability of required backend dependencies."""
+    from nexora.api.diagnostics import check_readiness_status
 
-    Checks:
-    - database: verifies connectivity via session_factory if configured.
-    - auth: checks authentication service readiness when enforce_auth is True.
-    - research: checks research service availability.
-    - vector_store: checks vector store connectivity via count() if configured.
+    return check_readiness_status(request, response)
 
-    Returns HTTP 200 with status='ready' when all required components are operational.
-    Returns HTTP 503 with status='unavailable' when any required component is failing.
-    """
-    session_factory = getattr(request.app.state, "session_factory", None)
-    enforce_auth = getattr(request.app.state, "enforce_auth", False)
-    research_service = getattr(request.app.state, "research_service", None)
-    auth_service = getattr(request.app.state, "auth_service", None)
 
-    checks: dict[str, Any] = {}
-    is_ready = True
 
-    # 1. Database check
-    if session_factory is not None:
-        try:
-            from nexora.database.readiness import check_database_readiness
+@health_router.get("/api/diagnostics/environment")
+@health_router.get("/api/diagnostics/config")
+def environment_diagnostics(request: Request) -> dict[str, Any]:
+    """Safe runtime environment diagnostics without exposing secret values."""
+    from nexora.api.diagnostics import get_environment_diagnostics
 
-            check_database_readiness(session_factory)
-            checks["database"] = {"status": "ready"}
-        except Exception as exc:
-            checks["database"] = {
-                "status": "unavailable",
-                "error": type(exc).__name__,
-            }
-            is_ready = False
-    else:
-        if enforce_auth:
-            checks["database"] = {
-                "status": "unavailable",
-                "error": "database_not_configured_for_enforced_auth",
-            }
-            is_ready = False
-        else:
-            checks["database"] = {"status": "not_configured"}
+    return get_environment_diagnostics(request)
 
-    # 2. Authentication check
-    if enforce_auth:
-        if auth_service is None and session_factory is not None and is_ready:
-            from nexora.auth.service import AuthenticationService
-
-            try:
-                auth_service = AuthenticationService(session_factory)
-                request.app.state.auth_service = auth_service
-            except Exception:
-                pass
-
-        if auth_service is not None and checks.get("database", {}).get("status") == "ready":
-            checks["auth"] = {"status": "ready"}
-        else:
-            checks["auth"] = {"status": "unavailable"}
-            is_ready = False
-    else:
-        checks["auth"] = {"status": "ready"}
-
-    # 3. Research Service check
-    if research_service is not None and callable(getattr(research_service, "ask", None)):
-        checks["research"] = {"status": "ready"}
-    else:
-        checks["research"] = {"status": "unavailable"}
-        is_ready = False
-
-    # 4. Vector store / Ingestion check
-    ingestion_service = getattr(request.app.state, "ingestion_service", None)
-    rag_pipeline = getattr(request.app.state, "rag_pipeline", None)
-    vector_store = getattr(request.app.state, "vector_store", None) or getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
-    if vector_store is not None:
-        readiness_fn = getattr(vector_store, "check_readiness", None) or getattr(vector_store, "count", None)
-        vs_type = type(vector_store).__name__
-        backend_name = "qdrant" if "Qdrant" in vs_type else ("memory" if "Memory" in vs_type else "custom")
-        if callable(readiness_fn):
-            try:
-                readiness_fn()
-                checks["vector_store"] = {"status": "ready", "backend": backend_name}
-            except Exception as exc:
-                checks["vector_store"] = {
-                    "status": "unavailable",
-                    "backend": backend_name,
-                    "error": type(exc).__name__,
-                }
-                is_ready = False
-        else:
-            checks["vector_store"] = {"status": "ready", "backend": backend_name}
-
-    # 5. LLM Provider check
-    settings = getattr(request.app.state, "settings", None)
-    llm_config = getattr(settings, "llm", None) if settings else None
-    if llm_config is not None:
-        has_key = bool(llm_config.api_key and llm_config.api_key.strip())
-        checks["llm"] = {
-            "status": "ready" if has_key else "not_configured",
-            "provider": llm_config.provider,
-            "model": llm_config.model,
-        }
-
-    # 6. Embedding Service check
-    embedding_service = getattr(request.app.state, "embedding_service", None) or getattr(ingestion_service, "_embedding_service", None)
-    if embedding_service is not None:
-        emb_provider = getattr(embedding_service, "_provider", None) or embedding_service
-        emb_name = getattr(emb_provider, "name", type(emb_provider).__name__)
-        checks["embedding"] = {
-            "status": "ready",
-            "provider": emb_name,
-            "dimension": getattr(embedding_service, "dimension", None),
-        }
-
-    # 5. Rate limit storage check (when rate limiting is enabled)
-    rate_limit_config = getattr(request.app.state, "rate_limit_config", None)
-    rate_limit_storage = getattr(request.app.state, "rate_limit_storage", None)
-    if rate_limit_config is not None and getattr(rate_limit_config, "enabled", False):
-        if rate_limit_storage is not None and hasattr(rate_limit_storage, "check_readiness"):
-            ready_ok, ready_msg = rate_limit_storage.check_readiness()
-            if ready_ok:
-                checks["rate_limit_storage"] = {"status": "ready"}
-            else:
-                checks["rate_limit_storage"] = {
-                    "status": "unavailable",
-                    "error": ready_msg,
-                }
-                is_ready = False
-        else:
-            checks["rate_limit_storage"] = {
-                "status": "unavailable",
-                "error": "storage_not_configured_for_enabled_rate_limiting",
-            }
-            is_ready = False
-
-    if not is_ready:
-        response.status_code = 503
-        return {"status": "unavailable", "checks": checks}
-
-    return {"status": "ready", "checks": checks}
 
 
 @v1_router.post("/research", response_model=ResearchResponseBody)
@@ -1442,10 +1319,15 @@ def compare_papers_endpoint(
     service: Any = Depends(get_comparison_service),
     current_user: Any = Depends(get_optional_user),
 ) -> PaperComparisonResponseBody:
+    from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+
+    has_non_benchmark = any(pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK for pid in body.paper_ids)
+    if getattr(request.app.state, "enforce_auth", False) and has_non_benchmark and current_user is None:
+        raise AuthenticationError("Authentication required to compare non-benchmark research papers.")
+
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
-            from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
             for pid in body.paper_ids:
                 if pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK:
                     auth_service.verify_paper_ownership(pid, current_user.id)
@@ -1483,10 +1365,15 @@ def research_compare_endpoint(
     service: Any = Depends(get_comparison_service),
     current_user: Any = Depends(get_optional_user),
 ) -> ResearchCompareResponseBody:
+    from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+
+    has_non_benchmark_res = any(pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK for pid in body.paper_ids)
+    if getattr(request.app.state, "enforce_auth", False) and has_non_benchmark_res and current_user is None:
+        raise AuthenticationError("Authentication required to compare non-benchmark research papers.")
+
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
-            from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
             for pid in body.paper_ids:
                 if pid not in BENCHMARK_PAPERS and pid not in UUID_TO_BENCHMARK:
                     auth_service.verify_paper_ownership(pid, current_user.id)
@@ -1775,6 +1662,7 @@ def synthesize_collection_literature_by_id_endpoint(
 @v1_router.post(
     "/documents/ingest",
     response_model=DocumentIngestResponseBody,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Upload and ingest a research paper PDF",
     description=(
@@ -1923,8 +1811,11 @@ async def ingest_document(
         except ValueError as exc:
             raise InvalidRequestError("The uploaded file is not a valid or readable PDF.") from exc
 
+        from fastapi.responses import JSONResponse
+
         response_data = DocumentIngestResponse.from_result(result)
-        return DocumentIngestResponseBody(**response_data.to_dict())
+        DocumentIngestResponseBody(**response_data.to_dict())
+        return JSONResponse(status_code=200, content=response_data.to_dict())
     finally:
         if tmp_path.exists():
             try:

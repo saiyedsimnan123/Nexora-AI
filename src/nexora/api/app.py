@@ -259,13 +259,15 @@ def _run_shutdown_cleanup(app: FastAPI) -> None:
 
 def should_start_background_worker(environ: Mapping[str, str] | None = None) -> bool:
     """Determine whether the continuous background worker thread should be started."""
-    env = os.environ if environ is None else environ
-    if env.get("VERCEL") == "1":
+    if environ is not None:
+        if environ.get("VERCEL") == "1":
+            return False
+        val = (environ.get("ENABLE_BACKGROUND_WORKER") or "").strip().lower()
+        return val not in ("false", "0", "no")
+    if os.getenv("VERCEL") == "1":
         return False
-    val = env.get("ENABLE_BACKGROUND_WORKER", "").strip().lower()
-    if val in ("false", "0", "no"):
-        return False
-    return True
+    val = (os.getenv("ENABLE_BACKGROUND_WORKER") or "").strip().lower()
+    return val not in ("false", "0", "no")
 
 
 @asynccontextmanager
@@ -332,7 +334,8 @@ def create_app(
     max_upload_size_bytes: int = 50 * 1024 * 1024,
     enable_docs: bool | None = None,
     settings: Any = None,
-    embedding_service: Any = None,
+    environ: Any = None,
+    **extra_dependencies: Any,
 ) -> FastAPI:
     """Build the app around injected research, ingestion, analysis, comparison, gap, discovery, and auth services."""
     if not callable(getattr(research_service, "ask", None)):
@@ -412,7 +415,9 @@ def create_app(
     app.state.rate_limit_storage = rate_limit_storage
     app.state.max_upload_size_bytes = max_upload_size_bytes
     app.state.settings = settings
-    app.state.embedding_service = embedding_service
+    app.state.environ = environ
+    for k, v in extra_dependencies.items():
+        setattr(app.state, k, v)
     app.state.shutdown_hooks = []
 
     # 1. Rate Limit Middleware (runs after CORS, before endpoints)

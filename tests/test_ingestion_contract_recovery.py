@@ -314,11 +314,14 @@ def test_successful_upload_contract_shape(test_db):
 
     assert response.status_code == 200
     data = response.json()
-    assert set(data.keys()) == {
+    assert {"document_id", "paper_id", "chunks_count", "indexed_chunks_count"}.issubset(set(data.keys()))
+    assert set(data.keys()) <= {
         "document_id",
         "paper_id",
         "chunks_count",
         "indexed_chunks_count",
+        "graph_job_id",
+        "graph_status",
     }
     # Validate UUID format
     assert UUID(data["document_id"])

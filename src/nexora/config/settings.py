@@ -164,7 +164,7 @@ class AppSettings:
         except (TypeError, ValueError) as exc:
             raise ConfigurationError(f"invalid retrieval settings: {exc}") from None
 
-        backend_raw = env.get("NEXORA_VECTOR_STORE")
+        backend_raw = env.get("NEXORA_VECTOR_STORE") or env.get("VECTOR_STORE")
         if backend_raw and backend_raw.strip():
             backend = backend_raw.strip().lower()
         elif env.get("NEXORA_QDRANT_URL") or env.get("QDRANT_URL"):
@@ -202,7 +202,11 @@ class AppSettings:
             except DatabaseConfigurationError as exc:
                 raise ConfigurationError(str(exc)) from exc
 
-        generator_mode = (env.get("NEXORA_RAG_GENERATOR_MODE") or "").strip().lower()
+        generator_mode = (
+            env.get("NEXORA_RAG_GENERATOR_MODE")
+            or env.get("RAG_GENERATOR_MODE")
+            or ""
+        ).strip().lower()
         if require_llm_key is None:
             if "NEXORA_REQUIRE_LLM_KEY" in env:
                 require_llm_key = _env_bool(env, "NEXORA_REQUIRE_LLM_KEY", default=False)

@@ -139,10 +139,33 @@ def create_production_app(
         ConfigurationError: If any required production configuration is missing or invalid.
         InvalidConfigurationError: If service assembly fails dependency validation.
     """
+    if environ is None:
+        try:
+            import dotenv
+            dotenv.load_dotenv()
+            for env_p in (
+                Path(".env"),
+                Path(".env.local"),
+                Path(".env.production"),
+                Path(".env.preview"),
+                Path("frontend/.env"),
+                Path("frontend/.env.local"),
+            ):
+                if env_p.is_file():
+                    dotenv.load_dotenv(env_p)
+        except Exception:
+            pass
+
     env = os.environ if environ is None else environ
 
+    generator_mode = (
+        env.get("NEXORA_RAG_GENERATOR_MODE")
+        or env.get("RAG_GENERATOR_MODE")
+        or ""
+    ).strip().lower()
+
     # 1. Vector store configuration
-    backend_env = env.get("NEXORA_VECTOR_STORE")
+    backend_env = env.get("NEXORA_VECTOR_STORE") or env.get("VECTOR_STORE")
     if backend_env and backend_env.strip():
         backend = backend_env.strip().lower()
     elif env.get("NEXORA_QDRANT_URL") or env.get("QDRANT_URL"):
@@ -223,6 +246,19 @@ def create_production_app(
     except Exception as exc:
         raise ConfigurationError(f"Production settings error: {exc}") from exc
 
+    # Enforce that live generation mode does not silently use fallback demo providers
+    if generator_mode == "live":
+        if backend == "memory" and "vector_store" not in overrides:
+            raise ConfigurationError(
+                "Live mode (NEXORA_RAG_GENERATOR_MODE=live) requires persistent vector storage. "
+                "Please set NEXORA_VECTOR_STORE=qdrant and provide QDRANT_URL."
+            )
+        if emb_config.provider in ("hash", "hash-sha256") and "embedding_service" not in overrides:
+            raise ConfigurationError(
+                "Live mode (NEXORA_RAG_GENERATOR_MODE=live) requires a live embedding provider. "
+                "Please set NEXORA_EMBEDDING_PROVIDER=openai and provide OPENAI_API_KEY."
+            )
+
     # 5. Extract dependency overrides
     vector_store = overrides.get("vector_store")
     llm_provider = overrides.get("llm_provider")
@@ -253,6 +289,7 @@ def create_production_app(
             qdrant_client=qdrant_client,
             session_factory=session_factory,
             auth_service=auth_service,
+            environ=env,
             **other_deps,
         )
     except (ConfigurationError, InvalidConfigurationError):

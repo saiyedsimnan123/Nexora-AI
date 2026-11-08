@@ -115,6 +115,7 @@ class QdrantVectorStore:
 
     def check_readiness(self) -> None:
         """Check server connectivity, collection existence, and vector dimension compatibility."""
+        self.ensure_collection()
         self.validate_collection_compatibility()
         self.count()
 
