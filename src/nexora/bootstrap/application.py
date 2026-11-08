@@ -743,4 +743,6 @@ def build_http_app(
         rate_limit_storage=rate_limit_storage,
         max_upload_size_bytes=max_upload_size_bytes,
         enable_docs=enable_docs,
+        settings=settings,
+        embedding_service=embedding_service,
     )

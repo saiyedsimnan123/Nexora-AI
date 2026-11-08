@@ -262,3 +262,23 @@ def test_gemini_embedding_environment_fallback():
     assert config.provider == "gemini"
     assert config.model == "text-embedding-004"
     assert config.api_key == "gemini-key-xyz"
+
+
+def test_auto_select_openai_provider_when_openai_key_present():
+    environ = {
+        "OPENAI_API_KEY": "sk-auto-selected-key",
+    }
+    config = EmbeddingConfig.from_env(environ)
+    assert config.provider == "openai"
+    assert config.model == "text-embedding-3-small"
+    assert config.api_key == "sk-auto-selected-key"
+
+
+def test_auto_select_gemini_provider_when_gemini_key_present():
+    environ = {
+        "GEMINI_API_KEY": "gemini-auto-key",
+    }
+    config = EmbeddingConfig.from_env(environ)
+    assert config.provider == "gemini"
+    assert config.model == "text-embedding-004"
+    assert config.api_key == "gemini-auto-key"

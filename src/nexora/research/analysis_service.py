@@ -291,7 +291,7 @@ class PaperAnalysisService:
             )
         except Exception as exc:
             raise AnalysisServiceError(
-                f"Paper analysis LLM call failed ({type(exc).__name__})"
+                f"Paper analysis LLM call failed ({type(exc).__name__}): {exc}"
             ) from exc
 
         # 4. Parse JSON output
@@ -484,7 +484,7 @@ class PaperComparisonService:
             )
         except Exception as exc:
             raise ComparisonServiceError(
-                f"Multi-paper comparison LLM call failed ({type(exc).__name__})"
+                f"Multi-paper comparison LLM call failed ({type(exc).__name__}): {exc}"
             ) from exc
 
         # 4. Parse comparative JSON

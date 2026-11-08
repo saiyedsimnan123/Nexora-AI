@@ -83,14 +83,26 @@ def _resolve_embedding_dimension(config: EmbeddingConfig, provider: Any = None) 
 
 def _load_qdrant_config(environ: Mapping[str, str]) -> QdrantConfig:
     """Load QdrantConfig safely from environment mapping."""
-    url = (environ.get(ENV_QDRANT_URL) or "").strip()
+    url = (environ.get(ENV_QDRANT_URL) or environ.get("QDRANT_URL") or "").strip()
     if not url:
         raise ConfigurationError(
-            f"{ENV_QDRANT_URL} environment variable is required and must not be empty when vector_store is 'qdrant'"
+            f"{ENV_QDRANT_URL} (or QDRANT_URL) environment variable is required and must not be empty when vector_store is 'qdrant'"
         )
-    api_key = (environ.get(ENV_QDRANT_API_KEY) or "").strip() or None
-    collection = (environ.get(ENV_QDRANT_COLLECTION) or "").strip() or DEFAULT_COLLECTION_NAME
-    raw_timeout = (environ.get(ENV_QDRANT_TIMEOUT) or "").strip()
+    api_key = (
+        environ.get(ENV_QDRANT_API_KEY)
+        or environ.get("QDRANT_API_KEY")
+        or ""
+    ).strip() or None
+    collection = (
+        environ.get(ENV_QDRANT_COLLECTION)
+        or environ.get("QDRANT_COLLECTION")
+        or ""
+    ).strip() or DEFAULT_COLLECTION_NAME
+    raw_timeout = (
+        environ.get(ENV_QDRANT_TIMEOUT)
+        or environ.get("QDRANT_TIMEOUT")
+        or ""
+    ).strip()
     timeout = DEFAULT_TIMEOUT
     if raw_timeout:
         try:
@@ -130,7 +142,14 @@ def create_production_app(
     env = os.environ if environ is None else environ
 
     # 1. Vector store configuration
-    backend = (env.get("NEXORA_VECTOR_STORE") or "memory").strip().lower() or "memory"
+    backend_env = env.get("NEXORA_VECTOR_STORE")
+    if backend_env and backend_env.strip():
+        backend = backend_env.strip().lower()
+    elif env.get("NEXORA_QDRANT_URL") or env.get("QDRANT_URL"):
+        backend = "qdrant"
+    else:
+        backend = "memory"
+
     qdrant_config: QdrantConfig | None = None
     if backend == "qdrant":
         qdrant_config = _load_qdrant_config(env)

@@ -964,21 +964,46 @@ def readiness(request: Request, response: Response) -> dict[str, Any]:
     # 4. Vector store / Ingestion check
     ingestion_service = getattr(request.app.state, "ingestion_service", None)
     rag_pipeline = getattr(request.app.state, "rag_pipeline", None)
-    vector_store = getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
+    vector_store = getattr(request.app.state, "vector_store", None) or getattr(ingestion_service, "_vector_store", None) or getattr(rag_pipeline, "vector_store", None)
     if vector_store is not None:
         readiness_fn = getattr(vector_store, "check_readiness", None) or getattr(vector_store, "count", None)
+        vs_type = type(vector_store).__name__
+        backend_name = "qdrant" if "Qdrant" in vs_type else ("memory" if "Memory" in vs_type else "custom")
         if callable(readiness_fn):
             try:
                 readiness_fn()
-                checks["vector_store"] = {"status": "ready"}
+                checks["vector_store"] = {"status": "ready", "backend": backend_name}
             except Exception as exc:
                 checks["vector_store"] = {
                     "status": "unavailable",
+                    "backend": backend_name,
                     "error": type(exc).__name__,
                 }
                 is_ready = False
         else:
-            checks["vector_store"] = {"status": "ready"}
+            checks["vector_store"] = {"status": "ready", "backend": backend_name}
+
+    # 5. LLM Provider check
+    settings = getattr(request.app.state, "settings", None)
+    llm_config = getattr(settings, "llm", None) if settings else None
+    if llm_config is not None:
+        has_key = bool(llm_config.api_key and llm_config.api_key.strip())
+        checks["llm"] = {
+            "status": "ready" if has_key else "not_configured",
+            "provider": llm_config.provider,
+            "model": llm_config.model,
+        }
+
+    # 6. Embedding Service check
+    embedding_service = getattr(request.app.state, "embedding_service", None) or getattr(ingestion_service, "_embedding_service", None)
+    if embedding_service is not None:
+        emb_provider = getattr(embedding_service, "_provider", None) or embedding_service
+        emb_name = getattr(emb_provider, "name", type(emb_provider).__name__)
+        checks["embedding"] = {
+            "status": "ready",
+            "provider": emb_name,
+            "dimension": getattr(embedding_service, "dimension", None),
+        }
 
     # 5. Rate limit storage check (when rate limiting is enabled)
     rate_limit_config = getattr(request.app.state, "rate_limit_config", None)

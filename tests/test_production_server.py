@@ -747,3 +747,43 @@ def test_readiness_fails_closed_on_qdrant_collection_dimension_mismatch(
     assert resp_ready.status_code == 200
     assert resp_ready.json()["status"] == "ready"
     assert resp_ready.json()["checks"]["vector_store"]["status"] == "ready"
+    assert resp_ready.json()["checks"]["vector_store"]["backend"] == "qdrant"
+
+
+def test_readiness_probe_reports_transparent_components(base_prod_env, monkeypatch):
+    mock_factory = MagicMock()
+    mock_auth = MagicMock()
+    app = create_production_app(
+        base_prod_env,
+        session_factory=mock_factory,
+        auth_service=mock_auth,
+    )
+    client = TestClient(app)
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["vector_store"]["status"] == "ready"
+    assert body["checks"]["vector_store"]["backend"] == "memory"
+    assert "llm" in body["checks"]
+    assert "embedding" in body["checks"]
+
+
+def test_qdrant_url_fallback_and_auto_select(base_prod_env, monkeypatch):
+    env_with_qdrant_url = dict(base_prod_env)
+    env_with_qdrant_url.pop("NEXORA_VECTOR_STORE", None)
+    env_with_qdrant_url["QDRANT_URL"] = "https://cluster-xyz.qdrant.tech"
+    env_with_qdrant_url["QDRANT_API_KEY"] = "fake-qdrant-key"
+
+    mock_factory = MagicMock()
+    mock_auth = MagicMock()
+    fake_client = MagicMock()
+    fake_client.get_collection.return_value.config.params.vectors.size = 128
+    app = create_production_app(
+        env_with_qdrant_url,
+        session_factory=mock_factory,
+        auth_service=mock_auth,
+        qdrant_client=fake_client,
+    )
+    assert app.state.vector_store is not None
+    assert type(app.state.vector_store).__name__ == "QdrantVectorStore"

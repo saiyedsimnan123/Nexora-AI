@@ -164,7 +164,13 @@ class AppSettings:
         except (TypeError, ValueError) as exc:
             raise ConfigurationError(f"invalid retrieval settings: {exc}") from None
 
-        backend = (env.get("NEXORA_VECTOR_STORE") or "memory").strip().lower() or "memory"
+        backend_raw = env.get("NEXORA_VECTOR_STORE")
+        if backend_raw and backend_raw.strip():
+            backend = backend_raw.strip().lower()
+        elif env.get("NEXORA_QDRANT_URL") or env.get("QDRANT_URL"):
+            backend = "qdrant"
+        else:
+            backend = "memory"
         auth_enforced = _env_bool(env, "NEXORA_ENFORCE_AUTH", default=True)
 
         try:

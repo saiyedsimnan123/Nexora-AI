@@ -331,6 +331,8 @@ def create_app(
     rate_limit_storage: Any = None,
     max_upload_size_bytes: int = 50 * 1024 * 1024,
     enable_docs: bool | None = None,
+    settings: Any = None,
+    embedding_service: Any = None,
 ) -> FastAPI:
     """Build the app around injected research, ingestion, analysis, comparison, gap, discovery, and auth services."""
     if not callable(getattr(research_service, "ask", None)):
@@ -409,6 +411,8 @@ def create_app(
     app.state.rate_limit_config = rate_limit_config
     app.state.rate_limit_storage = rate_limit_storage
     app.state.max_upload_size_bytes = max_upload_size_bytes
+    app.state.settings = settings
+    app.state.embedding_service = embedding_service
     app.state.shutdown_hooks = []
 
     # 1. Rate Limit Middleware (runs after CORS, before endpoints)

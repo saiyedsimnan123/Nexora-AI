@@ -141,7 +141,14 @@ class EmbeddingConfig:
                 resulting value fails validation.
         """
         env = os.environ if environ is None else environ
-        provider = _env_text(env, ENV_PROVIDER) or DEFAULT_PROVIDER
+        provider = _env_text(env, ENV_PROVIDER)
+        if not provider:
+            if _env_text(env, "OPENAI_API_KEY"):
+                provider = "openai"
+            elif _env_text(env, ENV_GEMINI_API_KEY) or _env_text(env, ENV_NEXORA_GEMINI_API_KEY):
+                provider = "gemini"
+            else:
+                provider = DEFAULT_PROVIDER
         prov_lower = provider.strip().lower()
 
         api_key = _env_text(env, ENV_API_KEY)
