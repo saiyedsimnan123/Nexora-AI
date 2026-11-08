@@ -113,6 +113,65 @@ BENCHMARK_PAPERS: dict[str, dict[str, Any]] = {
         "limitations": "Hardware-dependent gains requiring GPU architectures with sufficient on-chip SRAM bandwidth and capacity (e.g. Ampere A100 GPUs).",
         "future_work": "Not reported in retrieved evidence.",
     },
+    "arxiv_1810.04805": {
+        "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, "arxiv_1810.04805")),
+        "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        "doi": "10.48550/arXiv.1810.04805",
+        "publication_year": 2018,
+        "authors": [
+            "Jacob Devlin",
+            "Ming-Wei Chang",
+            "Kenton Lee",
+            "Kristina Toutanova",
+        ],
+        "abstract": (
+            "We introduce a new language representation model called BERT, which stands for Bidirectional Encoder "
+            "Representations from Transformers. BERT is designed to pre-train deep bidirectional representations from "
+            "unlabeled text by jointly conditioning on both left and right context in all layers."
+        ),
+        "research_problem": "Standard language models are unidirectional, constraining pre-training architectures to attend only to previous tokens and limiting sentence-level and token-level transfer tasks.",
+        "main_contribution": "BERT: the first deeply bidirectional, unsupervised language representation model pre-trained using Masked Language Model (MLM) and Next Sentence Prediction (NSP).",
+        "methodology": "Pre-trained using two unsupervised prediction tasks: Masked Language Model (masking 15% of tokens at random) and Next Sentence Prediction (predicting sentence adjacency).",
+        "model_architecture": "Multi-layer bidirectional Transformer encoder: BERT_BASE (12 layers, 768 hidden, 12 heads, 110M parameters) and BERT_LARGE (24 layers, 1024 hidden, 16 heads, 340M parameters).",
+        "dataset": "BooksCorpus (800M words) and English Wikipedia (2,500M words) totaling 16GB of text data.",
+        "experimental_results": "Achieves state-of-the-art results across eleven natural language processing tasks, including an 80.5 score on the GLUE benchmark, 86.7% accuracy on MNLI, 90.9 SQuAD v1.1 F1, and 83.1 SQuAD v2.0 F1.",
+        "computational_efficiency": "Pre-training BERT_BASE required 4 Cloud TPUs (16 TPU chips) for 4 days; BERT_LARGE required 16 Cloud TPUs (64 TPU chips) for 4 days. Fine-tuning on downstream tasks is fast (1 to a few hours on a single GPU).",
+        "limitations": "Computationally expensive pre-training requirements; creates pre-train/fine-tune mismatch due to the [MASK] token never appearing at fine-tuning time.",
+        "future_work": "Not reported in retrieved evidence.",
+    },
+    "arxiv_1907.11692": {
+        "uuid": str(uuid.uuid5(uuid.NAMESPACE_DNS, "arxiv_1907.11692")),
+        "title": "RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        "doi": "10.48550/arXiv.1907.11692",
+        "publication_year": 2019,
+        "authors": [
+            "Yinhan Liu",
+            "Myle Ott",
+            "Naman Goyal",
+            "Jingfei Du",
+            "Mandar Joshi",
+            "Danqi Chen",
+            "Omer Levy",
+            "Mike Lewis",
+            "Luke Zettlemoyer",
+            "Veselin Stoyanov",
+        ],
+        "abstract": (
+            "We find that BERT was significantly undertrained, and can match or exceed the performance of every model "
+            "published after it. Our improved training recipe, RoBERTa, trains the model longer, with bigger batches, "
+            "over more data; removes the next sentence prediction objective; trains on longer sequences; and dynamically "
+            "changes the masking pattern applied to training data."
+        ),
+        "research_problem": "BERT pre-training was undertrained and sub-optimally configured across hyperparameter choices, objective functions, sequence lengths, and training data scale.",
+        "main_contribution": "RoBERTa: a robustly optimized BERT pre-training recipe establishing state-of-the-art performance across GLUE, RACE, and SQuAD without altering the underlying Transformer encoder architecture.",
+        "methodology": "Trains longer with larger mini-batches (8K sequences across 500K steps), removes the Next Sentence Prediction (NSP) objective using full-sentence inputs, uses dynamic masking across epochs, and scales training data 10x to 160GB.",
+        "model_architecture": "Bidirectional Transformer encoder matching the BERT_LARGE architecture (24 layers, 1024 hidden, 16 heads, 355M parameters with larger byte-level BPE vocabulary).",
+        "dataset": "160GB of uncompressed text: BooksCorpus, English Wikipedia, CC-News (76GB), OpenWebText (38GB), and Stories (31GB).",
+        "experimental_results": "Achieves state-of-the-art results across all 9 GLUE tasks, obtaining an 88.5 GLUE benchmark score (improving over BERT_LARGE by 8.0 points), 94.6 SQuAD v1.1 F1, and 89.8 SQuAD v2.0 F1.",
+        "computational_efficiency": "Pre-trained using 1024 Tesla V100 32GB GPUs for approximately one day with a batch size of 8K sequences; requires significantly higher compute resources and data than BERT rather than providing training efficiency or compute reductions.",
+        "limitations": "Significantly higher computational requirements for pre-training (1024 GPUs) and 10x larger dataset requirements; does not alter model inference efficiency.",
+        "future_work": "Not reported in retrieved evidence.",
+    },
 }
 
 # Reverse lookup mapping UUIDs to benchmark key

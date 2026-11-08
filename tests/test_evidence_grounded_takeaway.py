@@ -844,3 +844,188 @@ def test_comparative_retrieval_lora_and_flashattention_both_supported():
     assert "resource efficiency" in takeaway_lower
     assert "computational efficiency" in takeaway_lower
     assert "io-awareness and wall-clock speedups" in takeaway_lower
+
+
+# ---------------------------------------------------------------------------
+# 8. BERT vs RoBERTa Comparative Retrieval & Grounded Takeaway Tests
+# ---------------------------------------------------------------------------
+
+def test_bert_and_roberta_target_identification():
+    """Verify named-paper extraction identifies BERT and RoBERTa without cross-leakage or false Transformer trigger."""
+    from nexora.rag.takeaway import _identify_query_target_papers
+
+    query = (
+        "Compare BERT and RoBERTa in terms of model performance and training efficiency. "
+        "Explain their different training approaches, reported benchmark results, and computational requirements. "
+        "Distinguish between performance improvements and efficiency improvements, and identify which claims are directly supported by the papers."
+    )
+    targets = _identify_query_target_papers(query)
+
+    assert targets == {"bert", "roberta"}
+    assert "transformer" not in targets
+    assert "lora" not in targets
+    assert "flashattention" not in targets
+
+    # Single-target isolation checks
+    assert _identify_query_target_papers("What are the training details of RoBERTa?") == {"roberta"}
+    assert _identify_query_target_papers("What are the training details of BERT?") == {"bert"}
+
+
+def test_bert_and_roberta_comparative_retrieval_and_exclusion():
+    """End-to-end pipeline run on BERT vs RoBERTa query:
+    1. Retrieves chunks from both BERT and RoBERTa.
+    2. Strictly excludes Attention Is All You Need, LoRA, and FlashAttention.
+    """
+    pipeline = create_offline_rag_pipeline()
+    query = (
+        "Compare BERT and RoBERTa in terms of model performance and training efficiency. "
+        "Explain their different training approaches, reported benchmark results, and computational requirements. "
+        "Distinguish between performance improvements and efficiency improvements, and identify which claims are directly supported by the papers."
+    )
+    res = pipeline.answer(query)
+
+    assert res.status == "success"
+    assert res.is_grounded is True
+    assert len(res.sources) >= 2
+
+    # Sources must contain BERT and RoBERTa
+    source_papers = {s.paper_title for s in res.sources}
+    assert any("BERT" in p for p in source_papers)
+    assert any("RoBERTa" in p for p in source_papers)
+
+    # Must NOT contain unrelated papers
+    for title in source_papers:
+        assert "Attention Is All You Need" not in title
+        assert "LoRA" not in title
+        assert "FlashAttention" not in title
+
+    # Must NOT leak unrelated keywords into answer or takeaway
+    answer_lower = res.answer.lower()
+    takeaway_lower = res.takeaway.lower()
+    for banned in ("bleu", "wmt", "10,000", "flashattention", "rank decomposition", "hbm"):
+        assert banned not in answer_lower
+        assert banned not in takeaway_lower
+
+
+def test_comparative_missing_target_fail_closed_bert_or_roberta():
+    """When a comparative query targets BERT and RoBERTa but one target is missing from retrieved context,
+    the pipeline must fail closed with insufficient_evidence.
+    """
+    bert_source = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_01",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.95,
+        text="BERT_LARGE achieves 80.5 on the GLUE benchmark. Pre-training required 16 Cloud TPUs (64 TPU chips) for 4 days.",
+        text_excerpt="BERT_LARGE achieves 80.5 on the GLUE benchmark...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [bert_source])
+
+    assert takeaway.conclusion == "Insufficient evidence"
+    assert "RoBERTa" in takeaway.takeaway_text
+    assert "insufficient" in takeaway.takeaway_text.lower()
+    assert len(takeaway.reported_findings) == 0
+
+
+def test_separation_of_task_quality_and_computational_efficiency_metrics():
+    """Verify that GLUE benchmark scores are classified as task quality, and training compute
+    is classified as computational requirements, while efficiency improvements for RoBERTa over BERT are denied.
+    """
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_01",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.92,
+        text="BERT_LARGE achieves 80.5 GLUE score using 16 Cloud TPUs for 4 days.",
+        text_excerpt="BERT_LARGE achieves 80.5...",
+    )
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_01",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.95,
+        text="RoBERTa_LARGE achieves 88.5 GLUE score, outperforming BERT_LARGE, pre-trained on 1024 Tesla V100 GPUs with 160GB data.",
+        text_excerpt="RoBERTa_LARGE achieves 88.5...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    # Supported metrics must include task_accuracy and training_compute
+    assert "task_accuracy" in takeaway.supported_metrics
+    assert "training_compute" in takeaway.supported_metrics
+
+    # Trainable parameter efficiency, wall-clock speedup, throughput, and memory reduction must be unsupported
+    assert "parameter_efficiency" in takeaway.unsupported_metrics
+    assert "wall_clock_speedup" in takeaway.unsupported_metrics
+    assert "throughput" in takeaway.unsupported_metrics
+
+    # Unestablished claims must explicitly mention that computational efficiency for RoBERTa over BERT cannot be established
+    unest_combined = " ".join(takeaway.unestablished_claims).lower()
+    assert "computational efficiency" in unest_combined or "training efficiency" in unest_combined
+    assert "cannot be established" in unest_combined
+    assert "1024 v100" in unest_combined or "task accuracy" in unest_combined
+
+
+def test_citation_support_for_bert_and_roberta_claims():
+    """Verify that in takeaway.reported_findings, the 80.5 GLUE claim cites [E1] (BERT)
+    and the 88.5 GLUE claim cites [E2] (RoBERTa).
+    """
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_01",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.92,
+        text="BERT_LARGE achieves 80.5 on the GLUE benchmark. Pre-training required 16 Cloud TPUs for 4 days.",
+        text_excerpt="BERT_LARGE achieves 80.5 on the GLUE benchmark...",
+    )
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_01",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.95,
+        text="RoBERTa_LARGE achieves 88.5 on the GLUE benchmark, outperforming BERT_LARGE, pre-trained on 1024 Tesla V100 GPUs with 160GB data.",
+        text_excerpt="RoBERTa_LARGE achieves 88.5 on the GLUE benchmark...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    assert len(takeaway.reported_findings) == 2
+    bert_finding = [f for f in takeaway.reported_findings if "BERT" in f and "80.5" in f][0]
+    roberta_finding = [f for f in takeaway.reported_findings if "RoBERTa" in f and "88.5" in f][0]
+
+    assert "[E1]" in bert_finding
+    assert "[E2]" in roberta_finding
+
+
+def test_comparative_takeaway_distinguishes_performance_from_efficiency():
+    """Verify that the comparative takeaway text highlights model performance vs training compute."""
+    pipeline = create_offline_rag_pipeline()
+    query = (
+        "Compare BERT and RoBERTa in terms of model performance and training efficiency. "
+        "Explain their different training approaches, reported benchmark results, and computational requirements. "
+        "Distinguish between performance improvements and efficiency improvements, and identify which claims are directly supported by the papers."
+    )
+    res = pipeline.answer(query)
+
+    takeaway_lower = res.takeaway.lower()
+
+    # Must distinguish reported model performance from training efficiency
+    assert "distinguish reported model performance from training efficiency" in takeaway_lower
+    assert "88.5" in res.takeaway
+    assert "80.5" in res.takeaway
+    assert "1024" in res.takeaway or "v100" in takeaway_lower
+    assert "without providing training efficiency" in takeaway_lower or "cannot be established" in takeaway_lower

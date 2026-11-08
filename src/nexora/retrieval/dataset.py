@@ -1069,3 +1069,137 @@ def get_pilot_benchmark_dataset() -> ResearchRetrievalDataset:
     )
 
 
+def get_default_research_dataset() -> ResearchRetrievalDataset:
+    """Return the complete canonical research benchmark dataset including BERT and RoBERTa.
+
+    Corpus:
+    1. Attention Is All You Need (Vaswani et al., 2017) - arXiv:1706.03762
+    2. LoRA: Low-Rank Adaptation of Large Language Models (Hu et al., 2021) - arXiv:2106.09685
+    3. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (Dao et al., 2022) - arXiv:2205.14135
+    4. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (Devlin et al., 2018) - arXiv:1810.04805
+    5. RoBERTa: A Robustly Optimized BERT Pretraining Approach (Liu et al., 2019) - arXiv:1907.11692
+    """
+    pilot = get_pilot_benchmark_dataset()
+    bert_chunks = [
+        {
+            "chunk_id": "chunk_1810_04805_01",
+            "paper_id": "arxiv_1810.04805",
+            "document_id": "doc_arxiv_1810.04805",
+            "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+            "doi": "10.48550/arXiv.1810.04805",
+            "url": "https://arxiv.org/abs/1810.04805",
+            "publication_year": 2018,
+            "filename": "1810.04805.pdf",
+            "chunk_index": 0,
+            "text": (
+                "We introduce BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. "
+                "BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning "
+                "on both left and right context in all layers. BERT is pre-trained using two novel unsupervised prediction tasks: "
+                "Masked Language Model (MLM), where 15% of the input tokens are masked at random, and Next Sentence Prediction (NSP), "
+                "which predicts whether a sentence B follows sentence A. We train BERT_BASE (L=12, H=768, A=12, 110M parameters) "
+                "and BERT_LARGE (L=24, H=1024, A=16, 340M parameters) on BooksCorpus (800M words) and English Wikipedia (2,500M words) "
+                "with a batch size of 256 sequences."
+            ),
+        },
+        {
+            "chunk_id": "chunk_1810_04805_02",
+            "paper_id": "arxiv_1810.04805",
+            "document_id": "doc_arxiv_1810.04805",
+            "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+            "doi": "10.48550/arXiv.1810.04805",
+            "url": "https://arxiv.org/abs/1810.04805",
+            "publication_year": 2018,
+            "filename": "1810.04805.pdf",
+            "chunk_index": 1,
+            "text": (
+                "BERT obtains new state-of-the-art results on eleven natural language processing tasks. On the GLUE benchmark, "
+                "BERT_LARGE achieves a score of 80.5, representing a 7.7 point absolute improvement over prior work. On question answering, "
+                "BERT achieves 90.9 SQuAD v1.1 F1 and 83.1 SQuAD v2.0 F1. In terms of computational requirements, training of BERT_BASE was "
+                "performed on 4 Cloud TPUs (16 TPU chips) for 4 days, while BERT_LARGE was trained on 16 Cloud TPUs (64 TPU chips) for 4 days. "
+                "While pre-training requires substantial compute, downstream task fine-tuning on a single GPU takes only a few hours."
+            ),
+        },
+        {
+            "chunk_id": "chunk_1907_11692_01",
+            "paper_id": "arxiv_1907.11692",
+            "document_id": "doc_arxiv_1907.11692",
+            "title": "RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+            "doi": "10.48550/arXiv.1907.11692",
+            "url": "https://arxiv.org/abs/1907.11692",
+            "publication_year": 2019,
+            "filename": "1907.11692.pdf",
+            "chunk_index": 0,
+            "text": (
+                "We present RoBERTa: A Robustly Optimized BERT Pretraining Approach. We find that BERT was significantly undertrained, "
+                "and present an improved recipe for training BERT models. Our modifications include: (1) training the model longer, with bigger "
+                "batches, over more data; (2) removing the next sentence prediction (NSP) objective and training on full sentences; (3) training "
+                "on longer sequences with dynamic masking, where the masking pattern is dynamically generated across training epochs instead "
+                "of fixed at preprocessing. We train over 160GB of uncompressed text from BooksCorpus, English Wikipedia, CC-News, OpenWebText, "
+                "and Stories, representing a 10x increase in data compared to BERT."
+            ),
+        },
+        {
+            "chunk_id": "chunk_1907_11692_02",
+            "paper_id": "arxiv_1907.11692",
+            "document_id": "doc_arxiv_1907.11692",
+            "title": "RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+            "doi": "10.48550/arXiv.1907.11692",
+            "url": "https://arxiv.org/abs/1907.11692",
+            "publication_year": 2019,
+            "filename": "1907.11692.pdf",
+            "chunk_index": 1,
+            "text": (
+                "RoBERTa matches or exceeds the performance of all post-BERT methods on GLUE, RACE, and SQuAD without multi-task fine-tuning. "
+                "On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score, outperforming BERT_LARGE (80.5) by 8.0 points. On question answering, "
+                "RoBERTa achieves 94.6 SQuAD v1.1 F1 and 89.8 SQuAD v2.0 F1. In terms of computational requirements, RoBERTa was pre-trained "
+                "using 1024 Tesla V100 32GB GPUs for approximately one day with a batch size of 8K sequences across 500K steps. While RoBERTa "
+                "demonstrates substantial task-quality performance improvements over BERT, it requires significantly greater pre-training compute "
+                "and training data, and does not provide computational efficiency or compute reduction."
+            ),
+        },
+    ]
+
+    extra_queries = [
+        {
+            "query_id": "q_benchmark_08",
+            "query": "How does BERT pre-train deep bidirectional representations using Masked Language Model and Next Sentence Prediction?",
+            "expected_chunk_ids": ["chunk_1810_04805_01"],
+            "category": "exact_term",
+            "target_paper_ids": ["arxiv_1810.04805"],
+            "reviewed": True,
+            "reviewer": "curator_saiyed_simnan",
+            "review_notes": "Verified against Devlin et al. (2018) abstract describing MLM and NSP pre-training objectives.",
+        },
+        {
+            "query_id": "q_benchmark_09",
+            "query": "How does RoBERTa optimize BERT pre-training with dynamic masking and removing next sentence prediction?",
+            "expected_chunk_ids": ["chunk_1907_11692_01"],
+            "category": "exact_term",
+            "target_paper_ids": ["arxiv_1907.11692"],
+            "reviewed": True,
+            "reviewer": "curator_saiyed_simnan",
+            "review_notes": "Verified against Liu et al. (2019) abstract describing dynamic masking, full sentences without NSP, and 160GB data.",
+        },
+        {
+            "query_id": "q_benchmark_10",
+            "query": "What GLUE benchmark score and computational requirements does RoBERTa achieve compared to BERT?",
+            "expected_chunk_ids": ["chunk_1810_04805_02", "chunk_1907_11692_02"],
+            "category": "exact_term",
+            "target_paper_ids": ["arxiv_1810.04805", "arxiv_1907.11692"],
+            "reviewed": True,
+            "reviewer": "curator_saiyed_simnan",
+            "review_notes": "Verified against Devlin et al. (2018) (80.5 GLUE, 64 TPUs) and Liu et al. (2019) (88.5 GLUE, 1024 V100 GPUs).",
+        },
+    ]
+
+    return ResearchRetrievalDataset(
+        dataset_id="canonical-research-benchmark-v1",
+        version="1.1.0",
+        description="Canonical research benchmark of 5 research papers (Attention, LoRA, FlashAttention, BERT, RoBERTa) with verified source metadata and manually reviewed relevance labels.",
+        is_illustrative_only=False,
+        provenance="manually_reviewed_benchmark",
+        chunks=pilot.chunks + bert_chunks,
+        queries=pilot.queries + extra_queries,
+    )
+
+

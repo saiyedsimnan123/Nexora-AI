@@ -32,6 +32,7 @@ from nexora.rag.takeaway import (
 )
 from nexora.retrieval.bm25 import BM25Index
 from nexora.retrieval.dataset import (
+    get_default_research_dataset,
     get_pilot_benchmark_dataset,
     load_retrieval_dataset,
 )
@@ -69,17 +70,34 @@ def _identify_chunk_paper(chunk: RetrievedChunk) -> str:
     meta = chunk.metadata if isinstance(chunk.metadata, dict) else {}
     title_lower = str(meta.get("title") or "").lower()
     pid_lower = str(meta.get("paper_id") or chunk.document_id or "").lower()
-    text_lower = chunk.text.lower()
-    combined = f"{title_lower} {pid_lower} {text_lower[:200]}"
+    meta_combined = f"{title_lower} {pid_lower}"
 
-    if "lora" in combined or "2106" in combined or "hu-2021" in combined:
+    # Check metadata first to prevent passing cross-mentions in body text
+    if "roberta" in meta_combined or "1907" in meta_combined or "liu-2019" in meta_combined:
+        return "roberta"
+    if "deep bidirectional" in meta_combined or "1810" in meta_combined or "devlin" in meta_combined or (re.search(r"\bbert\b", meta_combined) and "roberta" not in meta_combined):
+        return "bert"
+    if "lora" in meta_combined or "2106" in meta_combined or "hu-2021" in meta_combined:
         return "lora"
-    if "flash" in combined or "2205" in combined or "dao-2022" in combined:
+    if "flash" in meta_combined or "2205" in meta_combined or "dao-2022" in meta_combined:
         return "flashattention"
-    if "attention is all you need" in combined or "1706" in combined or "vaswani" in combined:
+    if "attention is all you need" in meta_combined or "1706" in meta_combined or "vaswani" in meta_combined:
         return "transformer"
-    if "distractor" in combined or "biological" in combined or "primate" in combined:
+    if "distractor" in meta_combined or "biological" in meta_combined or "primate" in meta_combined:
         return "distractor"
+
+    # Fallback to initial text only when metadata lacks title/paper_id
+    text_start = chunk.text[:200].lower()
+    if "roberta" in text_start or "robustly optimized bert" in text_start:
+        return "roberta"
+    if "bert: pre-training" in text_start or "deep bidirectional" in text_start or re.search(r"\bwe introduce bert\b", text_start):
+        return "bert"
+    if "we propose low-rank adaptation" in text_start or "we propose lora" in text_start:
+        return "lora"
+    if "flashattention" in text_start or "io-aware exact attention" in text_start:
+        return "flashattention"
+    if "attention is all you need" in text_start or "we propose the transformer" in text_start:
+        return "transformer"
     return "unknown"
 
 
@@ -475,12 +493,22 @@ class RAGPipeline:
             missing_targets = target_papers - found_targets
             if missing_targets:
                 # Truthfully report insufficient evidence when an explicit target paper is unavailable
+                missing_labels = [
+                    "BERT" if p == "bert" else
+                    "RoBERTa" if p == "roberta" else
+                    "LoRA" if p == "lora" else
+                    "FlashAttention" if p == "flashattention" else
+                    "Attention Is All You Need" if p == "transformer" else
+                    p.title()
+                    for p in sorted(missing_targets)
+                ]
+                missing_str = ", ".join(missing_labels)
                 return RAGResponse(
                     query=query,
-                    answer=INSUFFICIENT_EVIDENCE_ANSWER,
+                    answer=f"I could not find sufficient evidence in the indexed research papers to answer this comparative question. Missing target paper(s): {missing_str}.",
                     sources=[],
                     cited_sources=[],
-                    is_grounded=True,
+                    is_grounded=False,
                     is_mock=self._generator.is_mock,
                     model=model or self._generator.model_name,
                     status="insufficient_evidence",
@@ -490,7 +518,8 @@ class RAGPipeline:
                     comparison_of_findings=None,
                     limitations_and_conflicts=None,
                     conclusion="Insufficient evidence",
-                    conclusion_reasoning=f"Could not find sufficient evidence for required target paper(s): {', '.join(sorted(missing_targets))}.",
+                    conclusion_reasoning=f"Could not find sufficient evidence for required target paper(s): {missing_str}.",
+                    takeaway=f"Insufficient evidence: Required target paper(s) {missing_str} are not present in the indexed collection.",
                 )
 
             # Strict isolation: filter candidates to only those matching target_papers
@@ -662,7 +691,7 @@ def _build_benchmark_retrieval_service(
     if dataset_path:
         ds = load_retrieval_dataset(dataset_path)
     else:
-        ds = get_pilot_benchmark_dataset()
+        ds = get_default_research_dataset()
 
     chunks = ds.chunks
 
