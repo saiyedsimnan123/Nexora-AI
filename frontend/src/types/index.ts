@@ -16,7 +16,7 @@ export interface FeatureCapability {
   highlights: string[];
 }
 
-export type PreviewTab = 'verification' | 'lineage' | 'benchmark';
+export type PreviewTab = 'verification' | 'lineage' | 'benchmark' | 'trends';
 
 export interface VerifiedClaimItem {
   id: string;

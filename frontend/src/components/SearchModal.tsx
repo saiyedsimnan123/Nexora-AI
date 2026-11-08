@@ -11,12 +11,14 @@ import {
   HelpCircle,
   Scale,
   BookOpen,
-  ArrowRight
+  ArrowRight,
+  UploadCloud
 } from 'lucide-react';
-import { queryResearchRAG } from '../services/api';
+import { queryResearchRAG, getResearchGaps } from '../services/api';
 import type {
   RAGQueryResponse,
-  AttributedSource
+  AttributedSource,
+  ResearchGapsResponse
 } from '../types/api';
 
 interface SearchModalProps {
@@ -24,6 +26,8 @@ interface SearchModalProps {
   onClose: () => void;
   query: string;
   onComparePapers?: (paperIds: string[]) => void;
+  onAnalyzePaper?: (paperId: string, paperTitle?: string) => void;
+  onOpenUpload?: () => void;
 }
 
 // Curated reference scenario for offline demonstration / fallback
@@ -132,7 +136,9 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   isOpen,
   onClose,
   query,
-  onComparePapers
+  onComparePapers,
+  onAnalyzePaper,
+  onOpenUpload,
 }) => {
   const defaultQuery = 'How do FlashAttention IO optimizations achieve 4.3x speedup on A100 GPUs?';
   const initialQuery = query.trim() || defaultQuery;
@@ -144,6 +150,10 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [selectedCitationLabel, setSelectedCitationLabel] = useState<string>('[E1]');
   const [activeTab, setActiveTab] = useState<'answer' | 'evidence' | 'comparison' | 'limitations'>('answer');
+  const [deepGaps, setDeepGaps] = useState<ResearchGapsResponse | null>(null);
+  const [isLoadingDeepGaps, setIsLoadingDeepGaps] = useState<boolean>(false);
+  const [deepGapsError, setDeepGapsError] = useState<string | null>(null);
+  const [showDeepGaps, setShowDeepGaps] = useState<boolean>(false);
   const titleId = useId();
 
   // Sync state if query prop changes from parent
@@ -366,6 +376,20 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               </button>
             )}
 
+            {onOpenUpload && (
+              <button
+                onClick={() => {
+                  onClose();
+                  onOpenUpload();
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-mono uppercase tracking-wider text-purple-300 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-colors flex items-center gap-1.5"
+                title="Upload and Ingest a new Research Paper PDF"
+              >
+                <UploadCloud className="w-3.5 h-3.5 text-purple-400" />
+                Upload PDF
+              </button>
+            )}
+
             <button
               onClick={onClose}
               className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 transition-colors"
@@ -557,20 +581,35 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                   key={pIdx}
                   className="p-5 rounded-2xl bg-slate-900/80 border border-white/10 space-y-3"
                 >
-                  <div className="flex items-center justify-between border-b border-white/[0.06] pb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-2">
                     <h4 className="text-sm font-bold text-white flex items-center gap-2">
                       <BookOpen className="w-4 h-4 text-cyan-400" />
                       {paperGroup.paper_title}
                     </h4>
-                    <div className="flex items-center gap-1.5">
-                      {paperGroup.citations.map((c) => (
-                        <span
-                          key={c}
-                          className="text-[11px] font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/30 px-1.5 py-0.5 rounded"
+                    <div className="flex items-center gap-2">
+                      {onAnalyzePaper && paperGroup.paper_id && (
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onAnalyzePaper(paperGroup.paper_id!, paperGroup.paper_title);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition-colors"
+                          title="Analyze 7 dimensions of this paper"
                         >
-                          {c}
-                        </span>
-                      ))}
+                          <Sparkles className="w-3 h-3" />
+                          <span>Analyze</span>
+                        </button>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        {paperGroup.citations.map((c) => (
+                          <span
+                            key={c}
+                            className="text-[11px] font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/30 px-1.5 py-0.5 rounded"
+                          >
+                            {c}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   </div>
 
@@ -773,14 +812,91 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             </div>
 
             {/* Evidence Gaps Banner */}
-            <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-2">
-              <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-bold block">
-                Evidence Gaps & Unreported Aspects:
-              </span>
+            <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                  Evidence Gaps & Unreported Aspects:
+                </span>
+                {distinctPaperIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setIsLoadingDeepGaps(true);
+                      setDeepGapsError(null);
+                      setShowDeepGaps(true);
+                      try {
+                        const res = await getResearchGaps(distinctPaperIds.slice(0, 5));
+                        setDeepGaps(res);
+                      } catch (err: unknown) {
+                        setDeepGapsError(err instanceof Error ? err.message : 'Gap discovery failed');
+                      } finally {
+                        setIsLoadingDeepGaps(false);
+                      }
+                    }}
+                    disabled={isLoadingDeepGaps}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {isLoadingDeepGaps ? (
+                      <>
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <span>Discovering Gaps...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3 h-3" />
+                        <span>{deepGaps ? 'Refresh Deep Gaps' : 'Discover Deep Gaps (AI)'}</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+
               <p className="text-xs text-slate-300 leading-relaxed font-sans">
                 {limConflicts?.insufficient_evidence_notes ||
                   'All synthesized claims are strictly bounded by retrieved document excerpts. Unmentioned experimental configurations, energy footprints, or downstream tasks are truthfully flagged as not reported rather than fabricated.'}
               </p>
+
+              {/* Deep Gaps Result */}
+              {deepGapsError && (
+                <div className="p-2.5 rounded-lg bg-red-950/50 border border-red-500/30 text-xs text-red-200 flex items-center gap-2">
+                  <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <span>{deepGapsError}</span>
+                </div>
+              )}
+
+              {deepGaps && showDeepGaps && (
+                <div className="pt-2 border-t border-white/[0.08] space-y-2.5">
+                  <span className="text-[11px] font-mono uppercase text-amber-400 font-bold block">
+                    Discovered Documented & Candidate Gaps ({deepGaps.total_gaps_count}):
+                  </span>
+                  <div className="space-y-2">
+                    {deepGaps.documented_gaps.map((g, i) => (
+                      <div key={i} className="p-2.5 rounded-lg bg-black/40 border border-amber-500/20 text-xs text-slate-200">
+                        <div className="font-semibold text-white flex items-center justify-between">
+                          <span>{g.title}</span>
+                          {g.evidence_citations && g.evidence_citations.length > 0 && (
+                            <span className="text-[10px] font-mono text-cyan-400">{g.evidence_citations.join(' ')}</span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-1">{g.description}</p>
+                      </div>
+                    ))}
+                    {deepGaps.inferred_gaps.map((g, i) => (
+                      <div key={i} className="p-2.5 rounded-lg bg-purple-950/20 border border-purple-500/20 text-xs text-slate-200">
+                        <div className="font-semibold text-purple-200 flex items-center justify-between">
+                          <span>{g.title}</span>
+                          {g.confidence_score !== undefined && (
+                            <span className="text-[10px] font-mono text-purple-400">
+                              Conf: {(g.confidence_score * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-1">{g.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -7,7 +7,8 @@ import {
   GitCompare,
   ShieldCheck,
   ArrowRight,
-  Scale
+  Scale,
+  UploadCloud
 } from 'lucide-react';
 import { checkBackendHealth } from '../services/api';
 
@@ -16,13 +17,15 @@ interface NavbarProps {
   onNavigate: (sectionId: string) => void;
   currentView?: 'home' | 'compare';
   onViewChange?: (view: 'home' | 'compare') => void;
+  onUploadClick?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   onExploreClick,
   onNavigate,
   currentView = 'home',
-  onViewChange
+  onViewChange,
+  onUploadClick,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [backendLive, setBackendLive] = useState<boolean | null>(null);
@@ -117,6 +120,15 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Scale className="w-4 h-4 text-cyan-400" />
               Compare Papers
             </button>
+            {onUploadClick && (
+              <button
+                onClick={onUploadClick}
+                className="px-3.5 py-2 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-white/[0.05] transition-all flex items-center gap-1.5"
+              >
+                <UploadCloud className="w-4 h-4 text-purple-400" />
+                Upload Paper
+              </button>
+            )}
             <button
               onClick={() => handleNavClick('standards')}
               className="px-3.5 py-2 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-white/[0.05] transition-all flex items-center gap-1.5"
@@ -241,6 +253,18 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Scale className="w-4 h-4 text-cyan-400" />
               Compare Papers
             </button>
+            {onUploadClick && (
+              <button
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onUploadClick();
+                }}
+                className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-200 hover:bg-white/[0.06] text-left text-sm font-medium"
+              >
+                <UploadCloud className="w-4 h-4 text-purple-400" />
+                Upload Paper (PDF)
+              </button>
+            )}
             <button
               onClick={() => handleNavClick('standards')}
               className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-200 hover:bg-white/[0.06] text-left text-sm font-medium"

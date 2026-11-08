@@ -6,7 +6,9 @@ import {
   AlertCircle,
   ChevronRight,
   BarChart3,
-  Network
+  Network,
+  TrendingUp,
+  ArrowUpRight
 } from 'lucide-react';
 import type { PreviewTab, VerifiedClaimItem } from '../types';
 
@@ -110,6 +112,19 @@ export const IntelligencePreview: React.FC = () => {
             >
               <BarChart3 className="w-3.5 h-3.5" />
               <span>Benchmark Signal</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('trends')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono shrink-0 transition-all ${
+                activeTab === 'trends'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50 shadow-[0_0_15px_rgba(52,211,153,0.2)]'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Research Trends</span>
             </button>
           </div>
         </div>
@@ -362,6 +377,119 @@ export const IntelligencePreview: React.FC = () => {
           </div>
         )}
 
+        {/* Tab 4: Temporal Research Trends */}
+        {activeTab === 'trends' && (
+          <div className="glass-panel rounded-2xl p-6 sm:p-10 border-emerald-500/30 animate-in fade-in duration-200">
+            <div className="max-w-5xl mx-auto space-y-8">
+              <div className="text-center space-y-2">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-xs font-mono text-emerald-300">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <span>Temporal Evolution Across Literature</span>
+                </div>
+                <h3 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                  Temporal Research Trend Trajectories
+                </h3>
+                <p className="text-xs sm:text-sm text-slate-300 max-w-2xl mx-auto leading-relaxed">
+                  Traces the empirical progression of scholarly methodologies, algorithmic breakthroughs, and paradigm shifts grounded in peer-reviewed evidence.
+                </p>
+              </div>
+
+              {/* Trends Cards Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {/* Trend 1: Attention Scalability */}
+                <div className="glass-panel p-5 rounded-xl border-cyan-500/20 bg-[#080d21] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-cyan-400 bg-cyan-950/70 border border-cyan-500/30 px-2 py-0.5 rounded">
+                      2017 &rarr; 2024
+                    </span>
+                    <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-cyan-950/70 text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
+                      <ArrowUpRight className="w-3 h-3" />
+                      <span>Accelerating</span>
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white">
+                    IO-Aware Exact Attention Execution
+                  </h4>
+                  <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                    Transition from standard quadratic HBM materialization [E2] to GPU SRAM tiling and online softmax recomputation without approximation [E1].
+                  </p>
+                  <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <span>Key Milestones: Attention &rarr; FlashAttention 1-3</span>
+                    <span className="text-cyan-300 font-semibold">2.4x - 4.3x Speedup</span>
+                  </div>
+                </div>
+
+                {/* Trend 2: Parameter-Efficient Adaptation */}
+                <div className="glass-panel p-5 rounded-xl border-purple-500/20 bg-[#080d21] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-purple-400 bg-purple-950/70 border border-purple-500/30 px-2 py-0.5 rounded">
+                      2021 &rarr; 2025
+                    </span>
+                    <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-purple-950/70 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                      <ArrowUpRight className="w-3 h-3" />
+                      <span>Dominant Paradigm</span>
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white">
+                    Low-Rank Adaptation &amp; Modular Weights
+                  </h4>
+                  <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                    Shift away from expensive full-model fine-tuning toward low-rank matrix decomposition freeze, preserving foundational representations while cutting GPU RAM footprint.
+                  </p>
+                  <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <span>Key Milestones: Full Tuning &rarr; LoRA &rarr; QLoRA</span>
+                    <span className="text-purple-300 font-semibold">10,000x Fewer Params</span>
+                  </div>
+                </div>
+
+                {/* Trend 3: Compute Optimality & Scaling */}
+                <div className="glass-panel p-5 rounded-xl border-blue-500/20 bg-[#080d21] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-blue-400 bg-blue-950/70 border border-blue-500/30 px-2 py-0.5 rounded">
+                      2018 &rarr; 2023
+                    </span>
+                    <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-500/30 flex items-center gap-1">
+                      <span>Established Baseline</span>
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white">
+                    Compute-Optimal Scaling &amp; Data Volume
+                  </h4>
+                  <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                    Discovery that undertrained large models underperform compute-optimal smaller architectures trained on orders of magnitude more tokens with dynamic masking.
+                  </p>
+                  <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <span>Key Milestones: BERT &rarr; RoBERTa &rarr; Chinchilla</span>
+                    <span className="text-blue-300 font-semibold">160GB Token Scale</span>
+                  </div>
+                </div>
+
+                {/* Trend 4: Sentence-Level Verification */}
+                <div className="glass-panel p-5 rounded-xl border-emerald-500/20 bg-[#080d21] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/70 border border-emerald-500/30 px-2 py-0.5 rounded">
+                      2023 &rarr; 2026
+                    </span>
+                    <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                      <ArrowUpRight className="w-3 h-3" />
+                      <span>Emerging Standard</span>
+                    </span>
+                  </div>
+                  <h4 className="text-base font-bold text-white">
+                    Zero-Hallucination Entailment Gating
+                  </h4>
+                  <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                    Evolution from uncalibrated generative answers toward fail-closed verification pipelines that audit every claim against retrieved citation passages before presentation.
+                  </p>
+                  <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <span>Key Milestones: Prompting &rarr; RAG &rarr; NLI Gating</span>
+                    <span className="text-emerald-300 font-semibold">100% Calibrated</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

@@ -8,7 +8,8 @@ import {
   FileCheck,
   X,
   ShieldCheck,
-  ChevronRight
+  ChevronRight,
+  UploadCloud
 } from 'lucide-react';
 import { Hero3D } from './Hero3D';
 import type { SampleQuery } from '../types';
@@ -18,6 +19,7 @@ interface HeroSectionProps {
   onSearchChange: (val: string) => void;
   onSearchSubmit: (query: string) => void;
   onViewArchitecture: () => void;
+  onUploadClick?: () => void;
 }
 
 const SAMPLE_QUERIES: SampleQuery[] = [
@@ -52,6 +54,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   onSearchChange,
   onSearchSubmit,
   onViewArchitecture,
+  onUploadClick,
 }) => {
   const [activeChip, setActiveChip] = useState<string | null>(null);
 
@@ -202,6 +205,17 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                 <ShieldCheck className="w-4 h-4 text-cyan-400" />
                 <span>View Research Standards</span>
               </button>
+
+              {onUploadClick && (
+                <button
+                  type="button"
+                  onClick={onUploadClick}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl glass-panel glass-panel-hover text-sm font-medium text-purple-300 hover:text-white border-purple-500/30 hover:border-purple-400/60 transition-all"
+                >
+                  <UploadCloud className="w-4 h-4 text-purple-400" />
+                  <span>Upload Paper (PDF)</span>
+                </button>
+              )}
 
               <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />

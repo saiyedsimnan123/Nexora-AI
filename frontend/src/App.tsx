@@ -7,12 +7,18 @@ import { ArchitectureBanner } from './components/ArchitectureBanner';
 import { Footer } from './components/Footer';
 import { SearchModal } from './components/SearchModal';
 import { ComparePapers } from './components/ComparePapers';
+import { UploadModal } from './components/UploadModal';
+import { AnalysisModal } from './components/AnalysisModal';
 
 export const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<'home' | 'compare'>('home');
   const [comparePaperIds, setComparePaperIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
+  const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState<boolean>(false);
+  const [analysisPaperId, setAnalysisPaperId] = useState<string | null>(null);
+  const [analysisPaperTitle, setAnalysisPaperTitle] = useState<string | null>(null);
 
   const handleSearchSubmit = (query: string) => {
     setSearchQuery(query);
@@ -21,6 +27,16 @@ export const App: React.FC = () => {
 
   const handleExploreClick = () => {
     setIsModalOpen(true);
+  };
+
+  const handleOpenUpload = () => {
+    setIsUploadModalOpen(true);
+  };
+
+  const handleAnalyzePaper = (paperId: string, title?: string) => {
+    setAnalysisPaperId(paperId);
+    setAnalysisPaperTitle(title || null);
+    setIsAnalysisModalOpen(true);
   };
 
   const handleNavigate = (sectionId: string) => {
@@ -64,6 +80,7 @@ export const App: React.FC = () => {
           setCurrentView(view);
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
+        onUploadClick={handleOpenUpload}
       />
 
       {/* Main Content Sections */}
@@ -75,6 +92,8 @@ export const App: React.FC = () => {
               setCurrentView('home');
               window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
+            onAnalyzePaper={handleAnalyzePaper}
+            onOpenUpload={handleOpenUpload}
           />
         ) : (
           <>
@@ -84,6 +103,7 @@ export const App: React.FC = () => {
               onSearchChange={setSearchQuery}
               onSearchSubmit={handleSearchSubmit}
               onViewArchitecture={() => handleNavigate('standards')}
+              onUploadClick={handleOpenUpload}
             />
 
             {/* Section 2: Research Capabilities (3 Signature Panels) */}
@@ -107,6 +127,25 @@ export const App: React.FC = () => {
         onClose={() => setIsModalOpen(false)}
         query={searchQuery}
         onComparePapers={handleCompareHandoff}
+        onAnalyzePaper={handleAnalyzePaper}
+        onOpenUpload={handleOpenUpload}
+      />
+
+      {/* Document Upload Modal */}
+      <UploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        onAnalyzePaper={handleAnalyzePaper}
+        onSearchPaper={handleSearchSubmit}
+      />
+
+      {/* Structured 7-Dimension Paper Analysis Modal */}
+      <AnalysisModal
+        isOpen={isAnalysisModalOpen}
+        onClose={() => setIsAnalysisModalOpen(false)}
+        paperId={analysisPaperId}
+        paperTitle={analysisPaperTitle}
+        onComparePaper={(pid) => handleCompareHandoff([pid])}
       />
     </div>
   );

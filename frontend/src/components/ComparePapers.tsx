@@ -11,19 +11,26 @@ import {
   Scale,
   RefreshCw,
   ShieldCheck,
-  FileText
+  FileText,
+  UploadCloud,
+  Loader2,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { searchPapers, compareResearchPapers } from '../services/api';
+import { searchPapers, compareResearchPapers, getResearchGaps } from '../services/api';
 import type {
   PaperItem,
   ResearchCompareResponse,
   ComparisonTableData,
-  ComparisonRow
+  ComparisonRow,
+  ResearchGapsResponse
 } from '../types/api';
 
 interface ComparePapersProps {
   initialPaperIds?: string[];
   onBackToResearch?: () => void;
+  onAnalyzePaper?: (paperId: string, title?: string) => void;
+  onOpenUpload?: () => void;
 }
 
 // Curated benchmark papers for quick 1-click selection
@@ -56,7 +63,9 @@ const QUICK_BENCHMARK_PAPERS = [
 
 export const ComparePapers: React.FC<ComparePapersProps> = ({
   initialPaperIds = [],
-  onBackToResearch
+  onBackToResearch,
+  onAnalyzePaper,
+  onOpenUpload,
 }) => {
   const [selectedPapers, setSelectedPapers] = useState<PaperItem[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -65,6 +74,10 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
   const [isComparing, setIsComparing] = useState<boolean>(false);
   const [comparisonResult, setComparisonResult] = useState<ResearchCompareResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deepGaps, setDeepGaps] = useState<ResearchGapsResponse | null>(null);
+  const [isLoadingDeepGaps, setIsLoadingDeepGaps] = useState<boolean>(false);
+  const [deepGapsError, setDeepGapsError] = useState<string | null>(null);
+  const [showDeepGaps, setShowDeepGaps] = useState<boolean>(false);
 
   // Load initial papers if provided or default to top two benchmark papers
   useEffect(() => {
@@ -174,6 +187,8 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
 
     setIsComparing(true);
     setError(null);
+    setDeepGaps(null);
+    setDeepGapsError(null);
 
     try {
       const resp = await compareResearchPapers({
@@ -187,6 +202,24 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
       setIsComparing(false);
     }
   }, [selectedPapers]);
+
+  // Fetch evidence-backed research gaps across selected papers
+  const handleFetchDeepGaps = async () => {
+    if (selectedPapers.length < 2) return;
+    setIsLoadingDeepGaps(true);
+    setDeepGapsError(null);
+    setShowDeepGaps(true);
+
+    try {
+      const res = await getResearchGaps([selectedPapers[0].id, selectedPapers[1].id]);
+      setDeepGaps(res);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to discover research gaps.';
+      setDeepGapsError(msg);
+    } finally {
+      setIsLoadingDeepGaps(false);
+    }
+  };
 
   // Auto-run comparison when two papers are selected on load
   useEffect(() => {
@@ -258,10 +291,21 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
       {/* Paper Selection Control Strip */}
       <div className="glass-panel p-5 sm:p-6 rounded-2xl border border-white/10 bg-[#080d21] space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-            <Scale className="w-4 h-4 text-cyan-400" />
-            Active Papers to Compare ({selectedPapers.length} / 2)
-          </h3>
+          <div className="flex items-center gap-2.5">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+              <Scale className="w-4 h-4 text-cyan-400" />
+              Active Papers to Compare ({selectedPapers.length} / 2)
+            </h3>
+            {onOpenUpload && (
+              <button
+                onClick={onOpenUpload}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition-colors"
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                <span>Upload PDF</span>
+              </button>
+            )}
+          </div>
           <span className="text-xs text-slate-400">
             Select two papers from search or quick benchmark chips below.
           </span>
@@ -290,13 +334,24 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
                     )}
                   </div>
                 </div>
-                <button
-                  onClick={() => handleRemovePaper(p1.id)}
-                  className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800 transition-colors"
-                  title="Remove paper"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {onAnalyzePaper && (
+                    <button
+                      onClick={() => onAnalyzePaper(p1.id, p1.title)}
+                      className="p-1 text-slate-400 hover:text-cyan-300 rounded hover:bg-slate-800 transition-colors"
+                      title="Analyze 7 dimensions of Paper A"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleRemovePaper(p1.id)}
+                    className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800 transition-colors"
+                    title="Remove paper"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="text-xs text-slate-500 italic py-2">
@@ -326,13 +381,24 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
                     )}
                   </div>
                 </div>
-                <button
-                  onClick={() => handleRemovePaper(p2.id)}
-                  className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800 transition-colors"
-                  title="Remove paper"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {onAnalyzePaper && (
+                    <button
+                      onClick={() => onAnalyzePaper(p2.id, p2.title)}
+                      className="p-1 text-slate-400 hover:text-purple-300 rounded hover:bg-slate-800 transition-colors"
+                      title="Analyze 7 dimensions of Paper B"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleRemovePaper(p2.id)}
+                    className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800 transition-colors"
+                    title="Remove paper"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="text-xs text-slate-500 italic py-2">
@@ -607,11 +673,32 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
             </div>
 
             {/* Evidence Gaps Card */}
-            <div className="glass-panel p-5 rounded-2xl border border-white/10 bg-[#080d21] space-y-3">
-              <h4 className="text-xs font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
-                <HelpCircle className="w-4 h-4 text-amber-400" />
-                Evidence Gaps & Unreported Aspects
-              </h4>
+            <div className="glass-panel p-5 rounded-2xl border border-white/10 bg-[#080d21] space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
+                  <HelpCircle className="w-4 h-4 text-amber-400" />
+                  Evidence Gaps & Unreported Aspects
+                </h4>
+                <button
+                  type="button"
+                  onClick={handleFetchDeepGaps}
+                  disabled={isLoadingDeepGaps}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors disabled:opacity-50"
+                >
+                  {isLoadingDeepGaps ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Discovering Gaps...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{deepGaps ? 'Refresh Gaps' : 'Deep Gaps Analysis'}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
               <ul className="space-y-2 text-xs text-slate-300">
                 {tableData.evidence_gaps.map((item: string, i: number) => (
                   <li key={i} className="flex items-start gap-2">
@@ -620,6 +707,86 @@ export const ComparePapers: React.FC<ComparePapersProps> = ({
                   </li>
                 ))}
               </ul>
+
+              {/* Deep Gaps Error */}
+              {deepGapsError && (
+                <div className="p-2.5 rounded-lg bg-red-950/50 border border-red-500/30 text-xs text-red-200 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>{deepGapsError}</span>
+                </div>
+              )}
+
+              {/* Deep Research Gaps Panel */}
+              {deepGaps && (
+                <div className="pt-3 border-t border-white/[0.08] space-y-3 animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 font-bold">
+                      Evidence-Grounded Research Gaps ({deepGaps.total_gaps_count} Found)
+                    </span>
+                    <button
+                      onClick={() => setShowDeepGaps(!showDeepGaps)}
+                      className="text-slate-400 hover:text-white p-1"
+                    >
+                      {showDeepGaps ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    </button>
+                  </div>
+
+                  {showDeepGaps && (
+                    <div className="space-y-3">
+                      {deepGaps.documented_gaps.length > 0 && (
+                        <div className="space-y-1.5">
+                          <span className="text-[10px] font-mono uppercase text-slate-400">
+                            Author-Documented Limitations:
+                          </span>
+                          <div className="space-y-1.5">
+                            {deepGaps.documented_gaps.map((gap, idx) => (
+                              <div key={idx} className="p-2.5 rounded-lg bg-slate-900/60 border border-amber-500/20 text-xs text-slate-200 space-y-1">
+                                <div className="font-semibold text-white flex items-center justify-between">
+                                  <span>{gap.title}</span>
+                                  {gap.evidence_citations && gap.evidence_citations.length > 0 && (
+                                    <span className="text-[10px] font-mono text-cyan-400">
+                                      {gap.evidence_citations.join(' ')}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-slate-300 text-[11px]">{gap.description}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {deepGaps.inferred_gaps.length > 0 && (
+                        <div className="space-y-1.5">
+                          <span className="text-[10px] font-mono uppercase text-slate-400">
+                            AI-Inferred Candidate Gaps:
+                          </span>
+                          <div className="space-y-1.5">
+                            {deepGaps.inferred_gaps.map((gap, idx) => (
+                              <div key={idx} className="p-2.5 rounded-lg bg-purple-950/30 border border-purple-500/20 text-xs text-slate-200 space-y-1">
+                                <div className="font-semibold text-purple-200 flex items-center justify-between">
+                                  <span>{gap.title}</span>
+                                  {gap.confidence_score !== undefined && (
+                                    <span className="text-[10px] font-mono text-purple-400 bg-purple-950/60 px-1.5 py-0.5 rounded border border-purple-500/30">
+                                      Conf: {(gap.confidence_score * 100).toFixed(0)}%
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-slate-300 text-[11px]">{gap.description}</p>
+                                {gap.rationale && (
+                                  <p className="text-[10px] text-slate-400 italic">
+                                    Rationale: {gap.rationale}
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

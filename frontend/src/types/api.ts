@@ -158,3 +158,104 @@ export interface ReadinessResponse {
   status: string;
   checks: Record<string, ReadinessCheck>;
 }
+
+export interface DocumentIngestResponse {
+  document_id: string;
+  paper_id: string;
+  chunks_count: number;
+  indexed_chunks_count: number;
+  graph_job_id?: string | null;
+  graph_status?: string | null;
+}
+
+export interface PaperAnalysisDimension {
+  summary: string;
+  evidence_labels?: string[];
+  evidence_citations?: string[];
+  status?: 'reported' | 'uncertain' | 'not_reported' | string;
+  is_missing?: boolean;
+  details?: Record<string, unknown>;
+}
+
+export interface PaperAnalysisResponse {
+  paper_id: string;
+  title: string | null;
+  problem_and_objectives: PaperAnalysisDimension | Record<string, any>;
+  methodology_and_algorithms: PaperAnalysisDimension | Record<string, any>;
+  models_and_datasets: PaperAnalysisDimension | Record<string, any>;
+  experiments_and_metrics: PaperAnalysisDimension | Record<string, any>;
+  results_and_findings: PaperAnalysisDimension | Record<string, any>;
+  limitations: PaperAnalysisDimension | Record<string, any>;
+  future_work: PaperAnalysisDimension | Record<string, any>;
+  evidence_count: number;
+  model: string;
+  usage?: Record<string, number> | null;
+}
+
+export interface DocumentedGapItem {
+  title: string;
+  description: string;
+  category?: string;
+  paper_id?: string;
+  evidence_citations?: string[];
+  limitations?: string[];
+  is_missing?: boolean;
+}
+
+export interface InferredGapItem {
+  title: string;
+  description: string;
+  category?: string;
+  paper_ids?: string[];
+  rationale?: string;
+  confidence_score?: number;
+}
+
+export interface ResearchGapsRequest {
+  paper_ids?: string[];
+  collection_id?: string;
+  model?: string;
+  temperature?: number;
+  max_output_tokens?: number;
+}
+
+export interface ResearchGapsResponse {
+  paper_ids: string[];
+  collection_id?: string | null;
+  documented_gaps: DocumentedGapItem[];
+  inferred_gaps: InferredGapItem[];
+  total_gaps_count: number;
+  summary: string;
+  limitations: string[];
+  model: string;
+  usage?: Record<string, number> | null;
+}
+
+export interface ResearchTrendItem {
+  topic: string;
+  direction: string;
+  description: string;
+  evidence?: string[];
+}
+
+export interface ResearchTrendsRequest {
+  collection_id: string;
+  paper_ids?: string[];
+  time_unit?: string;
+  model?: string;
+  temperature?: number;
+  max_output_tokens?: number;
+}
+
+export interface ResearchTrendsResponse {
+  collection_id: string;
+  paper_ids: string[];
+  time_unit: string;
+  temporal_buckets: Record<string, any>[];
+  trends: ResearchTrendItem[];
+  missing_date_paper_ids: string[];
+  summary: string;
+  limitations: string[];
+  model: string;
+  usage?: Record<string, number> | null;
+}

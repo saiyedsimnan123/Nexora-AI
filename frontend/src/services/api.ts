@@ -11,6 +11,10 @@ import type {
   PaperSearchResponse,
   ResearchCompareRequest,
   ResearchCompareResponse,
+  DocumentIngestResponse,
+  PaperAnalysisResponse,
+  ResearchGapsResponse,
+  ResearchTrendsResponse,
 } from '../types/api';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
@@ -220,6 +224,199 @@ export async function compareResearchPapers(
 
   if (!response.ok) {
     let errorMsg = `Comparison failed (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Upload and ingest a research paper PDF via POST /api/v1/documents/ingest.
+ */
+export async function uploadDocument(
+  paperId: string,
+  file: File,
+  signal?: AbortSignal
+): Promise<DocumentIngestResponse> {
+  if (!paperId || !paperId.trim()) {
+    throw new ApiError('paper_id is required for document ingestion.', 400);
+  }
+  if (!file) {
+    throw new ApiError('A PDF file must be provided for upload.', 400);
+  }
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    throw new ApiError('Only PDF files are supported.', 400);
+  }
+
+  const formData = new FormData();
+  formData.append('paper_id', paperId.trim());
+  formData.append('file', file);
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/documents/ingest`,
+    {
+      method: 'POST',
+      body: formData,
+      signal,
+    },
+    60000 // Ingestion may take up to 60s for PDF parsing, chunking, and embedding
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Document ingestion failed (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Perform structured 7-dimension analysis on a paper via POST /api/v1/papers/analyze.
+ */
+export async function analyzePaper(
+  paperId: string,
+  signal?: AbortSignal
+): Promise<PaperAnalysisResponse> {
+  if (!paperId || !paperId.trim()) {
+    throw new ApiError('paper_id is required for paper analysis.', 400);
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/papers/analyze`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        paper_id: paperId.trim(),
+      }),
+      signal,
+    },
+    DEFAULT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Paper analysis failed (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Discover evidence-backed research gaps via POST /api/v1/research/gaps.
+ */
+export async function getResearchGaps(
+  paperIds?: string[],
+  collectionId?: string,
+  signal?: AbortSignal
+): Promise<ResearchGapsResponse> {
+  const body: Record<string, unknown> = {};
+  if (paperIds && paperIds.length > 0) {
+    body.paper_ids = paperIds;
+  } else if (collectionId) {
+    body.collection_id = collectionId;
+  } else {
+    throw new ApiError('Either paperIds or collectionId must be provided for gap discovery.', 400);
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/research/gaps`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal,
+    },
+    DEFAULT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Research gaps discovery failed (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Analyze temporal research trends via POST /api/v1/papers/trends.
+ */
+export async function getResearchTrends(
+  collectionId: string,
+  paperIds?: string[],
+  timeUnit: string = 'year',
+  signal?: AbortSignal
+): Promise<ResearchTrendsResponse> {
+  const body: Record<string, unknown> = {
+    collection_id: collectionId,
+    time_unit: timeUnit,
+  };
+  if (paperIds && paperIds.length > 0) {
+    body.paper_ids = paperIds;
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/papers/trends`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal,
+    },
+    DEFAULT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Research trends analysis failed (HTTP ${response.status})`;
     let details: unknown = null;
     try {
       const errJson = await response.json();
