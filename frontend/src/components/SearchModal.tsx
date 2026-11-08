@@ -574,29 +574,42 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Specific Relevant Finding */}
-                  {paperGroup.findings.length > 0 && (
-                    <div className="space-y-1">
+                  {/* Supporting Evidence Excerpts */}
+                  {paperGroup.sources && paperGroup.sources.length > 0 ? (
+                    <div className="space-y-3 pt-1">
                       <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
-                        Relevant Finding:
+                        Supporting Evidence:
                       </span>
-                      <p className="text-xs text-slate-200 leading-relaxed font-sans">
-                        {paperGroup.findings[0]}
-                      </p>
+                      {paperGroup.sources.map((src, sIdx) => (
+                        <div key={sIdx} className="space-y-1.5 p-3 rounded-xl bg-black/30 border border-white/[0.05]">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/30 px-1.5 py-0.5 rounded">
+                              {src.label}
+                            </span>
+                            {paperGroup.findings[sIdx] && (
+                              <span className="text-xs text-slate-200 font-medium">
+                                {paperGroup.findings[sIdx]}
+                              </span>
+                            )}
+                          </div>
+                          <blockquote className="text-xs text-slate-300 italic leading-relaxed pl-1">
+                            "{src.text_excerpt || src.text}"
+                          </blockquote>
+                        </div>
+                      ))}
                     </div>
-                  )}
-
-                  {/* Supporting Excerpts */}
-                  {paperGroup.excerpts.length > 0 && (
-                    <div className="space-y-1 pt-1">
+                  ) : paperGroup.excerpts.length > 0 ? (
+                    <div className="space-y-2 pt-1">
                       <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
-                        Supporting Excerpt:
+                        Supporting Excerpts:
                       </span>
-                      <blockquote className="text-xs text-slate-300 italic bg-black/40 p-3 rounded-xl border border-white/[0.05] leading-relaxed">
-                        "{paperGroup.excerpts[0]}"
-                      </blockquote>
+                      {paperGroup.excerpts.map((exc, eIdx) => (
+                        <blockquote key={eIdx} className="text-xs text-slate-300 italic bg-black/40 p-3 rounded-xl border border-white/[0.05] leading-relaxed">
+                          "{exc}"
+                        </blockquote>
+                      ))}
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ))
             ) : (

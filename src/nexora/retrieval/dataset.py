@@ -1092,7 +1092,6 @@ def get_default_research_dataset() -> ResearchRetrievalDataset:
             "filename": "1810.04805.pdf",
             "chunk_index": 0,
             "text": (
-                "We introduce BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. "
                 "BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning "
                 "on both left and right context in all layers. BERT is pre-trained using two novel unsupervised prediction tasks: "
                 "Masked Language Model (MLM), where 15% of the input tokens are masked at random, and Next Sentence Prediction (NSP), "
@@ -1112,7 +1111,7 @@ def get_default_research_dataset() -> ResearchRetrievalDataset:
             "filename": "1810.04805.pdf",
             "chunk_index": 1,
             "text": (
-                "BERT obtains new state-of-the-art results on eleven natural language processing tasks. On the GLUE benchmark, "
+                "BERT obtains state-of-the-art results on eleven natural language processing tasks. On the GLUE benchmark, "
                 "BERT_LARGE achieves a score of 80.5, representing a 7.7 point absolute improvement over prior work. On question answering, "
                 "BERT achieves 90.9 SQuAD v1.1 F1 and 83.1 SQuAD v2.0 F1. In terms of computational requirements, training of BERT_BASE was "
                 "performed on 4 Cloud TPUs (16 TPU chips) for 4 days, while BERT_LARGE was trained on 16 Cloud TPUs (64 TPU chips) for 4 days. "
@@ -1130,12 +1129,12 @@ def get_default_research_dataset() -> ResearchRetrievalDataset:
             "filename": "1907.11692.pdf",
             "chunk_index": 0,
             "text": (
-                "We present RoBERTa: A Robustly Optimized BERT Pretraining Approach. We find that BERT was significantly undertrained, "
-                "and present an improved recipe for training BERT models. Our modifications include: (1) training the model longer, with bigger "
-                "batches, over more data; (2) removing the next sentence prediction (NSP) objective and training on full sentences; (3) training "
-                "on longer sequences with dynamic masking, where the masking pattern is dynamically generated across training epochs instead "
-                "of fixed at preprocessing. We train over 160GB of uncompressed text from BooksCorpus, English Wikipedia, CC-News, OpenWebText, "
-                "and Stories, representing a 10x increase in data compared to BERT."
+                "The authors find that BERT was significantly undertrained, and present an improved recipe for training BERT models. "
+                "Our modifications include: (1) training the model longer, with bigger batches, over more data; "
+                "(2) removing the next sentence prediction (NSP) objective and training on full sentences; "
+                "(3) training on longer sequences with dynamic masking, where the masking pattern is dynamically generated across training epochs instead of fixed at preprocessing. "
+                "RoBERTa is pre-trained over 160GB of uncompressed text from BooksCorpus, English Wikipedia, CC-News, OpenWebText, and Stories, "
+                "representing a 10x increase in data compared to BERT."
             ),
         },
         {

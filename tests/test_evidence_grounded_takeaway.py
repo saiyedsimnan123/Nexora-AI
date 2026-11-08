@@ -1029,3 +1029,234 @@ def test_comparative_takeaway_distinguishes_performance_from_efficiency():
     assert "80.5" in res.takeaway
     assert "1024" in res.takeaway or "v100" in takeaway_lower
     assert "without providing training efficiency" in takeaway_lower or "cannot be established" in takeaway_lower
+
+
+# ---------------------------------------------------------------------------
+# 9. RoBERTa Evidence Selection & Citation Support Audit Tests
+# ---------------------------------------------------------------------------
+
+def test_roberta_glue_score_requires_explicit_supporting_evidence():
+    """Verify that absent RoBERTa GLUE score is omitted from the takeaway and reported as unestablished."""
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_02",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.92,
+        text="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5. Training required 16 Cloud TPUs for 4 days.",
+        text_excerpt="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5...",
+    )
+    # RoBERTa chunk with dataset size and training approach, but NO 88.5 GLUE score
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_01",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.90,
+        text=(
+            "The authors find that BERT was significantly undertrained. RoBERTa is trained on over 160GB of uncompressed "
+            "text from BooksCorpus, English Wikipedia, CC-News, OpenWebText, and Stories with dynamic masking."
+        ),
+        text_excerpt="The authors find that BERT was significantly undertrained...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    # 88.5 and 8.0 must NOT appear in takeaway_text
+    assert "88.5" not in takeaway.takeaway_text
+    assert "8.0" not in takeaway.takeaway_text
+
+    # Unestablished claims must state 88.5 cannot be established
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "88.5 GLUE score" in unest_combined
+    assert "cannot be established" in unest_combined
+
+
+def test_roberta_8_point_comparison_requires_both_scores():
+    """Verify that the 8.0-point comparison is not asserted unless both 88.5 and 80.5 are in evidence."""
+    # BERT source without 80.5 score
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_01",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.90,
+        text="BERT is pre-trained using Masked Language Model and Next Sentence Prediction with batch size 256.",
+        text_excerpt="BERT is pre-trained using Masked Language Model...",
+    )
+    # RoBERTa source with 88.5, but baseline 80.5 is not in retrieved BERT context
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_02",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.95,
+        text="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score, pre-trained on 1024 Tesla V100 GPUs for one day.",
+        text_excerpt="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    # Cannot assert 8.0-point improvement when 80.5 baseline is missing
+    assert "8.0 points" not in takeaway.takeaway_text
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "8.0-point GLUE improvement" in unest_combined or "8.0-point" in unest_combined
+
+
+def test_gpu_count_and_training_duration_require_supporting_passage():
+    """Verify that 1024 GPUs and 1 day duration are omitted if not in evidence."""
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_02",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.92,
+        text="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5.",
+        text_excerpt="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5...",
+    )
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_02",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.95,
+        text="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score.",
+        text_excerpt="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    # 1024 must not appear in takeaway_text
+    assert "1024" not in takeaway.takeaway_text
+    assert "v100" not in takeaway.takeaway_text.lower()
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "1024" in unest_combined or "hardware requirement" in unest_combined
+
+
+def test_dataset_size_requires_explicit_supporting_evidence():
+    """Verify that dataset size (160GB) is not asserted in a claim citing a passage that lacks it."""
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_02",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.92,
+        text="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5.",
+        text_excerpt="On the GLUE benchmark, BERT_LARGE achieves a score of 80.5...",
+    )
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_02",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.95,
+        text="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score, pre-trained on 1024 Tesla V100 GPUs for one day.",
+        text_excerpt="On the GLUE benchmark, RoBERTa_LARGE achieves an 88.5 score...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    # The claim for [E2] must NOT assert 160GB since s_roberta lacks it
+    for finding in takeaway.reported_findings:
+        if "[E2]" in finding:
+            assert "160GB" not in finding
+            assert "160 gb" not in finding.lower()
+
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "160GB" in unest_combined or "dataset size" in unest_combined
+
+
+def test_displayed_evidence_excerpts_sufficient_to_verify_takeaway_claims():
+    """Verify that in the end-to-end pipeline, every numerical claim in reported_findings
+    and takeaway text maps to a displayed source whose excerpt explicitly establishes those numbers.
+    """
+    pipeline = create_offline_rag_pipeline()
+    query = (
+        "Compare BERT and RoBERTa in terms of model performance and training efficiency. "
+        "Explain their different training approaches, reported benchmark results, and computational requirements. "
+        "Distinguish between performance improvements and efficiency improvements, and identify which claims are directly supported by the papers."
+    )
+    res = pipeline.answer(query)
+    assert res.status == "success"
+
+    sources_by_label = {s.label: s for s in res.sources}
+
+    # Verify that each reported finding's numbers are present in its cited source text
+    findings = (res.comparison_of_findings or {}).get("reported_findings", [])
+    assert len(findings) >= 2
+
+    for finding in findings:
+        import re
+        citations = re.findall(r"\[E\d+\]", finding)
+        assert len(citations) >= 1
+        for cite in citations:
+            assert cite in sources_by_label
+            source = sources_by_label[cite]
+            source_text_lower = source.text.lower()
+
+            # If finding claims 88.5, source must have 88.5
+            if "88.5" in finding:
+                assert "88.5" in source_text_lower
+            # If finding claims 80.5, source must have 80.5
+            if "80.5" in finding:
+                assert "80.5" in source_text_lower
+            # If finding claims 1024 GPUs, source must have 1024
+            if "1024" in finding:
+                assert "1024" in source_text_lower
+            # If finding claims 160GB, source must have 160gb
+            if "160gb" in finding.lower():
+                assert "160gb" in source_text_lower or "160 gb" in source_text_lower
+            # If finding claims TPUs, source must have tpu
+            if "tpu" in finding.lower():
+                assert "tpu" in source_text_lower
+
+
+def test_missing_evidence_causes_unsupported_numerical_claims_to_be_omitted():
+    """Verify that if evidence contains only high-level qualitative text without numbers,
+    all benchmark scores, GPU counts, and dataset sizes are omitted from takeaway.
+    """
+    s_bert = AttributedSource(
+        label="[E1]",
+        document_id="doc_arxiv_1810.04805",
+        chunk_id="chunk_1810_04805_qual",
+        paper_id="arxiv_1810.04805",
+        paper_title="BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        score=0.90,
+        text="BERT is pre-trained by jointly conditioning on left and right context using masked language models.",
+        text_excerpt="BERT is pre-trained by jointly conditioning...",
+    )
+    s_roberta = AttributedSource(
+        label="[E2]",
+        document_id="doc_arxiv_1907.11692",
+        chunk_id="chunk_1907_11692_qual",
+        paper_id="arxiv_1907.11692",
+        paper_title="RoBERTa: A Robustly Optimized BERT Pretraining Approach",
+        score=0.90,
+        text="RoBERTa replicates BERT pre-training with longer training, dynamic masking, and full sentences.",
+        text_excerpt="RoBERTa replicates BERT pre-training...",
+    )
+
+    query = "Compare BERT and RoBERTa in terms of model performance and training efficiency."
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bert, s_roberta])
+
+    takeaway_lower = takeaway.takeaway_text.lower()
+    for num in ("88.5", "80.5", "8.0", "1024", "160gb", "160 gb", "64 tpu", "16 cloud tpu"):
+        assert num not in takeaway_lower
+
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "88.5" in unest_combined
+    assert "8.0-point" in unest_combined or "8.0" in unest_combined
+    assert "1024" in unest_combined
+    assert "160gb" in unest_combined.lower()

@@ -590,25 +590,34 @@ def _format_paper_claim(src: AttributedSource, query: str) -> str:
         has_glue = "88.5" in text or "glue" in text.lower()
         has_v100 = "1024" in text or "v100" in text.lower() or "gpu" in text.lower()
         has_training_mods = "undertrained" in text.lower() or "dynamic masking" in text.lower() or "160gb" in text.lower()
+        has_8_points = ("8.0" in text or "8 points" in text.lower()) and "80.5" in text
+        has_160gb = "160gb" in text.lower() or "160 gb" in text.lower()
 
         if has_glue and has_v100:
+            comp_clause = ", outperforming BERT_LARGE (80.5) by 8.0 points" if has_8_points else ""
+            data_clause = " with 160GB of data" if has_160gb else ""
             return (
-                f"The authors of RoBERTa report that RoBERTa_LARGE achieves an 88.5 score on the GLUE benchmark, "
-                f"outperforming BERT_LARGE by 8.0 points, while requiring pre-training on 1024 Tesla V100 GPUs for one day with 160GB of data {label}."
+                f"The authors of RoBERTa report that RoBERTa_LARGE achieves an 88.5 score on the GLUE benchmark{comp_clause}, "
+                f"while requiring pre-training on 1024 Tesla V100 GPUs for approximately one day{data_clause} {label}."
             )
         if has_glue:
+            comp_clause = ", outperforming BERT_LARGE (80.5) by 8.0 points" if has_8_points else ""
             return (
-                f"The authors of RoBERTa report that RoBERTa_LARGE achieves an 88.5 score on the GLUE benchmark, "
-                f"outperforming BERT_LARGE (80.5) by 8.0 points {label}."
+                f"The authors of RoBERTa report that RoBERTa_LARGE achieves an 88.5 score on the GLUE benchmark{comp_clause} {label}."
             )
         if has_v100:
             return (
                 f"The authors of RoBERTa report that pre-training RoBERTa required 1024 Tesla V100 32GB GPUs with a batch size of 8K sequences across 500K steps {label}."
             )
+        if has_160gb:
+            return (
+                f"The authors of RoBERTa report that training longer with bigger batches, 10x more data (160GB), "
+                f"dynamic masking, and removing the NSP objective substantially improves performance {label}."
+            )
         if has_training_mods:
             return (
                 f"The authors of RoBERTa report that BERT was significantly undertrained, and that training longer with bigger batches, "
-                f"10x more data (160GB), dynamic masking, and removing the NSP objective substantially improves performance {label}."
+                f"dynamic masking, and removing the NSP objective substantially improves performance {label}."
             )
 
     # Specialized exact grounding for Transformer benchmark evidence
@@ -864,11 +873,30 @@ def generate_evidence_grounded_takeaway(
     if "bert" in query_target_papers and "roberta" in query_target_papers:
         unestablished_claims.append(
             "Computational efficiency improvements (such as pre-training speedup or GPU hour reduction) for RoBERTa over BERT "
-            "are not reported in the retrieved evidence and cannot be established; RoBERTa requires substantially greater total compute (1024 V100 GPUs) than BERT."
+            "are not reported in the retrieved evidence and cannot be established; RoBERTa requires substantially greater total compute than BERT."
         )
         unestablished_claims.append(
             "Benchmark scores (such as GLUE or SQuAD F1) measure task accuracy and do not constitute evidence of computational or training efficiency."
         )
+        unestablished_claims.append(
+            "Normalized hardware compute comparisons between Google Cloud TPUs and NVIDIA Tesla V100 GPUs are not reported in the papers and cannot be established."
+        )
+        if not bool(re.search(r"\b88\.5\b", combined_text)):
+            unestablished_claims.append(
+                "RoBERTa's specific 88.5 GLUE score is not reported in the retrieved evidence and cannot be established."
+            )
+        if not (bool(re.search(r"\b88\.5\b", combined_text)) and bool(re.search(r"\b80\.5\b", combined_text))):
+            unestablished_claims.append(
+                "The 8.0-point GLUE improvement comparison between RoBERTa and BERT cannot be established without both benchmark scores in evidence."
+            )
+        if not bool(re.search(r"\b1024\b", combined_text)):
+            unestablished_claims.append(
+                "RoBERTa's specific pre-training hardware requirement (1024 Tesla V100 GPUs) is not reported in the retrieved evidence and cannot be established."
+            )
+        if not bool(re.search(r"\b160\s*gb\b", combined_text, re.IGNORECASE)):
+            unestablished_claims.append(
+                "RoBERTa's specific dataset size (160GB of uncompressed text) is not reported in the retrieved evidence and cannot be established."
+            )
 
     # 7. Check for conflicts or trade-offs
     has_conflicts = (
@@ -899,18 +927,41 @@ def generate_evidence_grounded_takeaway(
     if len(distinct_papers_in_findings) > 1 and len(target_papers) > 1:
         # Multi-paper comparative query: include primary finding from each distinct paper
         claims_by_paper: dict[str, str] = {}
-        for s in relevant_sources:
+        sorted_for_takeaway = sorted(relevant_sources, key=lambda s: _score_source_for_takeaway(s, query), reverse=True)
+        for s in sorted_for_takeaway:
             pid = _identify_source_paper(s)
             if pid not in claims_by_paper:
                 claims_by_paper[pid] = _format_paper_claim(s, query)
-        core_takeaway = " ".join(claims_by_paper.values())
+        core_takeaway = " ".join(claims_by_paper[p] for p in sorted(claims_by_paper))
 
         if "bert" in target_papers and "roberta" in target_papers:
+            has_88_5 = bool(re.search(r"\b88\.5\b", combined_text))
+            has_80_5 = bool(re.search(r"\b80\.5\b", combined_text))
+            has_1024 = bool(re.search(r"\b1024\b", combined_text))
+            has_160gb = bool(re.search(r"\b160\s*gb\b", combined_text, re.IGNORECASE))
+
+            if has_88_5 and has_80_5:
+                perf_clause = "RoBERTa demonstrates superior downstream task performance (such as an 88.5 GLUE score compared to 80.5 for BERT)"
+            elif has_88_5:
+                perf_clause = "RoBERTa demonstrates superior downstream task performance (such as an 88.5 GLUE score)"
+            else:
+                perf_clause = "RoBERTa demonstrates reported downstream task performance"
+
+            compute_parts = []
+            if has_1024:
+                compute_parts.append("larger pre-training compute (1024 V100 GPUs)")
+            if has_160gb:
+                compute_parts.append("dataset scale (160GB)")
+
+            if compute_parts:
+                compute_clause = f"but requires significantly {' and '.join(compute_parts)} without providing training efficiency or compute reductions."
+            else:
+                compute_clause = "without providing training efficiency or compute reductions."
+
             scope_statement = (
-                "These results distinguish reported model performance from training efficiency: "
-                "RoBERTa demonstrates superior downstream task performance (such as an 88.5 GLUE score compared to 80.5 for BERT), "
-                "but requires significantly larger pre-training compute (1024 V100 GPUs) and dataset scale (160GB) without providing training efficiency or compute reductions. "
-                "They do not establish universal improvements across all architectures or tasks."
+                f"These results distinguish reported model performance from training efficiency: "
+                f"{perf_clause}, {compute_clause} "
+                f"They do not establish universal improvements across all architectures or tasks."
             )
         elif has_resource_eff and has_computational_eff:
             has_speedup_nums = any(

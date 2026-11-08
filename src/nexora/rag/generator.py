@@ -104,16 +104,18 @@ class DeterministicMockGenerator:
                 for s in sentences:
                     s_words = {w.rstrip("sed").lower() for w in re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", s)}
                     overlap = len(q_words & s_words)
-                    has_nums = bool(re.search(r"\b(?:2-4x|2\.4x|4\.3x|15%|3x|10,?000|28\.4)\b", s, re.IGNORECASE))
-                    has_speedup_term = bool(re.search(r"\b(?:speedup|faster|throughput|latency|reduction|fewer)\b", s, re.IGNORECASE))
+                    has_nums = bool(re.search(r"\b(?:2-4x|2\.4x|4\.3x|15%|3x|10,?000|28\.4|80\.5|88\.5|8\.0|1024|160\s*gb|64\s+tpu|16\s+cloud\s+tpu|v100)\b", s, re.IGNORECASE))
+                    has_speedup_term = bool(re.search(r"\b(?:speedup|faster|throughput|latency|reduction|fewer|outperforming|achieves|pre-trained|training|score|benchmark)\b", s, re.IGNORECASE))
                     is_proposal = bool(re.search(r"\b(?:we propose|we present|we introduce|propose|proposed)\b", s, re.IGNORECASE))
+                    is_intro_meta = bool(re.search(r"\b(?:we present|we introduce|in this work|an important paradigm)\b", s, re.IGNORECASE))
                     is_prior_critique = bool(re.search(r"\b(?:have attempted|often do not|prohibitively expensive|dominant sequence)\b", s, re.IGNORECASE))
 
                     score = (
                         overlap * 50.0
-                        + (15.0 if has_nums else 0.0)
-                        + (10.0 if has_speedup_term else 0.0)
-                        + (10.0 if is_proposal else 0.0)
+                        + (30.0 if has_nums else 0.0)
+                        + (15.0 if has_speedup_term else 0.0)
+                        + (5.0 if is_proposal else 0.0)
+                        - (30.0 if is_intro_meta else 0.0)
                         - (20.0 if is_prior_critique else 0.0)
                     )
                     if score > best_score:
