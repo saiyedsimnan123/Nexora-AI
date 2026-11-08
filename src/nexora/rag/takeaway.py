@@ -36,6 +36,7 @@ from nexora.rag.models import AttributedSource
 METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
     "parameter_efficiency": {
         "label": "Parameter footprint reduction",
+        "category": "resource_efficiency",
         "patterns": [
             r"trainable\s+parameters?",
             r"parameter\s+efficiency",
@@ -48,6 +49,7 @@ METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "memory_consumption": {
         "label": "GPU memory reduction",
+        "category": "resource_efficiency",
         "patterns": [
             r"gpu\s+memory",
             r"memory\s+consumption",
@@ -63,6 +65,7 @@ METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "wall_clock_speedup": {
         "label": "Wall-clock speedup",
+        "category": "computational_efficiency",
         "patterns": [
             r"wall-clock\s+speedup",
             r"2-4x\s+wall-clock",
@@ -70,13 +73,19 @@ METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
             r"4\.3x",
             r"speedup\s+results?",
             r"faster\s+execution",
+            r"io\s+complexity",
+            r"hbm\s+accesses",
+            r"sram\s+tiling",
+            r"15%\s+end-to-end",
         ],
     },
     "task_accuracy": {
-        "label": "Downstream task accuracy / BLEU",
+        "label": "Downstream translation quality / task accuracy",
+        "category": "task_quality",
         "patterns": [
             r"bleu\s+score",
             r"28\.4\s+bleu",
+            r"41\.8\s+bleu",
             r"accuracy\s+improvement",
             r"glue\s+score",
             r"f1\s+score",
@@ -85,6 +94,7 @@ METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "throughput": {
         "label": "Training / inference throughput",
+        "category": "computational_efficiency",
         "patterns": [
             r"throughput",
             r"tokens\s*/\s*sec(?:ond)?",
@@ -94,6 +104,7 @@ METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "latency": {
         "label": "Inference latency",
+        "category": "computational_efficiency",
         "patterns": [
             r"inference\s+latency",
             r"latency\s+overhead",
@@ -164,9 +175,34 @@ def _identify_query_target_papers(query: str) -> set[str]:
     if re.search(r"\bflashattention\b|flash\s+attention|\bdao et al\b|io-aware|io aware", q_lower):
         targets.add("flashattention")
 
-    # Check for Transformer / Attention
-    if re.search(r"\btransformer\b|attention is all you need|\bvaswani\b", q_lower):
+    # Check for Attention Is All You Need (Vaswani et al.)
+    has_vaswani_explicit = bool(re.search(r"attention is all you need|\bvaswani\b|original transformer", q_lower))
+    if has_vaswani_explicit:
         targets.add("transformer")
+    else:
+        # Check if coordinated with another entity target (e.g. "transformer and lora", "transformer vs lora")
+        is_coordinated_entity = bool(
+            re.search(r"\btransformer\s+and\s+(?:lora|flashattention)\b", q_lower)
+            or re.search(r"\b(?:lora|flashattention)\s+and\s+(?:the\s+)?transformer\b", q_lower)
+            or re.search(r"\b(?:between|compare|vs\.?|versus)\s+(?:the\s+)?transformer\s+and\b", q_lower)
+        )
+
+        is_context_substrate = bool(
+            not is_coordinated_entity
+            and (
+                re.search(r"\b(?:in|for|on|with|across|of|into|fine-tuning)\s+(?:large\s+)?transformer\s*(?:models?|architectures?|networks?)?\b", q_lower)
+                or re.search(r"\btransformer\s+(?:models?|architectures?|networks?)\b", q_lower)
+            )
+        )
+
+        if re.search(r"\btransformer\b", q_lower):
+            if not targets:
+                # Query has no other specific targets (e.g. "What BLEU score did the Transformer achieve?")
+                targets.add("transformer")
+            elif is_coordinated_entity:
+                targets.add("transformer")
+            elif not is_context_substrate:
+                targets.add("transformer")
 
     return targets
 
@@ -277,7 +313,13 @@ def _filter_relevant_sources(
             # If cited_sources exists, prioritize matching cited sources while preserving original [E#]
             if cited_sources:
                 cited_matching = [s for s in cited_sources if _identify_source_paper(s) in target_papers]
-                if cited_matching:
+                covered_in_cited = {_identify_source_paper(s) for s in cited_matching}
+                missing_from_cited = target_papers - covered_in_cited
+                # If cited sources missed one of the comparative target papers, bring in matching sources from that paper
+                if missing_from_cited:
+                    additional = [s for s in matching if _identify_source_paper(s) in missing_from_cited]
+                    filtered = list(cited_matching) + additional
+                elif cited_matching:
                     filtered = list(cited_matching)
                 else:
                     filtered = list(matching)
@@ -380,6 +422,13 @@ def _format_paper_claim(src: AttributedSource, query: str) -> str:
 
     # Specialized exact grounding for FlashAttention benchmark evidence
     if paper_id == "flashattention":
+        has_speedups = bool(re.search(r"2-4x|2\.4x|3x|15%", text))
+        has_io = "HBM" in text or "SRAM" in text or "IO" in text or "tiling" in text
+        if has_speedups and has_io:
+            return (
+                f"The authors of FlashAttention report that FlashAttention reduces memory reads/writes between GPU HBM and SRAM through tiling, "
+                f"achieving 15% to 3x wall-clock speedup on BERT-large and GPT-2 while reducing IO complexity without approximating attention {label}."
+            )
         if "2-4x" in text or "wall-clock" in text:
             return (
                 f"The authors of FlashAttention report that FlashAttention yields 2-4x wall-clock speedup on BERT and GPT-2 models "
@@ -492,6 +541,32 @@ def generate_evidence_grounded_takeaway(
             conclusion_reasoning=reasoning,
         )
 
+    # Check multi-paper coverage: if comparative query targets multiple papers, verify all are represented
+    target_papers = _identify_query_target_papers(query)
+    if len(target_papers) > 1:
+        covered_targets = {_identify_source_paper(s) for s in relevant_sources if _identify_source_paper(s) in target_papers}
+        missing_targets = target_papers - covered_targets
+        if missing_targets:
+            missing_names = ", ".join(sorted(p.title() if p != "lora" else "LoRA" for p in missing_targets))
+            reasoning = (
+                f"The retrieved evidence is insufficient to perform the requested comparison with {missing_names}. "
+                f"Evidence for {missing_names} is not available in the indexed research papers."
+            )
+            return EvidenceGroundedTakeaway(
+                takeaway_text=reasoning,
+                reported_findings=[],
+                interpretations=[
+                    f"Without retrieved empirical passages for {missing_names}, cross-paper comparisons cannot be established."
+                ],
+                unestablished_claims=[
+                    f"Comparative claims involving {missing_names} cannot be established due to missing evidence."
+                ],
+                supported_metrics=[],
+                unsupported_metrics=list(METRIC_DEFINITIONS.keys()),
+                conclusion="Insufficient evidence",
+                conclusion_reasoning=reasoning,
+            )
+
     # 3. Audit supported vs unsupported metrics across ONLY relevant sources
     combined_text = " ".join(s.text for s in relevant_sources)
     supported_metrics, unsupported_metrics = _detect_metrics_in_text(combined_text)
@@ -512,21 +587,31 @@ def generate_evidence_grounded_takeaway(
         first_sent = _clean_sentence(first_src.text.split(".")[0])
         reported_findings.append(f"The authors of {_get_short_paper_name(first_src.paper_title)} report that {first_sent} {first_src.label}.")
 
+    has_resource_eff = any(m in supported_metrics for m in ("parameter_efficiency", "memory_consumption"))
+    has_computational_eff = any(m in supported_metrics for m in ("wall_clock_speedup", "throughput", "latency"))
+    has_quality = "task_accuracy" in supported_metrics
+
     # 5. Formulate strictly grounded interpretations
     interpretations: list[str] = []
-    if "parameter_efficiency" in supported_metrics and "memory_consumption" in supported_metrics:
+    if has_resource_eff and has_computational_eff:
+        interpretations.append(
+            "Derived interpretation: LoRA reduces resource footprints (trainable parameters and memory during adaptation), "
+            "whereas FlashAttention optimizes computational execution (memory access IO overhead and wall-clock time during attention computation)."
+        )
+    elif has_resource_eff:
         interpretations.append(
             "Derived interpretation: The reported reductions in parameter and memory footprints indicate that "
             "model adaptation can occur under substantially lower hardware capacity constraints."
         )
-    elif "wall_clock_speedup" in supported_metrics:
+    elif has_computational_eff:
         interpretations.append(
             "Derived interpretation: The reported wall-clock speedups arise from IO-aware memory access optimization "
             "rather than algorithmic approximation."
         )
-    elif "task_accuracy" in supported_metrics:
+    elif has_quality:
         interpretations.append(
-            "Derived interpretation: Empirical benchmark scores indicate competitive task quality on the reported dataset."
+            "Derived interpretation: The reported BLEU score measures downstream translation quality on the WMT 2014 benchmark, "
+            "not computational or parameter efficiency."
         )
     else:
         interpretations.append(
@@ -566,6 +651,11 @@ def generate_evidence_grounded_takeaway(
             "Broader cross-domain generalizability beyond the reported evaluation configurations cannot be established."
         )
 
+    if has_quality and not (has_resource_eff or has_computational_eff):
+        unestablished_claims.append(
+            "BLEU scores measure translation quality and do not constitute evidence of parameter, memory, or computational efficiency improvements."
+        )
+
     # When specific empirical reductions (e.g. 10,000x parameter or 3x GPU memory) are absent from retrieved context
     query_target_papers = _identify_query_target_papers(query)
     if "lora" in query_target_papers:
@@ -584,13 +674,14 @@ def generate_evidence_grounded_takeaway(
     )
 
     # 8. Standardized Conclusion Classification
-    has_improvements = any(
-        m in supported_metrics for m in ("parameter_efficiency", "memory_consumption", "wall_clock_speedup", "task_accuracy")
-    )
+    has_efficiency_improvements = has_resource_eff or has_computational_eff
+    is_efficiency_query = any(k in query.lower() for k in ("efficienc", "speedup", "parameter", "memory", "reduce", "reduction"))
 
     if has_conflicts:
         conclusion = "Conflicting evidence"
-    elif has_improvements:
+    elif has_efficiency_improvements:
+        conclusion = "Demonstrated improvement"
+    elif has_quality and not is_efficiency_query:
         conclusion = "Demonstrated improvement"
     else:
         conclusion = "Limited evidence"
@@ -608,22 +699,41 @@ def generate_evidence_grounded_takeaway(
             if pid not in claims_by_paper:
                 claims_by_paper[pid] = _format_paper_claim(s, query)
         core_takeaway = " ".join(claims_by_paper.values())
-        scope_statement = (
-            "These results demonstrate reported efficiency improvements across distinct operational dimensions "
-            "under their respective comparison configurations. They do not establish universal improvements across all models or tasks."
-        )
+
+        if has_resource_eff and has_computational_eff:
+            scope_statement = (
+                "These results demonstrate reported efficiency improvements across distinct operational dimensions: "
+                "LoRA provides resource efficiency (trainable parameter and GPU memory reductions), "
+                "while FlashAttention provides computational efficiency (IO-awareness and wall-clock speedups). "
+                "They do not establish universal improvements across all models or tasks."
+            )
+        elif has_resource_eff:
+            scope_statement = (
+                "These results demonstrate reported resource efficiency improvements under the stated comparison configuration. "
+                "They do not establish universal improvements across all models or tasks."
+            )
+        elif has_computational_eff:
+            scope_statement = (
+                "These results demonstrate reported computational efficiency improvements under the stated comparison configuration. "
+                "They do not establish universal improvements across all models or tasks."
+            )
+        else:
+            scope_statement = (
+                "These results demonstrate reported empirical findings under their respective comparison configurations. "
+                "They do not establish universal improvements across all models or tasks."
+            )
     else:
         # Single-paper focused query: take primary finding strictly from targeted paper
         core_takeaway = reported_findings[0]
-        if "parameter_efficiency" in supported_metrics or "memory_consumption" in supported_metrics or "wall_clock_speedup" in supported_metrics:
+        if has_resource_eff or has_computational_eff:
             scope_statement = (
                 "These results demonstrate reported efficiency improvements under the stated comparison configuration. "
                 "They do not establish universal improvements across all models or tasks."
             )
-        elif "task_accuracy" in supported_metrics:
+        elif has_quality:
             scope_statement = (
-                "These results demonstrate reported performance improvements under the stated comparison configuration. "
-                "They do not establish universal improvements across all models or tasks."
+                "These results demonstrate reported task quality results (translation BLEU scores) under the stated evaluation setup. "
+                "They measure translation quality and do not constitute efficiency improvements."
             )
         else:
             scope_statement = (

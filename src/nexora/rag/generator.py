@@ -138,7 +138,27 @@ class DeterministicMockGenerator:
         }
         query_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", query.lower())) - stopwords
 
-        if query_words and len(context.items) > 1:
+        # For multi-paper context (e.g. comparative queries), ensure representation from each distinct paper
+        items_by_paper: dict[str, list[EvidenceItem]] = {}
+        for item in context.items:
+            meta = item.metadata if isinstance(item.metadata, dict) else {}
+            title = str(meta.get("title") or item.document_id)
+            items_by_paper.setdefault(title, []).append(item)
+
+        if len(items_by_paper) > 1:
+            selected: list[EvidenceItem] = []
+            selected_ids: set[str] = set()
+            for p_items in items_by_paper.values():
+                best_item = p_items[0]
+                selected.append(best_item)
+                selected_ids.add(best_item.chunk_id)
+
+            for item in context.items:
+                if item.chunk_id not in selected_ids and len(selected) < 4:
+                    selected.append(item)
+                    selected_ids.add(item.chunk_id)
+            active_items = selected
+        elif query_words and len(context.items) > 1:
             scored_candidates: list[tuple[int, int, EvidenceItem]] = []
             for rank, item in enumerate(context.items):
                 item_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{3,}\b", (item.text + " " + (item.metadata.get("title") or "")).lower()))

@@ -568,3 +568,124 @@ def test_takeaway_does_not_invent_quantitative_findings_when_evidence_is_absent(
     unest_str = " ".join(takeaway.unestablished_claims).lower()
     assert "cannot be established" in unest_str or "not reported" in unest_str
     assert "gpu memory" in unest_str or "quantitative" in unest_str
+
+
+# ---------------------------------------------------------------------------
+# 7. Comparative Query Intent & Cross-Paper Relevance Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_comparative_target_selection_lora_and_flashattention():
+    """Verify that 'in Transformer models' is recognized as context substrate, not a target paper."""
+    from nexora.rag.takeaway import _identify_query_target_papers
+
+    query = "Compare how LoRA and FlashAttention improve efficiency in Transformer models. Explain their different approaches and reported results."
+    targets = _identify_query_target_papers(query)
+
+    assert "lora" in targets
+    assert "flashattention" in targets
+    assert "transformer" not in targets
+    assert targets == {"lora", "flashattention"}
+
+
+def test_comparative_pipeline_excludes_attention_is_all_you_need():
+    """End-to-end pipeline run on comparative query retrieves ONLY LoRA and FlashAttention.
+
+    Zero Attention Is All You Need chunks or BLEU scores appear in sources, answer, or takeaway.
+    """
+    pipeline = create_offline_rag_pipeline()
+    query = "Compare how LoRA and FlashAttention improve efficiency in Transformer models. Explain their different approaches and reported results."
+    res = pipeline.answer(query)
+
+    assert res.status == "success"
+    assert len(res.sources) >= 2
+
+    # Sources must only contain LoRA and FlashAttention
+    retrieved_titles = [s.paper_title for s in res.sources]
+    assert all("Attention Is All You Need" not in t for t in retrieved_titles)
+    assert any("LoRA" in t for t in retrieved_titles)
+    assert any("FlashAttention" in t for t in retrieved_titles)
+
+    # Answer text must not mention or cite Attention Is All You Need or BLEU
+    assert "Attention Is All You Need" not in res.answer
+    assert "BLEU" not in res.answer
+    assert "28.4" not in res.answer
+
+    # Takeaway text must not contain Attention Is All You Need or BLEU
+    assert "Attention Is All You Need" not in res.takeaway
+    assert "BLEU" not in res.takeaway
+    assert "28.4" not in res.takeaway
+
+
+def test_bleu_not_classified_as_efficiency_metric():
+    """Verifies BLEU score is classified as task_quality and denied as an efficiency metric."""
+    s_bleu = _make_source(
+        "[E1]",
+        "Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task.",
+        title="Attention Is All You Need",
+        paper_id="arxiv_1706.03762",
+    )
+
+    query = "What efficiency improvements does the Transformer provide?"
+    takeaway = generate_evidence_grounded_takeaway(query, [s_bleu])
+
+    # BLEU must NOT be classified as an efficiency improvement
+    assert takeaway.conclusion != "Demonstrated improvement"
+    assert "task_accuracy" in takeaway.supported_metrics
+
+    # Must explicitly state in unestablished claims that BLEU is not efficiency
+    unest_combined = " ".join(takeaway.unestablished_claims)
+    assert "BLEU" in unest_combined
+    assert "translation quality" in unest_combined.lower()
+    assert "efficiency" in unest_combined.lower()
+
+
+def test_comparative_citations_and_attribution_intact():
+    """Verifies LoRA and FlashAttention retain separate citation IDs and distinct claims."""
+    pipeline = create_offline_rag_pipeline()
+    query = "Compare how LoRA and FlashAttention improve efficiency in Transformer models. Explain their different approaches and reported results."
+    res = pipeline.answer(query)
+
+    assert res.status == "success"
+    # Takeaway text must cite both distinct papers with their respective [E#] labels
+    takeaway = res.takeaway
+    assert "LoRA" in takeaway
+    assert "FlashAttention" in takeaway
+
+    # Both papers must have citations in takeaway
+    assert any(f"[{lbl}]" in takeaway or f"[{lbl}" in takeaway for lbl in ("E1", "E2", "E3", "E4"))
+
+    # Distinct claims: LoRA has resource efficiency (parameters/memory), FlashAttention has computational efficiency (speedup/tiling/IO)
+    takeaway_lower = takeaway.lower()
+    assert "resource efficiency" in takeaway_lower
+    assert "computational efficiency" in takeaway_lower
+    assert "parameter" in takeaway_lower
+    assert "flashattention" in takeaway_lower
+
+
+def test_comparative_insufficient_evidence_when_target_unavailable():
+    """When FlashAttention is missing from the indexed dataset, pipeline gracefully returns insufficient_evidence."""
+    from nexora.rag.pipeline import RAGPipeline
+    from nexora.retrieval.models import RetrievedChunk, SearchResult
+
+    class MockOnlyLoRARetrieval:
+        def retrieve(self, query: str, limit: int = 5, **kwargs):
+            return SearchResult(
+                query=query,
+                results=[
+                    RetrievedChunk(
+                        document_id="doc_lora",
+                        chunk_id="chunk_lora_01",
+                        text="LoRA reduces trainable parameters by 10,000 times.",
+                        score=0.95,
+                        metadata={"title": "LoRA: Low-Rank Adaptation of Large Language Models", "paper_id": "arxiv_2106.09685"},
+                    )
+                ],
+            )
+
+    pipe = RAGPipeline(MockOnlyLoRARetrieval())
+    query = "Compare how LoRA and FlashAttention improve efficiency in Transformer models. Explain their different approaches and reported results."
+    res = pipe.answer(query)
+
+    assert res.status == "insufficient_evidence"
+    assert res.conclusion == "Insufficient evidence"
+    assert "flashattention" in res.conclusion_reasoning.lower()
