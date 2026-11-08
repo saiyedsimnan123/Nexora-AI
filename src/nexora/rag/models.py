@@ -137,6 +137,7 @@ class RAGResponse:
     limitations_and_conflicts: dict[str, Any] | None = None
     conclusion: str | None = None
     conclusion_reasoning: str | None = None
+    takeaway: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
@@ -169,6 +170,8 @@ class RAGResponse:
             object.__setattr__(self, "limitations_and_conflicts", copy.deepcopy(self.limitations_and_conflicts))
         if self.usage is not None:
             object.__setattr__(self, "usage", dict(self.usage))
+        if self.takeaway is None and self.conclusion_reasoning is not None:
+            object.__setattr__(self, "takeaway", self.conclusion_reasoning)
 
     @property
     def has_citations(self) -> bool:
@@ -201,4 +204,5 @@ class RAGResponse:
             "limitations_and_conflicts": copy.deepcopy(self.limitations_and_conflicts) if self.limitations_and_conflicts else None,
             "conclusion": self.conclusion,
             "conclusion_reasoning": self.conclusion_reasoning,
+            "takeaway": self.takeaway or self.conclusion_reasoning,
         }

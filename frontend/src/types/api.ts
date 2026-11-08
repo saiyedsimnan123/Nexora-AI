@@ -31,12 +31,18 @@ export interface ComparisonOfFindings {
   relationships: string[];
   direct_evidence: string[];
   interpretation: string[];
+  reported_findings?: string[];
+  unestablished_claims?: string[];
+  supported_metrics?: string[];
+  unsupported_metrics?: string[];
 }
 
 export interface LimitationsAndConflicts {
   limitations: string[];
   conflicts: string[];
   evidence_gaps: string[];
+  what_cannot_be_concluded?: string[];
+  unsupported_metrics?: string[];
   insufficient_evidence_notes?: string;
 }
 
@@ -73,6 +79,7 @@ export interface RAGQueryResponse {
   limitations_and_conflicts?: LimitationsAndConflicts | null;
   conclusion?: 'Demonstrated improvement' | 'Limited evidence' | 'Conflicting evidence' | 'Insufficient evidence' | string | null;
   conclusion_reasoning?: string | null;
+  takeaway?: string | null;
 }
 
 export interface PaperItem {

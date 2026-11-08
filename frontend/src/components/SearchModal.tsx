@@ -228,7 +228,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   const compFindings = currentData.comparison_of_findings;
   const limConflicts = currentData.limitations_and_conflicts;
   const conclusion = currentData.conclusion || 'Demonstrated improvement';
-  const conclusionReasoning = currentData.conclusion_reasoning || '';
+  const takeaway = currentData.takeaway || currentData.conclusion_reasoning || '';
 
   // Extract paper IDs for direct comparison handoff
   const distinctPaperIds = Array.from(
@@ -498,13 +498,13 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
               {renderFormattedAnswer(currentData.answer)}
 
-              {/* Conclusion Reason Banner */}
-              {conclusionReasoning && (
+              {/* Evidence-Grounded Takeaway Banner */}
+              {takeaway && (
                 <div className="p-3.5 rounded-xl bg-[#09102c] border border-cyan-500/20 text-xs text-slate-300 space-y-1">
                   <span className="font-mono uppercase tracking-wider text-cyan-400 font-bold text-[11px] block">
-                    Takeaway & Evidence Basis:
+                    Evidence-Grounded Takeaway:
                   </span>
-                  <p className="leading-relaxed">{conclusionReasoning}</p>
+                  <p className="leading-relaxed">{takeaway}</p>
                 </div>
               )}
             </div>
@@ -691,6 +691,24 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                     ))}
                   </ul>
                 </div>
+
+                {/* Claims Not Established in Retrieved Evidence */}
+                {compFindings.unestablished_claims && compFindings.unestablished_claims.length > 0 && (
+                  <div className="p-4 rounded-xl bg-slate-900/80 border border-rose-500/30 space-y-2">
+                    <h4 className="text-xs font-mono uppercase tracking-wider text-rose-300 font-bold flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 text-rose-400" />
+                      Claims Not Established in Evidence
+                    </h4>
+                    <ul className="space-y-1.5 text-xs text-slate-300">
+                      {compFindings.unestablished_claims.map((item, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <span className="text-rose-400">•</span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="p-6 text-center text-xs text-slate-400 italic bg-slate-900/60 rounded-xl border border-white/10">

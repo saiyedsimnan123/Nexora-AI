@@ -25,6 +25,7 @@ from nexora.rag.generator import (
     LLMAnswerGenerator,
 )
 from nexora.rag.models import AttributedSource, RAGRequest, RAGResponse
+from nexora.rag.takeaway import generate_evidence_grounded_takeaway
 from nexora.retrieval.bm25 import BM25Index
 from nexora.retrieval.dataset import (
     get_pilot_benchmark_dataset,
@@ -162,15 +163,22 @@ def _build_structured_research_insights(
         relationships.append(f"All reported findings originate from {paper_titles[0]}.")
         interpretation.append("Empirical claims are directly supported by the retrieved document passages.")
 
+    # 3. Generate Evidence-Grounded Takeaway & Objective Metric Audit
+    takeaway_obj = generate_evidence_grounded_takeaway(query, sources, is_insufficient=is_insufficient)
+
     comparison_of_findings = {
         "agreements": agreements,
         "differences": differences,
         "relationships": relationships,
         "direct_evidence": direct_evidence,
-        "interpretation": interpretation,
+        "reported_findings": takeaway_obj.reported_findings,
+        "interpretation": takeaway_obj.interpretations if takeaway_obj.interpretations else interpretation,
+        "unestablished_claims": takeaway_obj.unestablished_claims,
+        "supported_metrics": takeaway_obj.supported_metrics,
+        "unsupported_metrics": takeaway_obj.unsupported_metrics,
     }
 
-    # 3. Limitations and Conflicting Evidence
+    # 4. Limitations and Conflicting Evidence
     limitations: list[str] = []
     conflicts: list[str] = []
     evidence_gaps: list[str] = []
@@ -200,26 +208,13 @@ def _build_structured_research_insights(
         "limitations": limitations,
         "conflicts": conflicts,
         "evidence_gaps": evidence_gaps,
+        "what_cannot_be_concluded": takeaway_obj.unestablished_claims,
+        "unsupported_metrics": takeaway_obj.unsupported_metrics,
         "insufficient_evidence_notes": "All claims are strictly bounded by retrieved excerpts; unmentioned dimensions are flagged as not reported.",
     }
 
-    # 4. Standardized Conclusion Classification
-    has_improvements = any(
-        term in combined_text
-        for term in ("speedup", "faster", "reduce", "10,000 times", "3x", "outperforms", "better", "bleu", "optimal")
-    )
-    if has_improvements:
-        conclusion = "Demonstrated improvement"
-        conclusion_reasoning = (
-            "Empirical evidence demonstrates verified improvements in computational efficiency, "
-            "throughput, or parameter reduction on standard benchmarks compared to baseline implementations."
-        )
-    elif len(conflicts) > 1:
-        conclusion = "Conflicting evidence"
-        conclusion_reasoning = "Retrieved findings exhibit trade-offs across distinct evaluation criteria."
-    else:
-        conclusion = "Limited evidence"
-        conclusion_reasoning = "Retrieved passages provide preliminary qualitative support without broad empirical replication."
+    conclusion = takeaway_obj.conclusion
+    conclusion_reasoning = takeaway_obj.takeaway_text
 
     return evidence_by_paper, comparison_of_findings, limitations_and_conflicts, conclusion, conclusion_reasoning
 
@@ -549,6 +544,7 @@ class RAGPipeline:
             limitations_and_conflicts=lim_conflicts,
             conclusion=conclusion,
             conclusion_reasoning=conclusion_reasoning,
+            takeaway=conclusion_reasoning,
         )
 
 

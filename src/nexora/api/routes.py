@@ -535,6 +535,10 @@ class RAGQueryResponseBody(BaseModel):
         default=None,
         description="Explanation supporting the conclusion classification.",
     )
+    takeaway: str | None = Field(
+        default=None,
+        description="Concise, evidence-grounded takeaway answering the inquiry.",
+    )
 
 
 class PaperItemResponseBody(BaseModel):
