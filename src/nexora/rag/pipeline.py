@@ -510,7 +510,7 @@ class RAGPipeline:
                     answer=f"I could not find sufficient evidence in the indexed research papers to answer this comparative question. Missing target paper(s): {missing_str}.",
                     sources=[],
                     cited_sources=[],
-                    is_grounded=False,
+                    is_grounded=True,
                     is_mock=self._generator.is_mock,
                     model=model or self._generator.model_name,
                     status="insufficient_evidence",

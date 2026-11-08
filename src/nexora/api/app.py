@@ -100,7 +100,10 @@ async def _analysis_failed(request: Request, exc: Exception) -> JSONResponse:
 
 
 async def _comparison_failed(request: Request, exc: Exception) -> JSONResponse:
+    import re
     detail = str(exc).strip()
+    detail = re.sub(r"sk-[a-zA-Z0-9_\-]{8,}", "[REDACTED]", detail)
+    detail = re.sub(r"Bearer\s+[a-zA-Z0-9_\-\.]{8,}", "Bearer [REDACTED]", detail, flags=re.IGNORECASE)
     message = f"The paper comparison could not be completed: {detail}" if detail else "The paper comparison could not be completed."
     return _error_response(500, "comparison_failed", message)
 

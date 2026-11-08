@@ -238,3 +238,27 @@ def test_from_env_reads_os_environ_by_default():
         config = EmbeddingConfig.from_env()
     assert config.provider == "local"
     assert config.model == "m1"
+
+
+def test_openai_embedding_environment_fallback():
+    environ = {
+        ENV_PROVIDER: "openai",
+        "OPENAI_API_KEY": "sk-test-openai-key-abc",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    }
+    config = EmbeddingConfig.from_env(environ)
+    assert config.provider == "openai"
+    assert config.model == "text-embedding-3-small"
+    assert config.api_key == "sk-test-openai-key-abc"
+    assert config.base_url == "https://api.openai.com/v1"
+
+
+def test_gemini_embedding_environment_fallback():
+    environ = {
+        ENV_PROVIDER: "gemini",
+        "GEMINI_API_KEY": "gemini-key-xyz",
+    }
+    config = EmbeddingConfig.from_env(environ)
+    assert config.provider == "gemini"
+    assert config.model == "text-embedding-004"
+    assert config.api_key == "gemini-key-xyz"

@@ -142,15 +142,33 @@ class EmbeddingConfig:
         """
         env = os.environ if environ is None else environ
         provider = _env_text(env, ENV_PROVIDER) or DEFAULT_PROVIDER
+        prov_lower = provider.strip().lower()
+
         api_key = _env_text(env, ENV_API_KEY)
-        if api_key is None and provider.strip().lower() == "gemini":
-            api_key = _env_text(env, ENV_GEMINI_API_KEY) or _env_text(env, ENV_NEXORA_GEMINI_API_KEY)
+        if api_key is None:
+            if prov_lower == "gemini":
+                api_key = _env_text(env, ENV_GEMINI_API_KEY) or _env_text(env, ENV_NEXORA_GEMINI_API_KEY)
+            elif prov_lower == "openai":
+                api_key = _env_text(env, "OPENAI_API_KEY")
+
+        model = _env_text(env, ENV_MODEL)
+        if not model:
+            if prov_lower == "openai":
+                model = "text-embedding-3-small"
+            elif prov_lower == "gemini":
+                model = "text-embedding-004"
+            else:
+                model = DEFAULT_MODEL
+
+        base_url = _env_text(env, ENV_BASE_URL)
+        if not base_url and prov_lower == "openai":
+            base_url = _env_text(env, "OPENAI_BASE_URL")
 
         return cls(
             provider=provider,
-            model=_env_text(env, ENV_MODEL) or DEFAULT_MODEL,
+            model=model,
             api_key=api_key,
-            base_url=_env_text(env, ENV_BASE_URL),
+            base_url=base_url,
             dimension=_env_int(env, ENV_DIMENSION),
             batch_size=_env_int(env, ENV_BATCH_SIZE),
         )

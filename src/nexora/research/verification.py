@@ -418,13 +418,10 @@ class ClaimToEvidenceVerifier:
         if self._llm is not None and resolved_items:
             messages = self._prompt_builder.build(claim.claim_text, resolved_items)
             try:
-                response = self._llm.generate(messages, temperature=0.0)
-                raw_text = response.text.strip()
-                # Strip markdown fences if present
-                if raw_text.startswith("```"):
-                    raw_text = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text)
-                    raw_text = re.sub(r"\n?```$", "", raw_text).strip()
+                from nexora.research.analysis_service import _clean_json_text
 
+                response = self._llm.generate(messages, temperature=0.0)
+                raw_text = _clean_json_text(response.text)
                 parsed = json.loads(raw_text)
                 if not isinstance(parsed, dict):
                     raise ValueError("Verifier output is not a JSON object")

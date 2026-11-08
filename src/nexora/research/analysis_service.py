@@ -36,11 +36,37 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 
 def _clean_json_text(text: str) -> str:
-    """Extract raw JSON text from markdown code blocks if present."""
+    """Extract raw JSON text from markdown code blocks or surrounding conversational text."""
     match = _JSON_BLOCK_RE.search(text)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+    candidate = match.group(1).strip() if match else text.strip()
+
+    # If candidate is already wrapped in braces/brackets, return it
+    if (candidate.startswith("{") and candidate.endswith("}")) or (
+        candidate.startswith("[") and candidate.endswith("]")
+    ):
+        return candidate
+
+    # Search for the outermost JSON object
+    first_brace = candidate.find("{")
+    last_brace = candidate.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        # Check if an outermost array encloses this
+        first_bracket = candidate.find("[")
+        last_bracket = candidate.rfind("]")
+        if (
+            first_bracket != -1
+            and first_bracket < first_brace
+            and last_bracket > last_brace
+        ):
+            return candidate[first_bracket : last_bracket + 1].strip()
+        return candidate[first_brace : last_brace + 1].strip()
+
+    first_bracket = candidate.find("[")
+    last_bracket = candidate.rfind("]")
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        return candidate[first_bracket : last_bracket + 1].strip()
+
+    return candidate
 
 
 def _parse_field_dict(

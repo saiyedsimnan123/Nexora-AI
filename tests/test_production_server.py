@@ -87,6 +87,7 @@ def base_prod_env() -> dict[str, str]:
         "NEXORA_LLM_MODEL": "gpt-4o-mini",
         "NEXORA_EMBEDDING_PROVIDER": "hash",
         "NEXORA_VECTOR_STORE": "memory",
+        "NEXORA_AUTO_MIGRATE": "false",
     }
 
 

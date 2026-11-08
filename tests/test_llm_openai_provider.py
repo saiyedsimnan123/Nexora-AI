@@ -144,3 +144,113 @@ def test_empty_model_does_not_fall_back_to_config_model():
         provider.generate(MSGS, model="")
     provider.generate(MSGS, model=None)
     assert client.responses.calls[0]["model"] == "cfg-model"
+
+
+class FakeChatCompletions:
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return self.response
+
+
+def test_chat_completions_api_supported_with_proper_conversion():
+    chat_resp = SimpleNamespace(
+        id="chatcmpl-123",
+        model="gpt-4o-mini",
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content="Chat completion answer"))
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=15,
+            completion_tokens=8,
+            total_tokens=23,
+        ),
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeChatCompletions(response=chat_resp))
+    )
+    provider = OpenAIProvider(
+        LLMConfig(model="gpt-4o-mini", api_key=KEY, temperature=0.7, max_output_tokens=100),
+        client=fake_client,
+    )
+    out = provider.generate(MSGS)
+
+    assert isinstance(out, LLMResponse)
+    assert out.text == "Chat completion answer"
+    assert out.model == "gpt-4o-mini"
+    assert out.usage == {"input_tokens": 15, "output_tokens": 8, "total_tokens": 23}
+    assert out.raw == {"response_id": "chatcmpl-123"}
+
+    (call,) = fake_client.chat.completions.calls
+    assert call["model"] == "gpt-4o-mini"
+    assert call["messages"] == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+    ]
+    assert call["temperature"] == 0.7
+    assert call["max_tokens"] == 100
+
+
+def test_reasoning_models_use_max_completion_tokens():
+    chat_resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Reasoning answer"))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeChatCompletions(response=chat_resp))
+    )
+    provider = OpenAIProvider(
+        LLMConfig(model="o1-mini", api_key=KEY, max_output_tokens=250),
+        client=fake_client,
+    )
+    provider.generate(MSGS)
+    call = fake_client.chat.completions.calls[0]
+    assert "max_completion_tokens" in call
+    assert call["max_completion_tokens"] == 250
+    assert "max_tokens" not in call
+
+
+def test_authentication_and_ratelimit_error_wrapping_without_leaking_key():
+    class AuthenticationError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    # 1. Auth error
+    auth_err = AuthenticationError(f"Incorrect API key {KEY} provided")
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeChatCompletions(error=auth_err))
+    )
+    provider = OpenAIProvider(LLMConfig(model="m", api_key=KEY), client=fake_client)
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.generate(MSGS)
+    assert KEY not in str(exc_info.value)
+    assert "OpenAI authentication failed" in str(exc_info.value)
+
+    # 2. Rate limit error
+    rate_err = RateLimitError(f"Quota exceeded with key {KEY}")
+    fake_client2 = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeChatCompletions(error=rate_err))
+    )
+    provider2 = OpenAIProvider(LLMConfig(model="m", api_key=KEY), client=fake_client2)
+    with pytest.raises(LLMProviderError) as exc_info2:
+        provider2.generate(MSGS)
+    assert KEY not in str(exc_info2.value)
+    assert "OpenAI rate limit or quota exceeded" in str(exc_info2.value)
+
+
+def test_missing_credentials_raises_wrapped_llm_provider_error(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEXORA_LLM_API_KEY", raising=False)
+    provider = OpenAIProvider(LLMConfig(model="gpt-4o", api_key=None))
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.generate(MSGS)
+    assert "OpenAI request failed (OpenAIError)" in str(exc_info.value)
+    assert "Missing credentials" in str(exc_info.value)

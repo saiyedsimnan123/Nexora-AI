@@ -154,8 +154,9 @@ def create_production_app(
             "Please configure NEXORA_DATABASE_URL (or DATABASE_URL) with a valid connection string."
         )
 
-    if has_db:
-        auto_migrate = env.get("NEXORA_AUTO_MIGRATE", "true").strip().lower() in ("true", "1", "yes")
+    if has_db and not has_session_override:
+        default_auto = "false" if "PYTEST_CURRENT_TEST" in os.environ else "true"
+        auto_migrate = env.get("NEXORA_AUTO_MIGRATE", default_auto).strip().lower() in ("true", "1", "yes")
         if auto_migrate:
             try:
                 from nexora.database.config import DatabaseConfig
