@@ -292,6 +292,7 @@ class PaperComparisonResponse:
     overall_summary: str
     model: str
     usage: dict[str, int] | None
+    comparison_table: dict[str, Any] | None = None
 
     @classmethod
     def from_comparison(cls, comparison: Any) -> PaperComparisonResponse:
@@ -302,17 +303,21 @@ class PaperComparisonResponse:
             overall_summary=d["overall_summary"],
             model=d["model"],
             usage=d["usage"],
+            comparison_table=d.get("comparison_table"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready representation."""
-        return {
+        d = {
             "paper_ids": list(self.paper_ids),
             "dimensions": dict(self.dimensions),
             "overall_summary": self.overall_summary,
             "model": self.model,
             "usage": None if self.usage is None else dict(self.usage),
         }
+        if self.comparison_table is not None:
+            d["comparison_table"] = copy.deepcopy(self.comparison_table)
+        return d
 
 
 @dataclass(frozen=True)
@@ -378,6 +383,7 @@ class ResearchCompareResponse:
     overall_summary: str
     model: str
     usage: dict[str, int] | None
+    comparison_table: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paper_ids", list(self.paper_ids))
@@ -385,6 +391,8 @@ class ResearchCompareResponse:
         object.__setattr__(self, "matrix", copy.deepcopy(dict(self.matrix)))
         if self.usage is not None:
             object.__setattr__(self, "usage", dict(self.usage))
+        if self.comparison_table is not None:
+            object.__setattr__(self, "comparison_table", copy.deepcopy(self.comparison_table))
 
     @classmethod
     def from_result(cls, result: Any) -> ResearchCompareResponse:
@@ -399,11 +407,12 @@ class ResearchCompareResponse:
             overall_summary=d["overall_summary"],
             model=d["model"],
             usage=d.get("usage"),
+            comparison_table=d.get("comparison_table"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready representation."""
-        return {
+        d = {
             "paper_ids": list(self.paper_ids),
             "paper_titles": dict(self.paper_titles),
             "matrix": copy.deepcopy(self.matrix),
@@ -414,6 +423,9 @@ class ResearchCompareResponse:
             "model": self.model,
             "usage": None if self.usage is None else dict(self.usage),
         }
+        if self.comparison_table is not None:
+            d["comparison_table"] = copy.deepcopy(self.comparison_table)
+        return d
 
 
 @dataclass(frozen=True)

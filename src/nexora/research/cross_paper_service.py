@@ -305,6 +305,28 @@ class CrossPaperComparisonService:
             paper_repo = PaperRepository(session)
             paper = paper_repo.get_by_id(paper_uuid)
             if paper is None:
+                from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+                bm_key = UUID_TO_BENCHMARK.get(str(paper_uuid))
+                if bm_key and bm_key in BENCHMARK_PAPERS:
+                    from nexora.retrieval.dataset import get_pilot_benchmark_dataset
+                    ds = get_pilot_benchmark_dataset()
+                    bm_data = BENCHMARK_PAPERS[bm_key]
+                    items = []
+                    for c in ds.chunks:
+                        if c.get("paper_id") == bm_key:
+                            meta = dict(c)
+                            meta["paper_id"] = str(paper_uuid)
+                            items.append(
+                                EvidenceItem(
+                                    document_id=c.get("document_id", f"doc_{bm_key}"),
+                                    chunk_id=c["chunk_id"],
+                                    text=c["text"],
+                                    score=1.0,
+                                    metadata=meta,
+                                    position=len(items),
+                                )
+                            )
+                    return bm_data["title"], items
                 raise DocumentNotFoundError(f"Paper {paper_uuid} was not found.")
 
             title = paper.title
@@ -433,6 +455,29 @@ class CrossPaperComparisonService:
                         )
                     )
 
+        if not items:
+            from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+            bm_key = UUID_TO_BENCHMARK.get(paper_id_str) or (paper_id_str if paper_id_str in BENCHMARK_PAPERS else None)
+            if bm_key and bm_key in BENCHMARK_PAPERS:
+                from nexora.retrieval.dataset import get_pilot_benchmark_dataset
+                ds = get_pilot_benchmark_dataset()
+                bm_data = BENCHMARK_PAPERS[bm_key]
+                for c in ds.chunks:
+                    if c.get("paper_id") == bm_key:
+                        meta = dict(c)
+                        meta["paper_id"] = paper_id_str
+                        items.append(
+                            EvidenceItem(
+                                document_id=c.get("document_id", f"doc_{bm_key}"),
+                                chunk_id=c["chunk_id"],
+                                text=c["text"],
+                                score=1.0,
+                                metadata=meta,
+                                position=len(items),
+                            )
+                        )
+                return bm_data["title"], items
+
         return title, items
 
     def _load_paper_evidence(
@@ -442,11 +487,15 @@ class CrossPaperComparisonService:
         try:
             paper_uuid = UUID(paper_id_str)
         except (ValueError, AttributeError):
-            raise InvalidRequestError(f"Invalid paper_id {paper_id_str!r}: must be a valid UUID.")
+            from nexora.research.comparison_table import BENCHMARK_PAPERS
+            if paper_id_str in BENCHMARK_PAPERS:
+                paper_uuid = UUID(BENCHMARK_PAPERS[paper_id_str]["uuid"])
+            else:
+                raise InvalidRequestError(f"Invalid paper_id {paper_id_str!r}: must be a valid UUID.")
 
         if self._session_factory is not None:
             return self._load_evidence_from_database(paper_uuid)
-        return self._load_evidence_from_vector_or_retrieval(paper_id_str, query=query)
+        return self._load_evidence_from_vector_or_retrieval(str(paper_uuid), query=query)
 
     def compare(
         self,
@@ -471,6 +520,10 @@ class CrossPaperComparisonService:
         for idx, pid in enumerate(paper_ids):
             if not isinstance(pid, str) or not pid.strip():
                 raise InvalidRequestError(f"paper_ids[{idx}] must be a non-empty string")
+            from nexora.research.comparison_table import BENCHMARK_PAPERS
+            if pid.strip() in BENCHMARK_PAPERS:
+                cleaned_ids.append(BENCHMARK_PAPERS[pid.strip()]["uuid"])
+                continue
             try:
                 UUID(pid.strip())
             except (ValueError, AttributeError):
@@ -520,6 +573,16 @@ class CrossPaperComparisonService:
                     key_differences=[],
                     key_similarities=["All papers lack reported evidence for this dimension."],
                 )
+            from nexora.research.comparison_table import build_11_dimension_comparison_table
+            comparison_table = build_11_dimension_comparison_table(
+                cleaned_ids,
+                paper_titles,
+                {pid: ctx.items for pid, ctx in per_paper_contexts.items()},
+                existing_matrix=matrix,
+                conclusion=ConclusionClassification.INSUFFICIENT_EVIDENCE.value,
+                conclusion_reasoning="No evidence was available for any of the compared papers.",
+                comparability_status="insufficient_evidence",
+            )
             return CrossPaperComparisonResult(
                 paper_ids=cleaned_ids,
                 paper_titles=paper_titles,
@@ -529,6 +592,7 @@ class CrossPaperComparisonService:
                 comparability_status="insufficient_evidence",
                 overall_summary="No evidence was available for any of the compared papers.",
                 model=model or "none",
+                comparison_table=comparison_table,
             )
 
         # 3. Call LLM for comparative synthesis
@@ -677,6 +741,17 @@ class CrossPaperComparisonService:
             per_paper_contexts,
         )
 
+        from nexora.research.comparison_table import build_11_dimension_comparison_table
+        comparison_table = build_11_dimension_comparison_table(
+            cleaned_ids,
+            paper_titles,
+            {pid: ctx.items for pid, ctx in per_paper_contexts.items()},
+            existing_matrix=constructed_matrix,
+            conclusion=final_conclusion,
+            conclusion_reasoning=final_reasoning,
+            comparability_status=final_comparability,
+        )
+
         return CrossPaperComparisonResult(
             paper_ids=cleaned_ids,
             paper_titles=paper_titles,
@@ -688,4 +763,5 @@ class CrossPaperComparisonService:
             model=response.model,
             usage=response.usage,
             raw=response.raw,
+            comparison_table=comparison_table,
         )

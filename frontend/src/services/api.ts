@@ -3,7 +3,15 @@
  * Connects the frontend to the backend REST API endpoints.
  */
 
-import type { RAGQueryRequest, RAGQueryResponse, HealthResponse, ReadinessResponse } from '../types/api';
+import type {
+  RAGQueryRequest,
+  RAGQueryResponse,
+  HealthResponse,
+  ReadinessResponse,
+  PaperSearchResponse,
+  ResearchCompareRequest,
+  ResearchCompareResponse,
+} from '../types/api';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_TIMEOUT_MS = 20000;
@@ -139,4 +147,91 @@ export async function queryResearchRAG(
 
   const data: RAGQueryResponse = await response.json();
   return data;
+}
+
+/**
+ * Search indexed and benchmark scholarly papers via GET /api/v1/papers.
+ */
+export async function searchPapers(
+  query: string = '',
+  limit: number = 10,
+  offset: number = 0,
+  signal?: AbortSignal
+): Promise<PaperSearchResponse> {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set('query', query.trim());
+  params.set('limit', String(limit));
+  params.set('offset', String(offset));
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/papers?${params.toString()}`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+      signal,
+    },
+    DEFAULT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Failed to search papers (HTTP ${response.status})`;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) errorMsg = errJson.error.message;
+    } catch {}
+    throw new ApiError(errorMsg, response.status);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Execute direct cross-paper comparison via POST /api/v1/research/compare.
+ */
+export async function compareResearchPapers(
+  request: ResearchCompareRequest,
+  signal?: AbortSignal
+): Promise<ResearchCompareResponse> {
+  if (!request.paper_ids || request.paper_ids.length < 2) {
+    throw new ApiError('At least 2 paper IDs are required for comparison.', 400);
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/research/compare`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        paper_ids: request.paper_ids,
+        query: request.query || null,
+        model: request.model || null,
+        temperature: request.temperature || null,
+        max_output_tokens: request.max_output_tokens || null,
+      }),
+      signal,
+    },
+    DEFAULT_TIMEOUT_MS
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Comparison failed (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
 }

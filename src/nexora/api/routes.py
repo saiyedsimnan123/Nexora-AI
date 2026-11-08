@@ -212,6 +212,7 @@ class PaperComparisonResponseBody(BaseModel):
     overall_summary: str
     model: str
     usage: dict[str, int] | None = None
+    comparison_table: dict[str, Any] | None = None
 
 
 class ResearchCompareRequestBody(BaseModel):
@@ -240,6 +241,7 @@ class ResearchCompareResponseBody(BaseModel):
     overall_summary: str
     model: str
     usage: dict[str, int] | None = None
+    comparison_table: dict[str, Any] | None = None
 
 
 class ResearchGapsRequestBody(BaseModel):
@@ -513,6 +515,52 @@ class RAGQueryResponseBody(BaseModel):
     usage: dict[str, int] | None = Field(default=None, description="Token usage statistics.")
     retrieval_mode: str = Field(..., description="Retrieval mode used ('bm25', 'vector', 'hybrid').")
     evidence_count: int = Field(..., description="Number of evidence chunks retrieved.")
+    evidence_by_paper: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Retrieved evidence grouped strictly by individual paper.",
+    )
+    comparison_of_findings: dict[str, Any] | None = Field(
+        default=None,
+        description="Comparative cross-paper findings distinguishing direct evidence from interpretation.",
+    )
+    limitations_and_conflicts: dict[str, Any] | None = Field(
+        default=None,
+        description="Paper-supported limitations and conflicting evidence.",
+    )
+    conclusion: str | None = Field(
+        default=None,
+        description="Standardized conclusion classification.",
+    )
+    conclusion_reasoning: str | None = Field(
+        default=None,
+        description="Explanation supporting the conclusion classification.",
+    )
+
+
+class PaperItemResponseBody(BaseModel):
+    """Wire format of an indexed or benchmark scholarly paper."""
+
+    model_config = ConfigDict(strict=False)
+
+    id: str = Field(..., description="UUID or canonical identifier of the paper.")
+    title: str = Field(..., description="Paper title.")
+    doi: str | None = Field(default=None, description="Digital Object Identifier.")
+    publication_year: int | None = Field(default=None, description="Year of publication.")
+    authors: list[str] = Field(default_factory=list, description="Paper authors.")
+    abstract: str | None = Field(default=None, description="Abstract or substantive summary.")
+    is_benchmark: bool = Field(default=False, description="Whether this is a canonical benchmark paper.")
+    source: str = Field(default="indexed", description="Source repository ('benchmark', 'database').")
+
+
+class PaperSearchResponseBody(BaseModel):
+    """Wire format of paper list and discovery results."""
+
+    model_config = ConfigDict(strict=False)
+
+    papers: list[PaperItemResponseBody] = Field(default_factory=list)
+    total: int = Field(..., ge=0)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=10, ge=1)
 
 
 class DiscoveryPaperResponseBody(BaseModel):
@@ -1242,6 +1290,116 @@ def analyze_paper_by_id_endpoint(
     return PaperAnalysisResponseBody(**resp.to_dict())
 
 
+@v1_router.get(
+    "/papers",
+    response_model=PaperSearchResponseBody,
+    status_code=200,
+    summary="List and search indexed research papers and benchmark corpus",
+    description="Search papers by title, DOI, or keyword across indexed corpus and canonical benchmarks.",
+)
+def list_papers_endpoint(
+    request: Request,
+    query: str = Query(default="", description="Search query matching title, DOI, or authors."),
+    limit: int = Query(default=10, ge=1, le=50, description="Maximum number of papers to return."),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination."),
+    current_user: Any = Depends(get_optional_user),
+) -> PaperSearchResponseBody:
+    from nexora.research.comparison_table import BENCHMARK_PAPERS
+
+    matched_papers: list[PaperItemResponseBody] = []
+    seen_ids: set[str] = set()
+    q_lower = query.strip().lower()
+
+    # 1. Search benchmark corpus
+    for key, data in BENCHMARK_PAPERS.items():
+        title_match = q_lower in data["title"].lower() if q_lower else True
+        doi_match = q_lower in str(data.get("doi", "")).lower() if q_lower else True
+        author_match = any(q_lower in a.lower() for a in data.get("authors", [])) if q_lower else True
+        abstract_match = q_lower in data.get("abstract", "").lower() if q_lower else True
+
+        if title_match or doi_match or author_match or abstract_match:
+            item = PaperItemResponseBody(
+                id=data["uuid"],
+                title=data["title"],
+                doi=data.get("doi"),
+                publication_year=data.get("publication_year"),
+                authors=data.get("authors", []),
+                abstract=data.get("abstract"),
+                is_benchmark=True,
+                source="benchmark",
+            )
+            matched_papers.append(item)
+            seen_ids.add(data["uuid"])
+            seen_ids.add(key)
+
+    # 2. Search database if session factory is present
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is not None:
+        session = session_factory()
+        try:
+            from nexora.database.repository.paper import PaperRepository
+            repo = PaperRepository(session)
+            db_papers = repo.list_all(limit=50) if hasattr(repo, "list_all") else []
+            for p in db_papers:
+                p_id_str = str(p.id)
+                if p_id_str in seen_ids:
+                    continue
+                p_title = getattr(p, "title", "Untitled")
+                p_doi = getattr(p, "doi", None)
+                p_abstract = getattr(p, "abstract", None)
+                if q_lower:
+                    if (
+                        q_lower not in p_title.lower()
+                        and (p_doi is None or q_lower not in p_doi.lower())
+                        and (p_abstract is None or q_lower not in p_abstract.lower())
+                    ):
+                        continue
+                matched_papers.append(
+                    PaperItemResponseBody(
+                        id=p_id_str,
+                        title=p_title,
+                        doi=p_doi,
+                        publication_year=getattr(p, "publication_year", None),
+                        authors=getattr(p, "authors", []),
+                        abstract=p_abstract,
+                        is_benchmark=False,
+                        source="database",
+                    )
+                )
+                seen_ids.add(p_id_str)
+        except Exception:
+            pass
+        finally:
+            if hasattr(session, "close"):
+                session.close()
+
+    total = len(matched_papers)
+    paginated = matched_papers[offset : offset + limit]
+    return PaperSearchResponseBody(
+        papers=paginated,
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@v1_router.get(
+    "/papers/search",
+    response_model=PaperSearchResponseBody,
+    status_code=200,
+    summary="Search papers (alias)",
+    include_in_schema=False,
+)
+def search_papers_alias(
+    request: Request,
+    query: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    current_user: Any = Depends(get_optional_user),
+) -> PaperSearchResponseBody:
+    return list_papers_endpoint(request, query=query, limit=limit, offset=offset, current_user=current_user)
+
+
 @v1_router.post(
     "/papers/compare",
     response_model=PaperComparisonResponseBody,
@@ -1253,13 +1411,15 @@ def compare_papers_endpoint(
     body: PaperComparisonRequestBody,
     request: Request,
     service: Any = Depends(get_comparison_service),
-    current_user: Any = Depends(get_current_user),
+    current_user: Any = Depends(get_optional_user),
 ) -> PaperComparisonResponseBody:
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
+            from nexora.research.comparison_table import BENCHMARK_PAPERS
             for pid in body.paper_ids:
-                auth_service.verify_paper_ownership(pid, current_user.id)
+                if pid not in BENCHMARK_PAPERS:
+                    auth_service.verify_paper_ownership(pid, current_user.id)
     req = PaperComparisonRequest(
         paper_ids=body.paper_ids,
         model=body.model,
@@ -1292,13 +1452,15 @@ def research_compare_endpoint(
     body: ResearchCompareRequestBody,
     request: Request,
     service: Any = Depends(get_comparison_service),
-    current_user: Any = Depends(get_current_user),
+    current_user: Any = Depends(get_optional_user),
 ) -> ResearchCompareResponseBody:
     if current_user is not None:
         auth_service = get_auth_service(request)
         if auth_service is not None:
+            from nexora.research.comparison_table import BENCHMARK_PAPERS
             for pid in body.paper_ids:
-                auth_service.verify_paper_ownership(pid, current_user.id)
+                if pid not in BENCHMARK_PAPERS:
+                    auth_service.verify_paper_ownership(pid, current_user.id)
     req = ResearchCompareRequest(
         paper_ids=body.paper_ids,
         query=body.query,

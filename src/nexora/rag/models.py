@@ -132,6 +132,11 @@ class RAGResponse:
     usage: dict[str, int] | None = None
     retrieval_mode: str = "hybrid"
     evidence_count: int = 0
+    evidence_by_paper: list[dict[str, Any]] = field(default_factory=list)
+    comparison_of_findings: dict[str, Any] | None = None
+    limitations_and_conflicts: dict[str, Any] | None = None
+    conclusion: str | None = None
+    conclusion_reasoning: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.query, str):
@@ -157,6 +162,11 @@ class RAGResponse:
 
         object.__setattr__(self, "sources", list(self.sources))
         object.__setattr__(self, "cited_sources", list(self.cited_sources))
+        object.__setattr__(self, "evidence_by_paper", copy.deepcopy(list(self.evidence_by_paper)))
+        if self.comparison_of_findings is not None:
+            object.__setattr__(self, "comparison_of_findings", copy.deepcopy(self.comparison_of_findings))
+        if self.limitations_and_conflicts is not None:
+            object.__setattr__(self, "limitations_and_conflicts", copy.deepcopy(self.limitations_and_conflicts))
         if self.usage is not None:
             object.__setattr__(self, "usage", dict(self.usage))
 
@@ -186,4 +196,9 @@ class RAGResponse:
             "usage": dict(self.usage) if self.usage else None,
             "retrieval_mode": self.retrieval_mode,
             "evidence_count": self.evidence_count,
+            "evidence_by_paper": copy.deepcopy(self.evidence_by_paper),
+            "comparison_of_findings": copy.deepcopy(self.comparison_of_findings) if self.comparison_of_findings else None,
+            "limitations_and_conflicts": copy.deepcopy(self.limitations_and_conflicts) if self.limitations_and_conflicts else None,
+            "conclusion": self.conclusion,
+            "conclusion_reasoning": self.conclusion_reasoning,
         }

@@ -4,28 +4,33 @@ import {
   Search,
   Sparkles,
   CheckCircle2,
-  FileText,
   AlertCircle,
-  RefreshCw,
-  Layers,
   ShieldCheck,
   Loader2,
-  Database
+  GitCompare,
+  HelpCircle,
+  Scale,
+  BookOpen,
+  ArrowRight
 } from 'lucide-react';
 import { queryResearchRAG } from '../services/api';
-import type { RAGQueryResponse, AttributedSource } from '../types/api';
+import type {
+  RAGQueryResponse,
+  AttributedSource
+} from '../types/api';
 
 interface SearchModalProps {
   isOpen: boolean;
   onClose: () => void;
   query: string;
+  onComparePapers?: (paperIds: string[]) => void;
 }
 
 // Curated reference scenario for offline demonstration / fallback
 const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
   query: 'How do FlashAttention IO optimizations achieve 4.3x speedup on A100 GPUs?',
   answer:
-    'Standard transformer self-attention stores intermediate N x N attention matrices in High Bandwidth Memory (HBM), scaling quadratically as O(N^2) with sequence length [E2]. FlashAttention eliminates this memory bandwidth bottleneck by tiling the computation into GPU SRAM blocks and incrementally computing online softmax without materializing full attention matrices, achieving a verified 2.4x to 4.3x wall-clock speedup across BERT-large and GPT-style architectures [E1].',
+    '### Direct Answer\n\nStandard Transformer self-attention stores intermediate $N \\times N$ attention matrices in High Bandwidth Memory (HBM), scaling quadratically as $O(N^2)$ with sequence length [E2]. FlashAttention eliminates this memory bandwidth bottleneck by tiling the computation into GPU on-chip SRAM blocks and incrementally computing online softmax without materializing full attention matrices [E1]. This IO-aware execution achieves verified 2.4x to 4.3x wall-clock speedups across BERT-large and GPT-style architectures on A100 GPUs while computing mathematically exact attention [E1].',
   is_grounded: true,
   is_mock: true,
   model: 'curated-offline-benchmark',
@@ -33,12 +38,15 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
   error: null,
   retrieval_mode: 'hybrid',
   evidence_count: 2,
+  conclusion: 'Demonstrated improvement',
+  conclusion_reasoning:
+    'Empirical evaluations verify a 2.4x to 4.3x wall-clock speedup on A100 GPUs by optimizing SRAM read/write access without materializing intermediate quadratic matrices.',
   sources: [
     {
       label: '[E1]',
       document_id: 'doc_dao2022_flashattention',
       chunk_id: 'chunk_dao_io_sram_04',
-      paper_id: 'paper_arxiv_2205_14135',
+      paper_id: 'a1877e5e-6536-51f6-ae8e-ca92c6bf7be5',
       paper_title: 'FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (Dao et al., 2022)',
       score: 0.0320,
       text: 'We evaluate BERT-large on MLPerf 1.1... FlashAttention yields a 2.4x speedup over standard HuggingFace attention while computing exact attention without approximation. On GPT-2 models with sequence length up to 4K, FlashAttention achieves up to 4.3x speedup on A100 GPUs by optimizing SRAM read/write access.',
@@ -50,7 +58,7 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
       label: '[E2]',
       document_id: 'doc_vaswani2017_transformer',
       chunk_id: 'chunk_vaswani_complexity_05',
-      paper_id: 'paper_arxiv_1706_03762',
+      paper_id: '541c4d4f-4d6b-592f-981f-7e9b04f3ce37',
       paper_title: 'Attention Is All You Need (Vaswani et al., 2017)',
       score: 0.0315,
       text: 'Self-attention layers require computing an N by N attention matrix, yielding an O(N^2) computational and memory footprint per layer.',
@@ -60,10 +68,72 @@ const CURATED_DEMO_SCENARIO: RAGQueryResponse = {
     },
   ],
   cited_sources: [],
+  evidence_by_paper: [
+    {
+      paper_id: 'a1877e5e-6536-51f6-ae8e-ca92c6bf7be5',
+      paper_title: 'FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness',
+      findings: [
+        'FlashAttention achieves up to 4.3x speedup on A100 GPUs by optimizing SRAM read/write access without intermediate matrix materialization.'
+      ],
+      excerpts: [
+        'FlashAttention yields a 2.4x speedup over standard HuggingFace attention while computing exact attention without approximation. On GPT-2 models with sequence length up to 4K, FlashAttention achieves up to 4.3x speedup on A100 GPUs.'
+      ],
+      citations: ['[E1]'],
+      sources: []
+    },
+    {
+      paper_id: '541c4d4f-4d6b-592f-981f-7e9b04f3ce37',
+      paper_title: 'Attention Is All You Need',
+      findings: [
+        'Self-attention layers require computing an N by N attention matrix, yielding an O(N^2) computational and memory footprint per layer.'
+      ],
+      excerpts: [
+        'Self-attention layers require computing an N by N attention matrix, yielding an O(N^2) computational and memory footprint per layer.'
+      ],
+      citations: ['[E2]'],
+      sources: []
+    }
+  ],
+  comparison_of_findings: {
+    agreements: [
+      'Both papers analyze self-attention computational scaling and memory access characteristics.'
+    ],
+    differences: [
+      'Attention Is All You Need establishes the foundational multi-head self-attention formulation with quadratic complexity, whereas FlashAttention redesigns the execution algorithm to optimize GPU SRAM IO transfers.'
+    ],
+    relationships: [
+      'FlashAttention directly executes exact multi-head attention without approximating the underlying mathematical formulation introduced in Attention Is All You Need.'
+    ],
+    direct_evidence: [
+      'FlashAttention: Achieves 2.4x to 4.3x speedup on A100 GPUs by optimizing SRAM reads/writes.',
+      'Attention Is All You Need: Standard self-attention yields O(N^2) memory footprint per layer.'
+    ],
+    interpretation: [
+      'Empirical wall-clock speedup directly correlates with reduced High Bandwidth Memory accesses rather than mathematical approximations.'
+    ]
+  },
+  limitations_and_conflicts: {
+    limitations: [
+      'FlashAttention gains require GPU architectures with high-performance on-chip SRAM bandwidth (e.g. NVIDIA Ampere A100 GPUs).',
+      'Standard Transformer self-attention is bandwidth-bound on sequences exceeding 2K tokens.'
+    ],
+    conflicts: [
+      'No direct contradiction detected: FlashAttention preserves mathematical equivalence while resolving hardware memory bandwidth bottlenecks.'
+    ],
+    evidence_gaps: [
+      'Inference energy consumption and edge-device hardware deployment metrics were not reported in retrieved evidence.'
+    ],
+    insufficient_evidence_notes: 'All claims are strictly bounded by retrieved excerpts; unmentioned dimensions are flagged as not reported.'
+  }
 };
 CURATED_DEMO_SCENARIO.cited_sources = [...CURATED_DEMO_SCENARIO.sources];
 
-export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query }) => {
+export const SearchModal: React.FC<SearchModalProps> = ({
+  isOpen,
+  onClose,
+  query,
+  onComparePapers
+}) => {
   const defaultQuery = 'How do FlashAttention IO optimizations achieve 4.3x speedup on A100 GPUs?';
   const initialQuery = query.trim() || defaultQuery;
   const [activeQuery, setActiveQuery] = useState<string>(initialQuery);
@@ -73,7 +143,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
   const [liveResponse, setLiveResponse] = useState<RAGQueryResponse | null>(null);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [selectedCitationLabel, setSelectedCitationLabel] = useState<string>('[E1]');
-  const [pipelineStage, setPipelineStage] = useState<number>(5);
+  const [activeTab, setActiveTab] = useState<'answer' | 'evidence' | 'comparison' | 'limitations'>('answer');
   const titleId = useId();
 
   // Sync state if query prop changes from parent
@@ -82,7 +152,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
     setActiveQuery(query.trim() || defaultQuery);
   }
 
-  // Execute live RAG query against the backend API
+  // Execute live RAG query against backend API
   const handleExecuteSearch = useCallback(async (queryText: string) => {
     const trimmed = queryText.trim();
     if (!trimmed) return;
@@ -90,11 +160,6 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
     setIsLoading(true);
     setError(null);
     setIsDemoMode(false);
-    setPipelineStage(1);
-
-    const stageTimer1 = setTimeout(() => setPipelineStage(2), 250);
-    const stageTimer2 = setTimeout(() => setPipelineStage(3), 550);
-    const stageTimer3 = setTimeout(() => setPipelineStage(4), 850);
 
     try {
       const data = await queryResearchRAG({
@@ -103,20 +168,13 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
         top_k: 5,
       });
 
-      setPipelineStage(5);
       setLiveResponse(data);
-
-      // Select first citation label if available
       const firstLabel = data.sources?.[0]?.label || data.cited_sources?.[0]?.label || '[E1]';
       setSelectedCitationLabel(firstLabel);
     } catch (err: unknown) {
-      setPipelineStage(0);
       const message = err instanceof Error ? err.message : 'Unknown network error.';
       setError(message);
     } finally {
-      clearTimeout(stageTimer1);
-      clearTimeout(stageTimer2);
-      clearTimeout(stageTimer3);
       setIsLoading(false);
     }
   }, []);
@@ -166,6 +224,92 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
   const selectedSource =
     currentSources.find((s) => s.label === selectedCitationLabel) || currentSources[0] || null;
 
+  const evidenceByPaper = currentData.evidence_by_paper || [];
+  const compFindings = currentData.comparison_of_findings;
+  const limConflicts = currentData.limitations_and_conflicts;
+  const conclusion = currentData.conclusion || 'Demonstrated improvement';
+  const conclusionReasoning = currentData.conclusion_reasoning || '';
+
+  // Extract paper IDs for direct comparison handoff
+  const distinctPaperIds = Array.from(
+    new Set(
+      evidenceByPaper
+        .map((p) => p.paper_id)
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  const handleLaunchCompare = () => {
+    if (onComparePapers && distinctPaperIds.length >= 2) {
+      onComparePapers(distinctPaperIds.slice(0, 2));
+      onClose();
+    } else if (onComparePapers) {
+      onComparePapers([]);
+      onClose();
+    }
+  };
+
+  // Format main answer text into clean paragraphs
+  const renderFormattedAnswer = (rawText: string) => {
+    const cleanText = rawText.replace(/^### Direct Answer\s*/i, '').trim();
+    const paragraphs = cleanText.split(/\n\n+/).filter((p) => p.trim());
+
+    return (
+      <div className="space-y-3.5 text-sm sm:text-base text-slate-200 leading-relaxed font-sans">
+        {paragraphs.map((p, idx) => {
+          // Highlight [E#] citation pills interactively
+          const parts = p.split(/(\[E\d+\])/g);
+          return (
+            <p key={idx}>
+              {parts.map((part, pIdx) => {
+                if (/^\[E\d+\]$/.test(part)) {
+                  const isSelected = selectedCitationLabel === part;
+                  return (
+                    <button
+                      key={pIdx}
+                      onClick={() => setSelectedCitationLabel(part)}
+                      className={`inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded text-xs font-mono font-bold transition-all ${
+                        isSelected
+                          ? 'bg-cyan-400 text-slate-950 shadow-[0_0_10px_#00f5d4]'
+                          : 'bg-cyan-950/70 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-900/60'
+                      }`}
+                    >
+                      {part}
+                    </button>
+                  );
+                }
+                return part;
+              })}
+            </p>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // Render conclusion badge styling
+  const renderConclusionBadge = (conc: string) => {
+    let colorClasses = 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30';
+    if (conc.includes('Demonstrated improvement')) {
+      colorClasses = 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40';
+    } else if (conc.includes('Conflicting evidence')) {
+      colorClasses = 'bg-purple-500/15 text-purple-300 border-purple-500/40';
+    } else if (conc.includes('Limited evidence')) {
+      colorClasses = 'bg-amber-500/15 text-amber-300 border-amber-500/40';
+    } else if (conc.includes('Insufficient evidence')) {
+      colorClasses = 'bg-slate-700/40 text-slate-300 border-slate-600/40';
+    }
+
+    return (
+      <span
+        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono uppercase tracking-wider border ${colorClasses}`}
+      >
+        <ShieldCheck className="w-3.5 h-3.5" />
+        {conc}
+      </span>
+    );
+  };
+
   return (
     <div
       role="dialog"
@@ -180,18 +324,18 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
       />
 
       {/* Modal Dialog Box */}
-      <div className="relative w-full max-w-3xl glass-panel-glow bg-[#080d21] rounded-2xl border border-cyan-500/40 shadow-2xl p-6 sm:p-8 z-10 space-y-6 animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto">
+      <div className="relative w-full max-w-4xl glass-panel-glow bg-[#080d21] rounded-2xl border border-cyan-500/40 shadow-2xl p-6 sm:p-8 z-10 space-y-6 animate-in fade-in zoom-in-95 duration-200 max-h-[92vh] overflow-y-auto">
 
         {/* Modal Header */}
         <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-400/40 flex items-center justify-center text-cyan-300">
-              <Sparkles className="w-4 h-4" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-cyan-500/10 border border-cyan-400/40 flex items-center justify-center text-cyan-300">
+              <Sparkles className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h3 id={titleId} className="text-base font-bold text-white">
-                  Research Pipeline Execution
+                  Research Intelligence Answer Experience
                 </h3>
                 {isDemoMode ? (
                   <span className="text-[10px] font-mono uppercase bg-purple-950/70 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded">
@@ -199,24 +343,37 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
                   </span>
                 ) : (
                   <span className="text-[10px] font-mono uppercase bg-cyan-950/70 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
                     Live Grounded RAG
                   </span>
                 )}
               </div>
               <p className="text-xs text-slate-400 font-mono">
-                5-Stage Evidence-Grounded Verification Flow
+                5-Section Evidence-Grounded Research Synthesis
               </p>
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 transition-colors"
-            aria-label="Close dialog"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {onComparePapers && (
+              <button
+                onClick={handleLaunchCompare}
+                className="px-3 py-1.5 rounded-lg text-xs font-mono uppercase tracking-wider text-cyan-300 hover:text-white bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 transition-colors flex items-center gap-1.5"
+                title="Open Direct Paper Comparison"
+              >
+                <GitCompare className="w-3.5 h-3.5 text-cyan-400" />
+                Compare Papers
+              </button>
+            )}
+
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/60 transition-colors"
+              aria-label="Close dialog"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Search Query Input Bar */}
@@ -228,7 +385,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
           className="space-y-1.5"
         >
           <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-slate-400">
-            <span>Active Research Inquiry:</span>
+            <span>Research Question:</span>
             {isLoading && (
               <span className="text-cyan-400 flex items-center gap-1 normal-case font-sans text-xs">
                 <Loader2 className="w-3 h-3 animate-spin" />
@@ -251,255 +408,366 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, query
             <button
               type="submit"
               disabled={isLoading || !activeQuery.trim()}
-              className="shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg font-medium text-xs text-slate-900 bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 transition-all font-mono"
+              className="px-4 py-1.5 bg-gradient-to-r from-cyan-400 to-teal-300 text-slate-900 text-xs font-bold rounded-lg hover:opacity-95 transition-opacity disabled:opacity-50 flex items-center gap-1 font-sans shrink-0"
             >
-              {isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
               <span>Query</span>
+              <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </form>
 
-        {/* 5-Stage Pipeline Progress Indicator */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-            <span>Pipeline Architecture:</span>
-            <span className={isLoading ? 'text-cyan-300' : 'text-emerald-400 font-semibold'}>
-              {isLoading
-                ? `Stage ${pipelineStage} / 5 In Progress...`
-                : 'Stage 5 / 5 Execution Complete'}
-            </span>
+        {/* Error Notification Bar */}
+        {error && (
+          <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-center justify-between gap-3 text-xs text-rose-300">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => {
+                setIsDemoMode(true);
+                setError(null);
+              }}
+              className="px-2.5 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/40 rounded text-[11px] font-mono shrink-0 transition-colors"
+            >
+              Load Curated Scenario
+            </button>
           </div>
+        )}
 
-          <div className="grid grid-cols-5 gap-1.5 sm:gap-2 text-center text-[9px] sm:text-[10px] font-mono">
-            <div className={`p-2 rounded border transition-all ${
-              pipelineStage >= 1
-                ? 'bg-cyan-950/60 border-cyan-500/30 text-cyan-300'
-                : 'bg-slate-900/40 border-white/5 text-slate-500'
-            }`}>
-              1. Intent
-            </div>
-            <div className={`p-2 rounded border transition-all ${
-              pipelineStage >= 2
-                ? 'bg-cyan-950/60 border-cyan-500/30 text-cyan-300'
-                : 'bg-slate-900/40 border-white/5 text-slate-500'
-            }`}>
-              2. Hybrid RRF
-            </div>
-            <div className={`p-2 rounded border transition-all ${
-              pipelineStage >= 3
-                ? 'bg-cyan-950/60 border-cyan-500/30 text-cyan-300'
-                : 'bg-slate-900/40 border-white/5 text-slate-500'
-            }`}>
-              3. Rerank
-            </div>
-            <div className={`p-2 rounded border transition-all ${
-              pipelineStage >= 4
-                ? 'bg-cyan-950/60 border-cyan-500/30 text-cyan-300'
-                : 'bg-slate-900/40 border-white/5 text-slate-500'
-            }`}>
-              4. Attributed RAG
-            </div>
-            <div className={`p-2 rounded border transition-all ${
-              pipelineStage >= 5
-                ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300 font-semibold shadow-[0_0_10px_rgba(52,211,153,0.2)]'
-                : 'bg-slate-900/40 border-white/5 text-slate-500'
-            }`}>
-              5. Claim Grounding
-            </div>
-          </div>
+        {/* Section Navigation Tabs */}
+        <div className="flex items-center gap-1 border-b border-white/[0.08] pb-1 overflow-x-auto text-xs font-mono uppercase tracking-wider">
+          <button
+            onClick={() => setActiveTab('answer')}
+            className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 shrink-0 ${
+              activeTab === 'answer'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Direct Answer
+          </button>
+          <button
+            onClick={() => setActiveTab('evidence')}
+            className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 shrink-0 ${
+              activeTab === 'evidence'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Evidence by Paper ({evidenceByPaper.length || currentSources.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('comparison')}
+            className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 shrink-0 ${
+              activeTab === 'comparison'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+            }`}
+          >
+            <Scale className="w-3.5 h-3.5" />
+            Comparison of Findings
+          </button>
+          <button
+            onClick={() => setActiveTab('limitations')}
+            className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 shrink-0 ${
+              activeTab === 'limitations'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+            }`}
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+            Limitations & Conflicts
+          </button>
         </div>
 
-        {/* Error / Offline Alert State */}
-        {error && !isDemoMode && (
-          <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 space-y-3 animate-in fade-in duration-200">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <h4 className="text-xs font-bold text-amber-200 font-mono">
-                  Backend Unreachable or Request Failed
-                </h4>
-                <p className="text-xs text-amber-200/90 leading-relaxed font-sans">
-                  {error}
-                </p>
-              </div>
-            </div>
-
-            <div className="bg-black/40 p-3 rounded-lg border border-amber-500/20 text-xs text-slate-300 space-y-1">
-              <div className="text-[11px] text-amber-300 font-mono">Research Engine Notice:</div>
-              <p className="text-slate-300 text-xs leading-relaxed">
-                The research service could not be reached. You may retry the inquiry or explore demonstrated evidence contexts below.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => handleExecuteSearch(activeQuery || defaultQuery)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 text-slate-900 text-xs font-semibold hover:bg-amber-300 transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Retry Live Query</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setIsDemoMode(true);
-                  setSelectedCitationLabel('[E1]');
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-panel text-slate-200 hover:text-white text-xs border border-white/10 transition-colors"
-              >
-                <Layers className="w-3.5 h-3.5 text-purple-400" />
-                <span>View Curated Demo Scenario</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Loading Skeleton */}
-        {isLoading && (
-          <div className="p-6 rounded-xl bg-[#04060d] border border-cyan-500/25 space-y-4 animate-pulse">
-            <div className="h-4 bg-cyan-950/60 rounded w-3/4" />
-            <div className="h-4 bg-slate-900 rounded w-full" />
-            <div className="h-4 bg-slate-900 rounded w-5/6" />
-            <div className="pt-2 flex gap-2">
-              <div className="h-6 w-16 bg-cyan-950/80 rounded" />
-              <div className="h-6 w-16 bg-cyan-950/80 rounded" />
-            </div>
-          </div>
-        )}
-
-        {/* Synthesized Research Answer with [E#] Citations */}
-        {!isLoading && (!error || isDemoMode) && (
-          <div className="space-y-4">
-
-            {/* Answer Box */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                <span>Attributed Answer Synthesis:</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-500 font-mono">Model: {currentData.model}</span>
-                  <span className="text-slate-500">•</span>
-                  <span className="text-emerald-400 flex items-center gap-1">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    {currentData.is_grounded ? 'Grounded in Evidence' : 'Ungrounded'}
-                  </span>
-                </div>
+        {/* Tab 1: Direct Answer */}
+        {activeTab === 'answer' && (
+          <div className="space-y-6 animate-in fade-in duration-200">
+            {/* Direct Answer Container */}
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-900/90 border border-white/10 space-y-4">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                <span className="text-xs font-mono uppercase tracking-wider text-cyan-400 font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-cyan-400" />
+                  Synthesized Direct Answer
+                </span>
+                {renderConclusionBadge(conclusion)}
               </div>
 
-              <div className="p-5 rounded-xl bg-[#04060d] border border-cyan-500/25 space-y-3 text-xs sm:text-sm text-slate-200 leading-relaxed font-sans">
-                <p className="whitespace-pre-wrap">{currentData.answer}</p>
-              </div>
+              {renderFormattedAnswer(currentData.answer)}
+
+              {/* Conclusion Reason Banner */}
+              {conclusionReasoning && (
+                <div className="p-3.5 rounded-xl bg-[#09102c] border border-cyan-500/20 text-xs text-slate-300 space-y-1">
+                  <span className="font-mono uppercase tracking-wider text-cyan-400 font-bold text-[11px] block">
+                    Takeaway & Evidence Basis:
+                  </span>
+                  <p className="leading-relaxed">{conclusionReasoning}</p>
+                </div>
+              )}
             </div>
 
-            {/* Citation Switcher Chips */}
-            {currentSources.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-                  <span>Available Citations ({currentSources.length}):</span>
-                  <span className="text-slate-500">Click to inspect chunk excerpt</span>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {currentSources.map((source) => {
-                    const isSelected = source.label === selectedCitationLabel;
-                    return (
-                      <button
-                        key={source.chunk_id || source.label}
-                        type="button"
-                        onClick={() => setSelectedCitationLabel(source.label)}
-                        className={`text-xs px-3 py-1.5 rounded-lg border font-mono transition-all flex items-center gap-2 ${
-                          isSelected
-                            ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(0,245,212,0.3)]'
-                            : 'bg-slate-900/60 border-white/10 text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        <span className="font-bold">{source.label}</span>
-                        <span className="text-[11px] truncate max-w-[200px]">
-                          {source.paper_title.split(':')[0]}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Selected Citation Inspector */}
-            {selectedSource ? (
-              <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2 text-xs font-mono">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span className="text-cyan-300 flex items-center gap-1.5 font-semibold">
-                    <FileText className="w-3.5 h-3.5" />
-                    Inspecting Citation {selectedSource.label}:
-                  </span>
-                  <span className="text-emerald-400 flex items-center gap-1 font-sans">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Retrieved Evidence Match
-                  </span>
-                </div>
-
-                <p className="text-slate-200 italic bg-black/40 p-3 rounded border border-white/[0.04] leading-relaxed">
-                  "{selectedSource.text_excerpt || selectedSource.text}"
-                </p>
-
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-slate-400 pt-1 gap-1">
-                  <span className="truncate max-w-md">
-                    <strong>Source:</strong> {selectedSource.paper_title}
-                  </span>
-                  <div className="flex items-center gap-3 shrink-0">
-                    {selectedSource.score > 0 && (
-                      <span className="text-cyan-400 font-mono">
-                        Score: {selectedSource.score.toFixed(4)}
-                      </span>
-                    )}
-                    <span className="text-slate-500">
-                      Chunk: {selectedSource.chunk_id.slice(0, 16)}
+            {/* Interactive Selected Citation Inspector */}
+            {selectedSource && (
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-cyan-500/30 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/40 px-2 py-0.5 rounded">
+                      {selectedSource.label}
+                    </span>
+                    <span className="text-xs font-semibold text-white truncate max-w-md">
+                      {selectedSource.paper_title}
                     </span>
                   </div>
+                  {selectedSource.page_number && (
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Page {selectedSource.page_number}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-300 italic bg-black/30 p-2.5 rounded-lg border border-white/[0.05] leading-relaxed">
+                  "{selectedSource.text_excerpt}"
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tab 2: Evidence by Paper (Strict Separation) */}
+        {activeTab === 'evidence' && (
+          <div className="space-y-4 animate-in fade-in duration-200">
+            <div className="text-xs text-slate-400 flex items-center justify-between">
+              <span>Evidence excerpts are strictly partitioned by paper. No mixing across studies.</span>
+              {distinctPaperIds.length >= 2 && onComparePapers && (
+                <button
+                  onClick={handleLaunchCompare}
+                  className="text-cyan-400 hover:text-cyan-300 underline font-mono text-[11px] flex items-center gap-1"
+                >
+                  <GitCompare className="w-3.5 h-3.5" />
+                  Compare these papers side-by-side &rarr;
+                </button>
+              )}
+            </div>
+
+            {evidenceByPaper.length > 0 ? (
+              evidenceByPaper.map((paperGroup, pIdx) => (
+                <div
+                  key={pIdx}
+                  className="p-5 rounded-2xl bg-slate-900/80 border border-white/10 space-y-3"
+                >
+                  <div className="flex items-center justify-between border-b border-white/[0.06] pb-2">
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <BookOpen className="w-4 h-4 text-cyan-400" />
+                      {paperGroup.paper_title}
+                    </h4>
+                    <div className="flex items-center gap-1.5">
+                      {paperGroup.citations.map((c) => (
+                        <span
+                          key={c}
+                          className="text-[11px] font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/30 px-1.5 py-0.5 rounded"
+                        >
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Specific Relevant Finding */}
+                  {paperGroup.findings.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                        Relevant Finding:
+                      </span>
+                      <p className="text-xs text-slate-200 leading-relaxed font-sans">
+                        {paperGroup.findings[0]}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Supporting Excerpts */}
+                  {paperGroup.excerpts.length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                        Supporting Excerpt:
+                      </span>
+                      <blockquote className="text-xs text-slate-300 italic bg-black/40 p-3 rounded-xl border border-white/[0.05] leading-relaxed">
+                        "{paperGroup.excerpts[0]}"
+                      </blockquote>
+                    </div>
+                  )}
+                </div>
+              ))
+            ) : (
+              // Fallback to sources list
+              currentSources.map((source) => (
+                <div
+                  key={source.chunk_id}
+                  className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-mono font-bold text-cyan-300 bg-cyan-950/70 border border-cyan-500/40 px-2 py-0.5 rounded">
+                      {source.label}
+                    </span>
+                    <span className="text-xs font-semibold text-white">
+                      {source.paper_title}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 italic bg-black/30 p-2.5 rounded-lg border border-white/[0.05]">
+                    "{source.text_excerpt}"
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Tab 3: Comparison of Findings */}
+        {activeTab === 'comparison' && (
+          <div className="space-y-5 animate-in fade-in duration-200">
+            {compFindings ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Agreements Card */}
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-cyan-300 font-bold flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-cyan-400" />
+                    Agreements Across Papers
+                  </h4>
+                  <ul className="space-y-1.5 text-xs text-slate-300">
+                    {compFindings.agreements.map((item, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="text-cyan-400">•</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Differences Card */}
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-purple-300 font-bold flex items-center gap-1.5">
+                    <Scale className="w-4 h-4 text-purple-400" />
+                    Distinct Approaches & Differences
+                  </h4>
+                  <ul className="space-y-1.5 text-xs text-slate-300">
+                    {compFindings.differences.map((item, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="text-purple-400">•</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Direct Evidence Claims */}
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-emerald-300 font-bold flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    Supported by Direct Evidence
+                  </h4>
+                  <ul className="space-y-1.5 text-xs text-slate-300">
+                    {compFindings.direct_evidence.map((item, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="text-emerald-400">•</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Interpretation vs Extrapolation */}
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
+                    <HelpCircle className="w-4 h-4 text-amber-400" />
+                    Interpretative Distinctions
+                  </h4>
+                  <ul className="space-y-1.5 text-xs text-slate-300">
+                    {compFindings.interpretation.map((item, i) => (
+                      <li key={i} className="flex items-start gap-1.5">
+                        <span className="text-amber-400">•</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </div>
             ) : (
-              <div className="p-4 rounded-xl bg-slate-900/40 border border-white/5 text-xs text-slate-400 text-center font-mono">
-                No individual citation selected.
+              <div className="p-6 text-center text-xs text-slate-400 italic bg-slate-900/60 rounded-xl border border-white/10">
+                Single-paper context retrieved. Cross-paper comparative synthesis activates when multiple studies are queried.
               </div>
             )}
-
-            {/* Scientific Rigor Disclaimer */}
-            <div className="p-3 rounded-lg bg-slate-900/40 border border-white/[0.06] flex items-start gap-2.5 text-xs text-slate-400">
-              <Database className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-              <p>
-                <strong>Scientific Rigor:</strong> Citations reflect passages directly retrieved from peer-reviewed literature. Citation of an excerpt indicates lexical or semantic relevance; researchers should evaluate experimental methodology and limitations in the cited paper.
-              </p>
-            </div>
-
           </div>
         )}
 
-        {/* Modal Action Footer */}
-        <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-white/[0.08]">
-          <div className="text-xs text-slate-500 font-mono flex items-center gap-2">
-            <span>Retrieval: Hybrid BM25 + Dense</span>
+        {/* Tab 4: Limitations and Conflicting Evidence */}
+        {activeTab === 'limitations' && (
+          <div className="space-y-4 animate-in fade-in duration-200">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Paper Limitations */}
+              <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
+                  <HelpCircle className="w-4 h-4 text-amber-400" />
+                  Paper-Supported Limitations
+                </h4>
+                <ul className="space-y-1.5 text-xs text-slate-300">
+                  {limConflicts?.limitations?.map((item, i) => (
+                    <li key={i} className="flex items-start gap-1.5">
+                      <span className="text-amber-400">•</span>
+                      <span>{item}</span>
+                    </li>
+                  )) || (
+                    <li className="text-slate-500 italic">No specific architectural limitations reported in retrieved excerpts.</li>
+                  )}
+                </ul>
+              </div>
+
+              {/* Conflicting Findings or Trade-Offs */}
+              <div className="p-4 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-purple-300 font-bold flex items-center gap-1.5">
+                  <Scale className="w-4 h-4 text-purple-400" />
+                  Trade-Offs & Potential Conflicts
+                </h4>
+                <ul className="space-y-1.5 text-xs text-slate-300">
+                  {limConflicts?.conflicts?.map((item, i) => (
+                    <li key={i} className="flex items-start gap-1.5">
+                      <span className="text-purple-400">•</span>
+                      <span>{item}</span>
+                    </li>
+                  )) || (
+                    <li className="text-slate-500 italic">No conflicting findings detected across retrieved evidence.</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+
+            {/* Evidence Gaps Banner */}
+            <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-2">
+              <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                Evidence Gaps & Unreported Aspects:
+              </span>
+              <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                {limConflicts?.insufficient_evidence_notes ||
+                  'All synthesized claims are strictly bounded by retrieved document excerpts. Unmentioned experimental configurations, energy footprints, or downstream tasks are truthfully flagged as not reported rather than fabricated.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Modal Footer */}
+        <div className="pt-3 border-t border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+          <div className="flex items-center gap-3">
+            <span>Model: <span className="text-slate-200 font-mono">{currentData.model}</span></span>
             <span>•</span>
-            <span>Top-5 Candidates</span>
+            <span>Evidence Chunks: <span className="text-cyan-300 font-mono">{currentSources.length}</span></span>
           </div>
 
-          <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-            <button
-              onClick={onClose}
-              className="px-5 py-2.5 rounded-xl font-medium text-xs sm:text-sm text-slate-300 hover:text-white glass-panel border-white/10"
-            >
-              Close
-            </button>
-            <button
-              onClick={() => handleExecuteSearch(activeQuery || defaultQuery)}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-xs sm:text-sm text-slate-900 bg-cyan-400 hover:bg-cyan-300 font-semibold shadow-[0_0_15px_rgba(0,245,212,0.3)]"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Run Research Query</span>
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+          >
+            Close View
+          </button>
         </div>
 
       </div>

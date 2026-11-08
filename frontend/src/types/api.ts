@@ -16,6 +16,30 @@ export interface AttributedSource {
   page_number: number | null;
 }
 
+export interface EvidenceByPaperItem {
+  paper_id: string | null;
+  paper_title: string;
+  findings: string[];
+  excerpts: string[];
+  citations: string[];
+  sources: AttributedSource[];
+}
+
+export interface ComparisonOfFindings {
+  agreements: string[];
+  differences: string[];
+  relationships: string[];
+  direct_evidence: string[];
+  interpretation: string[];
+}
+
+export interface LimitationsAndConflicts {
+  limitations: string[];
+  conflicts: string[];
+  evidence_gaps: string[];
+  insufficient_evidence_notes?: string;
+}
+
 export interface RAGQueryRequest {
   query: string;
   retrieval_mode?: 'bm25' | 'vector' | 'hybrid';
@@ -44,6 +68,73 @@ export interface RAGQueryResponse {
   } | null;
   retrieval_mode: string;
   evidence_count: number;
+  evidence_by_paper?: EvidenceByPaperItem[];
+  comparison_of_findings?: ComparisonOfFindings | null;
+  limitations_and_conflicts?: LimitationsAndConflicts | null;
+  conclusion?: 'Demonstrated improvement' | 'Limited evidence' | 'Conflicting evidence' | 'Insufficient evidence' | string | null;
+  conclusion_reasoning?: string | null;
+}
+
+export interface PaperItem {
+  id: string;
+  title: string;
+  doi?: string | null;
+  publication_year?: number | null;
+  authors: string[];
+  abstract?: string | null;
+  is_benchmark: boolean;
+  source: string;
+}
+
+export interface PaperSearchResponse {
+  papers: PaperItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface ComparisonTableCell {
+  value: string;
+  status: 'reported' | 'not_reported' | 'uncertain';
+  citations: string[];
+}
+
+export interface ComparisonRow {
+  dimension: string;
+  key: string;
+  per_paper: Record<string, ComparisonTableCell>;
+}
+
+export interface ComparisonTableData {
+  rows: ComparisonRow[];
+  key_similarities: string[];
+  key_differences: string[];
+  direct_evidence_findings: string[];
+  evidence_gaps: string[];
+  conclusion: string;
+  conclusion_reasoning: string;
+  comparability_status: string;
+}
+
+export interface ResearchCompareRequest {
+  paper_ids: string[];
+  query?: string | null;
+  model?: string | null;
+  temperature?: number | null;
+  max_output_tokens?: number | null;
+}
+
+export interface ResearchCompareResponse {
+  paper_ids: string[];
+  paper_titles: Record<string, string | null>;
+  matrix: Record<string, unknown>;
+  conclusion: string;
+  conclusion_reasoning: string;
+  comparability_status: string;
+  overall_summary: string;
+  model: string;
+  usage?: Record<string, number> | null;
+  comparison_table?: ComparisonTableData | null;
 }
 
 export interface HealthResponse {

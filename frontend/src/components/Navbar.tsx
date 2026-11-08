@@ -6,16 +6,24 @@ import {
   Compass,
   GitCompare,
   ShieldCheck,
-  ArrowRight
+  ArrowRight,
+  Scale
 } from 'lucide-react';
 import { checkBackendHealth } from '../services/api';
 
 interface NavbarProps {
   onExploreClick: () => void;
   onNavigate: (sectionId: string) => void;
+  currentView?: 'home' | 'compare';
+  onViewChange?: (view: 'home' | 'compare') => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  onExploreClick,
+  onNavigate,
+  currentView = 'home',
+  onViewChange
+}) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [backendLive, setBackendLive] = useState<boolean | null>(null);
 
@@ -30,7 +38,13 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
   }, []);
 
   const handleNavClick = (sectionId: string) => {
+    if (onViewChange) onViewChange('home');
     onNavigate(sectionId);
+    setMobileMenuOpen(false);
+  };
+
+  const handleCompareClick = () => {
+    if (onViewChange) onViewChange('compare');
     setMobileMenuOpen(false);
   };
 
@@ -70,7 +84,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
           <div className="hidden md:flex items-center gap-1.5">
             <button
               onClick={() => handleNavClick('hero')}
-              className="px-3.5 py-2 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-white/[0.05] transition-all"
+              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-all ${
+                currentView === 'home'
+                  ? 'text-white bg-white/[0.08]'
+                  : 'text-slate-300 hover:text-white hover:bg-white/[0.05]'
+              }`}
             >
               Home
             </button>
@@ -87,6 +105,17 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
             >
               <GitCompare className="w-4 h-4 text-purple-400" />
               Intelligence Matrix
+            </button>
+            <button
+              onClick={handleCompareClick}
+              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 ${
+                currentView === 'compare'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-[0_0_12px_rgba(0,245,212,0.25)]'
+                  : 'text-slate-300 hover:text-white hover:bg-white/[0.05]'
+              }`}
+            >
+              <Scale className="w-4 h-4 text-cyan-400" />
+              Compare Papers
             </button>
             <button
               onClick={() => handleNavClick('standards')}
@@ -200,6 +229,17 @@ export const Navbar: React.FC<NavbarProps> = ({ onExploreClick, onNavigate }) =>
             >
               <GitCompare className="w-4 h-4 text-purple-400" />
               Intelligence Matrix
+            </button>
+            <button
+              onClick={handleCompareClick}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm font-medium ${
+                currentView === 'compare'
+                  ? 'bg-cyan-500/20 text-cyan-300'
+                  : 'text-slate-200 hover:bg-white/[0.06]'
+              }`}
+            >
+              <Scale className="w-4 h-4 text-cyan-400" />
+              Compare Papers
             </button>
             <button
               onClick={() => handleNavClick('standards')}

@@ -193,6 +193,7 @@ class CrossPaperComparisonResult:
     model: str = "unknown"
     usage: dict[str, int] | None = None
     raw: dict[str, Any] | None = None
+    comparison_table: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.paper_ids, (list, tuple)):
@@ -242,12 +243,17 @@ class CrossPaperComparisonResult:
             _check_no_secret_keys(self.raw)
             object.__setattr__(self, "raw", copy.deepcopy(self.raw))
 
+        if self.comparison_table is not None:
+            if not isinstance(self.comparison_table, dict):
+                raise TypeError("comparison_table must be a dict or None")
+            object.__setattr__(self, "comparison_table", copy.deepcopy(self.comparison_table))
+
         object.__setattr__(self, "paper_ids", list(self.paper_ids))
         object.__setattr__(self, "paper_titles", dict(self.paper_titles))
         object.__setattr__(self, "matrix", dict(self.matrix))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "paper_ids": list(self.paper_ids),
             "paper_titles": dict(self.paper_titles),
             "matrix": {dim: mdc.to_dict() for dim, mdc in self.matrix.items()},
@@ -258,6 +264,9 @@ class CrossPaperComparisonResult:
             "model": self.model,
             "usage": None if self.usage is None else dict(self.usage),
         }
+        if self.comparison_table is not None:
+            d["comparison_table"] = copy.deepcopy(self.comparison_table)
+        return d
 
 
 @dataclass(frozen=True)
@@ -320,6 +329,7 @@ class PaperComparison:
     model: str = "unknown"
     usage: dict[str, int] | None = None
     raw: dict[str, Any] | None = None
+    comparison_table: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.paper_ids, (list, tuple)):
@@ -363,15 +373,23 @@ class PaperComparison:
             _check_no_secret_keys(self.raw)
             object.__setattr__(self, "raw", copy.deepcopy(self.raw))
 
+        if self.comparison_table is not None:
+            if not isinstance(self.comparison_table, dict):
+                raise TypeError("comparison_table must be a dict or None")
+            object.__setattr__(self, "comparison_table", copy.deepcopy(self.comparison_table))
+
         object.__setattr__(self, "paper_ids", list(self.paper_ids))
         object.__setattr__(self, "dimensions", dict(self.dimensions))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready representation of the multi-paper comparison."""
-        return {
+        d = {
             "paper_ids": list(self.paper_ids),
             "dimensions": {dim: fc.to_dict() for dim, fc in self.dimensions.items()},
             "overall_summary": self.overall_summary,
             "model": self.model,
             "usage": None if self.usage is None else dict(self.usage),
         }
+        if self.comparison_table is not None:
+            d["comparison_table"] = copy.deepcopy(self.comparison_table)
+        return d

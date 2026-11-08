@@ -429,11 +429,22 @@ class PaperComparisonService:
                     key_differences=[],
                     key_similarities=["All papers lack reported evidence for this dimension."],
                 )
+            from nexora.research.comparison_table import build_11_dimension_comparison_table
+            comparison_table = build_11_dimension_comparison_table(
+                cleaned_ids,
+                {a.paper_id: getattr(a, "paper_title", None) for a in analyses},
+                {a.paper_id: [] for a in analyses},
+                existing_matrix=None,
+                conclusion="Insufficient evidence",
+                conclusion_reasoning="No evidence was available for any of the compared papers.",
+                comparability_status="insufficient_evidence",
+            )
             return PaperComparison(
                 paper_ids=cleaned_ids,
                 dimensions=dimensions,
                 overall_summary="No evidence was available for any of the compared papers.",
                 model=model or "none",
+                comparison_table=comparison_table,
             )
 
         # 3. Call LLM for comparative synthesis
@@ -491,6 +502,17 @@ class PaperComparisonService:
                 key_similarities=sims,
             )
 
+        from nexora.research.comparison_table import build_11_dimension_comparison_table
+        comparison_table = build_11_dimension_comparison_table(
+            cleaned_ids,
+            {a.paper_id: getattr(a, "paper_title", None) for a in analyses},
+            {a.paper_id: [] for a in analyses},
+            existing_matrix=dimensions_result,
+            conclusion="Demonstrated improvement",
+            conclusion_reasoning="Comparative multi-paper evaluation across aligned dimensions.",
+            comparability_status="comparable",
+        )
+
         return PaperComparison(
             paper_ids=cleaned_ids,
             dimensions=dimensions_result,
@@ -498,4 +520,5 @@ class PaperComparisonService:
             model=response.model,
             usage=response.usage,
             raw=response.raw,
+            comparison_table=comparison_table,
         )
