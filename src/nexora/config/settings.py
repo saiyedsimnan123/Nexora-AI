@@ -13,7 +13,7 @@ from nexora.retrieval.qdrant_config import QdrantConfig
 from nexora.retrieval.quality import RetrievalQualityPolicy
 
 SUPPORTED_VECTOR_STORES = ("memory", "qdrant")
-SUPPORTED_LLM_PROVIDERS = ("openai",)
+SUPPORTED_LLM_PROVIDERS = ("openai", "gemini")
 
 
 class ConfigurationError(ValueError):
@@ -75,12 +75,13 @@ class AppSettings:
             raise ConfigurationError(
                 f"llm.provider must be one of {SUPPORTED_LLM_PROVIDERS}"
             )
+        prov = self.llm.provider.strip().lower()
         if (
             self.require_llm_key
-            and self.llm.provider.strip().lower() == "openai"
+            and prov in ("openai", "gemini")
             and not self.llm.api_key
         ):
-            raise ConfigurationError("llm.api_key is required for the openai provider")
+            raise ConfigurationError(f"llm.api_key is required for the {prov} provider")
         dimension = getattr(self.embedding, "dimension", None)
         if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
             raise ConfigurationError("embedding.dimension must be a positive integer")

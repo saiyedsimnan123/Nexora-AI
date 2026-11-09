@@ -18,8 +18,13 @@ def create_llm_provider(config: LLMConfig) -> LLMProvider:
     """Build the provider named in ``config`` (no network calls)."""
     if not isinstance(config, LLMConfig):
         raise TypeError("config must be an LLMConfig")
-    if config.provider.strip().lower() == "openai":
+    provider_name = config.provider.strip().lower()
+    if provider_name == "openai":
         return OpenAIProvider(config)
+    if provider_name == "gemini":
+        from nexora.llm.gemini_provider import GeminiProvider
+
+        return GeminiProvider(config)
     raise ValueError(f"Unsupported LLM provider: {config.provider!r}")
 
 

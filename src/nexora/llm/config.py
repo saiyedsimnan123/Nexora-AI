@@ -83,16 +83,36 @@ class LLMConfig:
             except ValueError:
                 raise ValueError(f"NEXORA_LLM_{name} is not a valid number") from None
 
+        provider = get("PROVIDER")
+        if not provider:
+            val = env.get("LLM_PROVIDER")
+            if val and val.strip():
+                provider = val.strip()
+            elif env.get("GEMINI_API_KEY") or env.get("NEXORA_GEMINI_API_KEY"):
+                if not env.get("OPENAI_API_KEY"):
+                    provider = "gemini"
+
+        prov_lower = provider.strip().lower() if provider else "openai"
+
         api_key = get("API_KEY")
         if not api_key:
-            for alt in ("OPENAI_API_KEY", "LLM_API_KEY"):
-                val = env.get(alt)
-                if val and val.strip():
-                    api_key = val.strip()
-                    break
+            if prov_lower == "gemini":
+                for alt in ("GEMINI_API_KEY", "NEXORA_GEMINI_API_KEY", "LLM_API_KEY"):
+                    val = env.get(alt)
+                    if val and val.strip():
+                        api_key = val.strip()
+                        break
+            else:
+                for alt in ("OPENAI_API_KEY", "LLM_API_KEY", "GEMINI_API_KEY", "NEXORA_GEMINI_API_KEY"):
+                    val = env.get(alt)
+                    if val and val.strip():
+                        api_key = val.strip()
+                        break
 
         if "NEXORA_LLM_MODEL" in env:
             model = env["NEXORA_LLM_MODEL"].strip()
+        elif prov_lower == "gemini":
+            model = env.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
         elif "OPENAI_MODEL" in env:
             model = env["OPENAI_MODEL"].strip()
         else:
@@ -100,15 +120,12 @@ class LLMConfig:
 
         base_url = get("BASE_URL")
         if not base_url:
-            val = env.get("OPENAI_BASE_URL")
+            if prov_lower == "gemini":
+                val = env.get("GEMINI_BASE_URL")
+            else:
+                val = env.get("OPENAI_BASE_URL")
             if val and val.strip():
                 base_url = val.strip()
-
-        provider = get("PROVIDER")
-        if not provider:
-            val = env.get("LLM_PROVIDER")
-            if val and val.strip():
-                provider = val.strip()
 
         kwargs: dict[str, Any] = {
             "model": model or "",
@@ -133,7 +150,13 @@ class LLMConfig:
     def has_credentials(cls, environ: Mapping[str, str] | None = None) -> bool:
         """Check if environment contains LLM provider credentials without raising errors."""
         env = os.environ if environ is None else environ
-        for var in ("NEXORA_LLM_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"):
+        for var in (
+            "NEXORA_LLM_API_KEY",
+            "GEMINI_API_KEY",
+            "NEXORA_GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "LLM_API_KEY",
+        ):
             val = env.get(var)
             if val and val.strip():
                 return True

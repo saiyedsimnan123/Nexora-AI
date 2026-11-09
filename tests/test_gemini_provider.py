@@ -184,8 +184,6 @@ def test_gemini_provider_defaults_to_gemini_embedding_2():
     [
         "text-embedding-004",
         "models/text-embedding-004",
-        "gemini-embedding-001",
-        "models/gemini-embedding-001",
         "embedding-001",
         "models/embedding-001",
         "default",
@@ -198,6 +196,16 @@ def test_legacy_aliases_migrated_to_gemini_embedding_2(legacy_alias):
     config = EmbeddingConfig(provider="gemini", model=legacy_alias, api_key=FAKE_API_KEY)
     provider = GeminiEmbeddingProvider(config, client=FakeGeminiClient())
     assert provider.model == "gemini-embedding-2"
+
+
+def test_gemini_embedding_001_and_2_preserved():
+    config1 = EmbeddingConfig(provider="gemini", model="gemini-embedding-001", api_key=FAKE_API_KEY)
+    provider1 = GeminiEmbeddingProvider(config1, client=FakeGeminiClient())
+    assert provider1.model == "gemini-embedding-001"
+
+    config2 = EmbeddingConfig(provider="gemini", model="gemini-embedding-2", api_key=FAKE_API_KEY)
+    provider2 = GeminiEmbeddingProvider(config2, client=FakeGeminiClient())
+    assert provider2.model == "gemini-embedding-2"
 
 
 def test_custom_supported_model_preserved():

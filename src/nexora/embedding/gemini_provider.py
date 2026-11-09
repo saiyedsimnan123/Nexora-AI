@@ -42,8 +42,6 @@ DEFAULT_GEMINI_BATCH_SIZE = 100
 LEGACY_MODEL_ALIASES: dict[str, str] = {
     "text-embedding-004": "gemini-embedding-2",
     "models/text-embedding-004": "gemini-embedding-2",
-    "gemini-embedding-001": "gemini-embedding-2",
-    "models/gemini-embedding-001": "gemini-embedding-2",
     "embedding-001": "gemini-embedding-2",
     "models/embedding-001": "gemini-embedding-2",
 }

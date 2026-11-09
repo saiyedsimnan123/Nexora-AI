@@ -787,3 +787,214 @@ def test_qdrant_url_fallback_and_auto_select(base_prod_env, monkeypatch):
     )
     assert app.state.vector_store is not None
     assert type(app.state.vector_store).__name__ == "QdrantVectorStore"
+
+
+def test_gemini_production_app_readiness_and_diagnostics():
+    """Verify Gemini LLM and Embedding providers report ready and configured in production server."""
+    gemini_env = {
+        "NEXORA_DATABASE_URL": "postgresql://test:test@localhost:5432/test",
+        "NEXORA_VECTOR_STORE": "qdrant",
+        "QDRANT_URL": "https://cluster-gemini.qdrant.tech",
+        "QDRANT_API_KEY": "test-qdrant-key",
+        "NEXORA_QDRANT_COLLECTION": "research_papers_gemini",
+        "NEXORA_LLM_PROVIDER": "gemini",
+        "NEXORA_LLM_MODEL": "gemini-2.5-flash",
+        "GEMINI_API_KEY": "test-gemini-secret-key-12345",
+        "NEXORA_EMBEDDING_PROVIDER": "gemini",
+        "NEXORA_EMBEDDING_MODEL": "gemini-embedding-001",
+        "NEXORA_RAG_GENERATOR_MODE": "live",
+    }
+
+    mock_factory = MagicMock()
+    mock_auth = MagicMock()
+    fake_qdrant_client = MagicMock()
+    fake_qdrant_client.get_collection.return_value.config.params.vectors.size = 768
+
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    from nexora.llm.gemini_provider import GeminiProvider
+    from tests.test_gemini_provider import FakeGeminiClient
+    from tests.test_llm_gemini_provider import FakeGeminiHttpClient
+
+    fake_emb_client = FakeGeminiClient(vector=[0.05] * 768)
+    fake_llm_client = FakeGeminiHttpClient(
+        canned_text="Gemini compares Attention and LoRA with rigor."
+    )
+
+    from nexora.embedding.config import EmbeddingConfig
+    from nexora.embedding.service import EmbeddingService
+    from nexora.llm.config import LLMConfig
+
+    emb_cfg = EmbeddingConfig(
+        provider="gemini",
+        model="gemini-embedding-001",
+        dimension=768,
+        api_key="test-gemini-secret-key-12345",
+    )
+    emb_provider = GeminiEmbeddingProvider(emb_cfg, client=fake_emb_client)
+    emb_service = EmbeddingService(emb_provider)
+
+    llm_cfg = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        api_key="test-gemini-secret-key-12345",
+    )
+    llm_prov = GeminiProvider(llm_cfg, client=fake_llm_client)
+
+    app = create_production_app(
+        gemini_env,
+        session_factory=mock_factory,
+        auth_service=mock_auth,
+        qdrant_client=fake_qdrant_client,
+        embedding_service=emb_service,
+        llm_provider=llm_prov,
+    )
+
+    client = TestClient(app)
+
+    # 1. /ready probe
+    ready_resp = client.get("/ready")
+    assert ready_resp.status_code == 200
+    ready_data = ready_resp.json()
+    assert ready_data["status"] == "ready"
+    assert ready_data["checks"]["llm"]["status"] == "ready"
+    assert ready_data["checks"]["llm"]["provider"] == "gemini"
+    assert ready_data["checks"]["llm"]["model"] == "gemini-2.5-flash"
+    assert ready_data["checks"]["embedding"]["status"] == "ready"
+    assert ready_data["checks"]["embedding"]["provider"] == "gemini"
+    assert ready_data["checks"]["embedding"]["dimension"] == 768
+    assert ready_data["checks"]["vector_store"]["status"] == "ready"
+    assert ready_data["checks"]["vector_store"]["backend"] == "qdrant"
+    assert ready_data["checks"]["environment"]["status"] == "configured"
+    assert ready_data["checks"]["environment"]["variables"]["GEMINI_API_KEY"] is True
+
+    # 2. /api/diagnostics/environment probe
+    diag_resp = client.get("/api/diagnostics/environment")
+    assert diag_resp.status_code == 200
+    diag_data = diag_resp.json()
+    assert diag_data["status"] == "ok"
+    assert diag_data["active_configuration"]["llm_provider"] == "gemini"
+    assert diag_data["active_configuration"]["llm_model"] == "gemini-2.5-flash"
+    assert diag_data["active_configuration"]["embedding_provider"] == "gemini"
+    assert diag_data["active_configuration"]["embedding_dimension"] == 768
+    assert diag_data["active_configuration"]["vector_store_backend"] == "qdrant"
+
+
+def test_gemini_cross_paper_comparison_endpoint():
+    """Verify live cross-paper comparison endpoint succeeds using Gemini provider."""
+    import json
+
+    comparison_json = {
+        "architecture": {
+            "p1": {"summary": "Self-attention mechanism", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "Low-rank adapter injection", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Attention modifies core architecture while LoRA freezes it.",
+            "key_differences": ["LoRA freezes base weights"],
+            "key_similarities": ["Both apply to transformers"],
+        },
+        "datasets": {
+            "p1": {"summary": "WMT 2014 En-De", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "GLUE benchmark", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Different evaluation datasets.",
+            "key_differences": ["Machine translation vs general language understanding"],
+            "key_similarities": [],
+        },
+        "metrics": {
+            "p1": {"summary": "BLEU score", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "Accuracy / GLUE score", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Task specific metrics.",
+            "key_differences": ["BLEU vs Accuracy"],
+            "key_similarities": [],
+        },
+        "results": {
+            "p1": {"summary": "Achieves 28.4 BLEU", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "Matches full fine-tuning", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Both report state-of-the-art results.",
+            "key_differences": ["Different tasks"],
+            "key_similarities": ["Strong empirical gains"],
+        },
+        "computational_efficiency": {
+            "p1": {"summary": "Reduced sequential operations", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "3x memory reduction and 10000x fewer parameters", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Both improve efficiency.",
+            "key_differences": ["Training vs Architecture efficiency"],
+            "key_similarities": ["Efficiency focus"],
+        },
+        "limitations": {
+            "p1": {"summary": "Quadratic memory scaling", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "Cannot change model capacity", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Reported limitations.",
+            "key_differences": ["Quadratic attention vs frozen capacity"],
+            "key_similarities": [],
+        },
+        "future_work": {
+            "p1": {"summary": "Apply to other modalities", "status": "reported", "evidence_labels": ["[E1]"], "details": {}},
+            "p2": {"summary": "Combine with other adaptation methods", "status": "reported", "evidence_labels": ["[E2]"], "details": {}},
+            "comparison_summary": "Broad expansion paths.",
+            "key_differences": [],
+            "key_similarities": ["Future extensions proposed"],
+        },
+        "conclusion": "comparable",
+        "conclusion_reasoning": "Both papers address complementary aspects of transformer efficiency.",
+        "comparability": "comparable",
+        "overall_summary": "Attention provides the architecture; LoRA provides efficient fine-tuning.",
+    }
+
+    from nexora.embedding.gemini_provider import GeminiEmbeddingProvider
+    from nexora.llm.gemini_provider import GeminiProvider
+    from tests.test_gemini_provider import FakeGeminiClient
+    from tests.test_llm_gemini_provider import FakeGeminiHttpClient
+
+    fake_emb_client = FakeGeminiClient(vector=[0.05] * 768)
+    fake_llm_client = FakeGeminiHttpClient(canned_text=json.dumps(comparison_json))
+
+    from nexora.embedding.config import EmbeddingConfig
+    from nexora.embedding.service import EmbeddingService
+    from nexora.llm.config import LLMConfig
+
+    emb_cfg = EmbeddingConfig(provider="gemini", model="gemini-embedding-001", dimension=768, api_key="test-key")
+    emb_service = EmbeddingService(GeminiEmbeddingProvider(emb_cfg, client=fake_emb_client))
+
+    llm_cfg = LLMConfig(provider="gemini", model="gemini-2.5-flash", api_key="test-key")
+    llm_prov = GeminiProvider(llm_cfg, client=fake_llm_client)
+
+    gemini_env = {
+        "NEXORA_DATABASE_URL": "postgresql://test:test@localhost:5432/test",
+        "NEXORA_LLM_PROVIDER": "gemini",
+        "NEXORA_LLM_MODEL": "gemini-2.5-flash",
+        "GEMINI_API_KEY": "test-key",
+        "NEXORA_EMBEDDING_PROVIDER": "gemini",
+        "NEXORA_EMBEDDING_MODEL": "gemini-embedding-001",
+    }
+
+    mock_factory = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get.return_value = None
+    mock_factory.return_value = mock_session
+    mock_factory.__enter__ = MagicMock(return_value=mock_session)
+    mock_factory.__exit__ = MagicMock(return_value=None)
+    mock_auth = MagicMock()
+
+    app = create_production_app(
+        gemini_env,
+        session_factory=mock_factory,
+        auth_service=mock_auth,
+        embedding_service=emb_service,
+        llm_provider=llm_prov,
+    )
+
+    client = TestClient(app)
+
+    from nexora.research.comparison_table import BENCHMARK_PAPERS
+
+    # Compare benchmark papers: Attention Is All You Need and LoRA using their canonical UUIDs
+    uuid_attention = BENCHMARK_PAPERS["arxiv_1706.03762"]["uuid"]
+    uuid_lora = BENCHMARK_PAPERS["arxiv_2106.09685"]["uuid"]
+    req_body = {
+        "paper_ids": [uuid_attention, uuid_lora],
+    }
+    resp = client.post("/api/v1/research/compare", json=req_body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "matrix" in data
+    assert "conclusion" in data
+    assert "methods" in data["matrix"]

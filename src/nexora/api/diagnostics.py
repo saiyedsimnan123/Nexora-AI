@@ -144,7 +144,15 @@ def check_readiness_status(request: Request, response: Response) -> dict[str, An
             is_ready = False
 
     # 7. Safe environment variable diagnostics (presence boolean only, NO values)
-    required_env_vars = (
+    llm_config = getattr(settings, "llm", None) if settings else None
+    active_llm_provider = (
+        (llm_config.provider if llm_config else None)
+        or (app_env.get("NEXORA_LLM_PROVIDER") or os.environ.get("NEXORA_LLM_PROVIDER") or "")
+        or "openai"
+    ).strip().lower()
+
+    diagnostic_env_vars = (
+        "GEMINI_API_KEY",
         "OPENAI_API_KEY",
         "NEXORA_LLM_MODEL",
         "NEXORA_RAG_GENERATOR_MODE",
@@ -157,10 +165,32 @@ def check_readiness_status(request: Request, response: Response) -> dict[str, An
     )
     env_status = {
         var: bool((app_env.get(var) or os.environ.get(var) or "").strip())
-        for var in required_env_vars
+        for var in diagnostic_env_vars
     }
+
+    if active_llm_provider == "gemini":
+        has_active_llm_key = env_status.get("GEMINI_API_KEY", False) or bool(
+            (app_env.get("NEXORA_GEMINI_API_KEY") or os.environ.get("NEXORA_GEMINI_API_KEY") or "").strip()
+        )
+    else:
+        has_active_llm_key = env_status.get("OPENAI_API_KEY", False)
+
+    required_non_key_vars = (
+        "NEXORA_LLM_MODEL",
+        "NEXORA_RAG_GENERATOR_MODE",
+        "NEXORA_EMBEDDING_PROVIDER",
+        "NEXORA_EMBEDDING_MODEL",
+        "NEXORA_VECTOR_STORE",
+        "QDRANT_URL",
+        "QDRANT_API_KEY",
+        "NEXORA_QDRANT_COLLECTION",
+    )
+    is_env_configured = has_active_llm_key and all(
+        env_status.get(v, False) for v in required_non_key_vars
+    )
+
     checks["environment"] = {
-        "status": "configured" if all(env_status.values()) else "incomplete",
+        "status": "configured" if is_env_configured else "incomplete",
         "variables": env_status,
         "runtime": {
             "vercel": bool(app_env.get("VERCEL") or os.environ.get("VERCEL")),
@@ -199,7 +229,8 @@ def check_readiness_status(request: Request, response: Response) -> dict[str, An
 
 def get_environment_diagnostics(request: Request) -> dict[str, Any]:
     """Safe runtime environment diagnostics without exposing secret values."""
-    required_env_vars = (
+    diagnostic_env_vars = (
+        "GEMINI_API_KEY",
         "OPENAI_API_KEY",
         "NEXORA_LLM_MODEL",
         "NEXORA_RAG_GENERATOR_MODE",
@@ -213,7 +244,7 @@ def get_environment_diagnostics(request: Request) -> dict[str, Any]:
     app_env = getattr(request.app.state, "environ", None) or os.environ
     env_status = {
         var: bool((app_env.get(var) or os.environ.get(var) or "").strip())
-        for var in required_env_vars
+        for var in diagnostic_env_vars
     }
     settings = getattr(request.app.state, "settings", None)
     vector_store = getattr(request.app.state, "vector_store", None)
