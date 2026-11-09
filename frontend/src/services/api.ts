@@ -19,6 +19,8 @@ import type {
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const DEFAULT_TIMEOUT_MS = 20000;
+const GUEST_STORAGE_KEY = 'nexora_guest_session_token';
+export const DEFAULT_GUEST_TOKEN = 'nx_guest_preview_session';
 
 export class ApiError extends Error {
   public statusCode?: number;
@@ -37,6 +39,45 @@ export class ApiError extends Error {
 }
 
 /**
+ * Retrieve cached guest token or fetch a temporary guest session token.
+ */
+export async function getOrFetchGuestToken(signal?: AbortSignal): Promise<string> {
+  if (typeof window === 'undefined') return DEFAULT_GUEST_TOKEN;
+
+  try {
+    const cached =
+      window.sessionStorage?.getItem(GUEST_STORAGE_KEY) ||
+      window.localStorage?.getItem(GUEST_STORAGE_KEY);
+    if (cached && cached.trim()) {
+      return cached.trim();
+    }
+
+    const res = await fetch(`${API_BASE_URL}/api/v1/auth/guest-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      signal,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.token) {
+        window.sessionStorage?.setItem(GUEST_STORAGE_KEY, data.token);
+        return data.token;
+      }
+    }
+  } catch {
+    // If endpoint is unreachable or in non-browser context, fallback gracefully
+  }
+
+  try {
+    window.sessionStorage?.setItem(GUEST_STORAGE_KEY, DEFAULT_GUEST_TOKEN);
+  } catch {}
+  return DEFAULT_GUEST_TOKEN;
+}
+
+/**
  * Fetch with automatic timeout handling.
  */
 async function fetchWithTimeout(
@@ -48,8 +89,23 @@ async function fetchWithTimeout(
   const id = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Authorization') && !headers.has('X-API-Key')) {
+      let token = DEFAULT_GUEST_TOKEN;
+      if (typeof window !== 'undefined') {
+        const cached =
+          window.sessionStorage?.getItem(GUEST_STORAGE_KEY) ||
+          window.localStorage?.getItem(GUEST_STORAGE_KEY);
+        if (cached && cached.trim()) {
+          token = cached.trim();
+        }
+      }
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
     const response = await fetch(url, {
       ...options,
+      headers,
       signal: options.signal || controller.signal,
     });
     return response;

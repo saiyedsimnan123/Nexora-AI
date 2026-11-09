@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { HeroSection } from './components/HeroSection';
 import { FeatureCapabilities } from './components/FeatureCapabilities';
@@ -9,6 +9,7 @@ import { SearchModal } from './components/SearchModal';
 import { ComparePapers } from './components/ComparePapers';
 import { UploadModal } from './components/UploadModal';
 import { AnalysisModal } from './components/AnalysisModal';
+import { getOrFetchGuestToken } from './services/api';
 
 export const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<'home' | 'compare'>('home');
@@ -19,6 +20,11 @@ export const App: React.FC = () => {
   const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState<boolean>(false);
   const [analysisPaperId, setAnalysisPaperId] = useState<string | null>(null);
   const [analysisPaperTitle, setAnalysisPaperTitle] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Warm up guest session for preview environment
+    getOrFetchGuestToken().catch(() => {});
+  }, []);
 
   const handleSearchSubmit = (query: string) => {
     setSearchQuery(query);

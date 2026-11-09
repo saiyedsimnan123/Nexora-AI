@@ -22,6 +22,7 @@ def check_readiness_status(request: Request, response: Response) -> dict[str, An
     Returns HTTP 200 with status='ready' when all required components are operational.
     Returns HTTP 503 with status='unavailable' when any required component is failing.
     """
+    app_env = getattr(request.app.state, "environ", None) or os.environ
     session_factory = getattr(request.app.state, "session_factory", None)
     enforce_auth = getattr(request.app.state, "enforce_auth", False)
     research_service = getattr(request.app.state, "research_service", None)
@@ -64,10 +65,18 @@ def check_readiness_status(request: Request, response: Response) -> dict[str, An
             except Exception:
                 pass
 
+        from nexora.auth.guest import is_guest_access_allowed
+        guest_allowed = is_guest_access_allowed(app_env)
         if auth_service is not None and checks.get("database", {}).get("status") == "ready":
-            checks["auth"] = {"status": "ready"}
+            checks["auth"] = {
+                "status": "ready",
+                "guest_access": guest_allowed,
+            }
         else:
-            checks["auth"] = {"status": "unavailable"}
+            checks["auth"] = {
+                "status": "unavailable",
+                "guest_access": guest_allowed,
+            }
             is_ready = False
     else:
         checks["auth"] = {"status": "ready"}
@@ -241,6 +250,7 @@ def get_environment_diagnostics(request: Request) -> dict[str, Any]:
         "QDRANT_API_KEY",
         "NEXORA_QDRANT_COLLECTION",
     )
+    from nexora.auth.guest import is_guest_access_allowed
     app_env = getattr(request.app.state, "environ", None) or os.environ
     env_status = {
         var: bool((app_env.get(var) or os.environ.get(var) or "").strip())
@@ -274,5 +284,6 @@ def get_environment_diagnostics(request: Request) -> dict[str, Any]:
             "embedding_provider": getattr(emb_provider, "name", type(emb_provider).__name__) if emb_provider else None,
             "embedding_dimension": getattr(embedding_service, "dimension", None) if embedding_service else None,
             "database_configured": bool(getattr(request.app.state, "session_factory", None)),
+            "guest_access_enabled": is_guest_access_allowed(app_env),
         },
     }

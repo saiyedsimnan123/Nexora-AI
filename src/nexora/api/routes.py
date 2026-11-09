@@ -910,6 +910,47 @@ def environment_diagnostics(request: Request) -> dict[str, Any]:
 
 
 
+@v1_router.post(
+    "/auth/guest-session",
+    response_model=dict[str, Any],
+    status_code=200,
+    summary="Create or retrieve a temporary guest session for the Preview environment",
+    description="Available only in Vercel Preview. Strictly prohibited in Production.",
+)
+def create_guest_session_endpoint(request: Request) -> dict[str, Any]:
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    environ = getattr(app_state, "environ", None) if app_state is not None else None
+
+    from nexora.api.errors import ForbiddenError
+    from nexora.auth.guest import (
+        DEFAULT_GUEST_TOKEN,
+        GUEST_COLLECTION_ID,
+        GUEST_EMAIL,
+        GUEST_USER_ID,
+        GUEST_WORKSPACE_ID,
+        ensure_guest_tenant,
+        is_guest_access_allowed,
+    )
+
+    if not is_guest_access_allowed(environ):
+        raise ForbiddenError("Guest access is not permitted in this environment.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is not None:
+        with session_factory() as sess:
+            ensure_guest_tenant(sess)
+
+    return {
+        "status": "ok",
+        "token": DEFAULT_GUEST_TOKEN,
+        "user_id": str(GUEST_USER_ID),
+        "workspace_id": str(GUEST_WORKSPACE_ID),
+        "collection_id": str(GUEST_COLLECTION_ID),
+        "email": GUEST_EMAIL,
+        "guest_access": True,
+    }
+
+
 @v1_router.post("/research", response_model=ResearchResponseBody)
 def research(
     body: ResearchRequestBody,
@@ -1034,8 +1075,12 @@ def research_rag_query(
             elif str(col.id) not in scoped_collection_ids:
                 raise ForbiddenError("Specified paper does not belong to the specified collection.")
         if scoped_collection_ids is None and scoped_paper_id is None:
-            user_cols = auth_service.get_user_collection_ids(current_user.id)
-            scoped_collection_ids = [str(c) for c in user_cols]
+            from nexora.auth.guest import GUEST_USER_ID
+            if current_user.id == GUEST_USER_ID:
+                scoped_collection_ids = None
+            else:
+                user_cols = auth_service.get_user_collection_ids(current_user.id)
+                scoped_collection_ids = [str(c) for c in user_cols]
 
         # Fail closed if caller is scoped but has no authorized collections
         if scoped_collection_ids is not None and len(scoped_collection_ids) == 0:
@@ -1153,7 +1198,11 @@ def analyze_paper_endpoint(
     service: Any = Depends(get_analysis_service),
     current_user: Any = Depends(get_current_user),
 ) -> PaperAnalysisResponseBody:
-    if current_user is not None:
+    from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+
+    pid_str = str(body.paper_id).strip()
+    is_benchmark = pid_str in BENCHMARK_PAPERS or pid_str in UUID_TO_BENCHMARK
+    if current_user is not None and not is_benchmark:
         auth_service = get_auth_service(request)
         if auth_service is not None:
             auth_service.verify_paper_ownership(body.paper_id, current_user.id)
@@ -1186,7 +1235,11 @@ def analyze_paper_by_id_endpoint(
     service: Any = Depends(get_analysis_service),
     current_user: Any = Depends(get_current_user),
 ) -> PaperAnalysisResponseBody:
-    if current_user is not None:
+    from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
+
+    pid_str = str(paper_id).strip()
+    is_benchmark = pid_str in BENCHMARK_PAPERS or pid_str in UUID_TO_BENCHMARK
+    if current_user is not None and not is_benchmark:
         auth_service = get_auth_service(request)
         if auth_service is not None:
             auth_service.verify_paper_ownership(paper_id, current_user.id)
@@ -1425,8 +1478,11 @@ def discover_research_gaps_endpoint(
             if body.collection_id is not None:
                 auth_service.verify_collection_ownership(body.collection_id, current_user.id)
             if body.paper_ids:
+                from nexora.research.comparison_table import BENCHMARK_PAPERS, UUID_TO_BENCHMARK
                 for pid in body.paper_ids:
-                    auth_service.verify_paper_ownership(pid, current_user.id)
+                    pid_s = str(pid).strip()
+                    if pid_s not in BENCHMARK_PAPERS and pid_s not in UUID_TO_BENCHMARK:
+                        auth_service.verify_paper_ownership(pid, current_user.id)
     req = ResearchGapsRequest(
         paper_ids=body.paper_ids,
         collection_id=body.collection_id,
@@ -1689,8 +1745,8 @@ async def ingest_document(
     paper_id: str = Form(...),
     file: UploadFile = File(...),
     durable: bool = Form(False),
-    service: Any = Depends(get_ingestion_service),
     current_user: Any = Depends(get_current_user),
+    service: Any = Depends(get_ingestion_service),
 ) -> DocumentIngestResponseBody:
     """Upload and ingest a research paper PDF into relational storage and vector index."""
     if not isinstance(paper_id, str) or not paper_id.strip():
@@ -1701,11 +1757,6 @@ async def ingest_document(
     except (ValueError, AttributeError):
         raise InvalidRequestError("Invalid paper_id: must be a valid UUID.")
 
-    if current_user is not None:
-        auth_service = get_auth_service(request)
-        if auth_service is not None:
-            auth_service.verify_paper_ownership(paper_uuid, current_user.id)
-
     raw_filename = file.filename or ""
     if not raw_filename.lower().endswith(".pdf"):
         raise InvalidRequestError("Only PDF files are supported.")
@@ -1715,6 +1766,48 @@ async def ingest_document(
         raise InvalidRequestError("Only PDF files are supported.")
 
     safe_filename = Path(raw_filename).name or "document.pdf"
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is not None and current_user is not None:
+        from nexora.database.repository.paper import PaperRepository
+        from nexora.database.models.paper import Paper
+        from nexora.database.session import database_transaction
+
+        with database_transaction(session_factory) as sess:
+            paper_repo = PaperRepository(sess)
+            paper = paper_repo.get_by_id(paper_uuid)
+            if paper is None:
+                auth_service = get_auth_service(request)
+                col_ids = auth_service.get_user_collection_ids(current_user.id, session=sess) if auth_service else []
+                if not col_ids:
+                    from nexora.auth.guest import ensure_guest_tenant, GUEST_USER_ID, GUEST_COLLECTION_ID
+                    if current_user.id == GUEST_USER_ID:
+                        ensure_guest_tenant(sess)
+                        col_ids = [GUEST_COLLECTION_ID]
+                    else:
+                        from nexora.database.models.workspace import Workspace
+                        from nexora.database.models.collection import Collection
+                        ws = Workspace(name="Default Workspace", user_id=current_user.id)
+                        sess.add(ws)
+                        sess.flush()
+                        col = Collection(name="Default Collection", workspace_id=ws.id)
+                        sess.add(col)
+                        sess.flush()
+                        col_ids = [col.id]
+
+                target_col_id = col_ids[0]
+                paper_title = Path(safe_filename).stem.replace("_", " ").title() or "Uploaded Research Paper"
+                paper = Paper(
+                    id=paper_uuid,
+                    collection_id=target_col_id,
+                    title=paper_title,
+                )
+                sess.add(paper)
+
+    if current_user is not None:
+        auth_service = get_auth_service(request)
+        if auth_service is not None:
+            auth_service.verify_paper_ownership(paper_uuid, current_user.id)
     max_size = getattr(request.app.state, "max_upload_size_bytes", 50 * 1024 * 1024)
     hasher = hashlib.sha256()
 

@@ -90,16 +90,28 @@ class AuthenticationService:
         Supports:
         - `Authorization: Bearer <token>`
         - `X-API-Key: <token>`
+        - Sandboxed Guest Access for non-production Preview environments
 
         Raises:
             AuthenticationError: If credentials are missing, malformed, or invalid.
         """
+        app_state = getattr(getattr(request, "app", None), "state", None)
+        environ = getattr(app_state, "environ", None) if app_state is not None else None
+
+        from nexora.auth.guest import (
+            ensure_guest_tenant,
+            get_guest_authenticated_user,
+            is_guest_access_allowed,
+            is_guest_token,
+        )
+
+        guest_allowed = is_guest_access_allowed(environ)
+
         auth_header = request.headers.get("Authorization")
         x_api_key = request.headers.get("X-API-Key")
+        x_guest = request.headers.get("X-Guest-Session")
 
-        if not auth_header and not x_api_key:
-            raise AuthenticationError("Authentication credentials were not provided.")
-
+        raw_token: str | None = None
         if auth_header:
             parts = auth_header.strip().split(None, 1)
             if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -109,13 +121,40 @@ class AuthenticationService:
             raw_token = parts[1].strip()
             if not raw_token:
                 raise AuthenticationError("Bearer token value is empty.")
+        elif x_api_key:
+            raw_token = x_api_key.strip()
+            if not raw_token:
+                raise AuthenticationError("X-API-Key header value is empty.")
+
+        # 1. If explicit guest token or guest header is provided:
+        if raw_token and is_guest_token(raw_token):
+            if not guest_allowed:
+                raise AuthenticationError("Guest access is not permitted in this environment.")
+            if self._session_factory is not None:
+                with self._session_factory() as session:
+                    return ensure_guest_tenant(session)
+            return get_guest_authenticated_user()
+
+        if x_guest and x_guest.strip().lower() in ("true", "1", "yes"):
+            if not guest_allowed:
+                raise AuthenticationError("Guest access is not permitted in this environment.")
+            if self._session_factory is not None:
+                with self._session_factory() as session:
+                    return ensure_guest_tenant(session)
+            return get_guest_authenticated_user()
+
+        # 2. If standard credentials provided, verify against database
+        if raw_token:
             return self.authenticate_token(raw_token)
 
-        assert x_api_key is not None
-        raw_token = x_api_key.strip()
-        if not raw_token:
-            raise AuthenticationError("X-API-Key header value is empty.")
-        return self.authenticate_token(raw_token)
+        # 3. If no credentials provided at all:
+        if guest_allowed:
+            if self._session_factory is not None:
+                with self._session_factory() as session:
+                    return ensure_guest_tenant(session)
+            return get_guest_authenticated_user()
+
+        raise AuthenticationError("Authentication credentials were not provided.")
 
     def verify_collection_ownership(
         self,
