@@ -528,6 +528,32 @@ def build_graph_worker(
     )
 
 
+def build_research_worker(
+    settings: AppSettings,
+    *,
+    rag_pipeline: Any,
+    session_factory: Any,
+    worker_token: str | None = None,
+    poll_interval_seconds: float = 2.0,
+    lease_duration_seconds: float = 300.0,
+    heartbeat_interval_seconds: float = 20.0,
+    max_attempts: int = 3,
+) -> Any:
+    """Assemble ResearchJobWorker using settings and injected dependencies."""
+    from nexora.research.worker import ResearchJobWorker
+
+    return ResearchJobWorker(
+        session_factory=session_factory,
+        rag_pipeline=rag_pipeline,
+        worker_token=worker_token,
+        poll_interval_seconds=poll_interval_seconds,
+        lease_duration_seconds=lease_duration_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        max_attempts=max_attempts,
+        batch_size=1,
+    )
+
+
 def build_http_app(
     settings: AppSettings,
     *,
@@ -682,6 +708,16 @@ def build_http_app(
             default_mode="hybrid",
         )
 
+    research_worker = dependencies.get("research_worker")
+    if research_worker is None and rag_pipeline is not None and session_factory is not None:
+        enable_worker = getattr(settings, "enable_research_worker", True)
+        if enable_worker:
+            research_worker = build_research_worker(
+                settings,
+                rag_pipeline=rag_pipeline,
+                session_factory=session_factory,
+            )
+
     discovery_service = dependencies.get("discovery_service")
     if discovery_service is None:
         from nexora.discovery.service import DiscoveryService
@@ -775,6 +811,7 @@ def build_http_app(
         graph_analytics_service=dependencies.get("graph_analytics_service"),
         graph_extraction_service=graph_extraction_service,
         graph_worker=graph_worker,
+        research_worker=research_worker,
         session_factory=session_factory,
         vector_store=vector_store,
         vector_client=qdrant_client,

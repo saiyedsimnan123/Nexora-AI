@@ -25,6 +25,11 @@ from nexora.graph.queue_consumer import (
     process_queue_trigger,
     set_global_worker,
 )
+from nexora.research.queue_consumer import (
+    handle_research_job,
+    process_research_queue_trigger,
+    set_global_research_worker,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,11 +83,15 @@ def test_queue_consumer_invokes_run_once():
 
 
 def test_queue_subscription_registered_with_sdk():
-    """Verify handle_graph_job is properly registered with vercel-queue SDK."""
+    """Verify queue subscribers are properly registered with vercel-queue SDK."""
     subs = get_subscriptions()
-    matching = [s for s in subs if s.topic == "graph-extraction-jobs"]
-    assert len(matching) >= 1
-    assert any(s.func is not None and s.func.__name__ == "handle_graph_job" for s in matching)
+    graph_matching = [s for s in subs if s.topic == "graph-extraction-jobs"]
+    assert len(graph_matching) >= 1
+    assert any(s.func is not None and s.func.__name__ == "handle_graph_job" for s in graph_matching)
+
+    research_matching = [s for s in subs if s.topic == "research-query-jobs"]
+    assert len(research_matching) >= 1
+    assert any(s.func is not None and s.func.__name__ == "handle_research_job" for s in research_matching)
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +140,12 @@ def test_pyproject_toml_configuration():
 
     # Subscribers check
     subscribers = data.get("tool", {}).get("vercel", {}).get("subscribers", [])
-    assert len(subscribers) >= 1
+    assert len(subscribers) >= 2
     assert any(
         s.get("topic") == "graph-extraction-jobs" and s.get("entrypoint") == "nexora.graph.queue_consumer"
+        for s in subscribers
+    )
+    assert any(
+        s.get("topic") == "research-query-jobs" and s.get("entrypoint") == "nexora.research.queue_consumer"
         for s in subscribers
     )

@@ -89,8 +89,9 @@ def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) ->
         result,
         flags=re.IGNORECASE,
     )
-    result = re.sub(r"AIza[0-9A-Za-z-_]{35}", "[REDACTED]", result)
-    result = re.sub(r"sk-[a-zA-Z0-9_\-]{20,}", "[REDACTED]", result)
+    result = re.sub(r"AIza[0-9A-Za-z\-_]{8,}", "[REDACTED]", result)
+    result = re.sub(r"sk-[a-zA-Z0-9_\-]{16,}", "[REDACTED]", result)
+    result = re.sub(r"nx_live_[a-zA-Z0-9_\-]{16,}", "[REDACTED]", result)
 
     return result
 
@@ -268,7 +269,15 @@ class GeminiProvider:
                 raise LLMProviderError(
                     "Gemini API key is required; set config.api_key or GEMINI_API_KEY environment variable"
                 )
-            self._client = httpx.Client(base_url=self._base_url, timeout=self._config.timeout)
+            read_timeout = max(float(self._config.timeout), 60.0)
+            timeout_config = httpx.Timeout(
+                timeout=read_timeout,
+                connect=15.0,
+                read=read_timeout,
+                write=30.0,
+                pool=15.0,
+            )
+            self._client = httpx.Client(base_url=self._base_url, timeout=timeout_config)
             self._owns_client = True
         return self._client
 
@@ -378,30 +387,45 @@ class GeminiProvider:
 
         client = self._get_client()
 
-        try:
-            if hasattr(client, "post"):
-                response = client.post(path, json=payload, headers=headers)
-                if hasattr(response, "raise_for_status"):
-                    response.raise_for_status()
-                if callable(getattr(response, "json", None)):
-                    data = response.json()
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            try:
+                if hasattr(client, "post"):
+                    response = client.post(path, json=payload, headers=headers)
+                    if hasattr(response, "raise_for_status"):
+                        response.raise_for_status()
+                    if callable(getattr(response, "json", None)):
+                        data = response.json()
+                    else:
+                        data = getattr(response, "data", response)
+                    break
+                elif hasattr(client, "generate"):
+                    # Direct test double
+                    return client.generate(
+                        messages,
+                        model=effective_model,
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                    )
                 else:
-                    data = getattr(response, "data", response)
-            elif hasattr(client, "generate"):
-                # Direct test double
-                return client.generate(
-                    messages,
-                    model=effective_model,
-                    temperature=temperature,
-                    max_output_tokens=max_output_tokens,
+                    raise LLMProviderError("Client does not provide a callable 'post' or 'generate' method")
+            except LLMProviderError:
+                raise
+            except Exception as exc:
+                is_last_attempt = (attempt == max_attempts - 1)
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                is_transient = (
+                    status_code in (429, 500, 502, 503, 504)
+                    or isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
+                    or "Timeout" in type(exc).__name__
+                    or "Connect" in type(exc).__name__
                 )
-            else:
-                raise LLMProviderError("Client does not provide a callable 'post' or 'generate' method")
-        except LLMProviderError:
-            raise
-        except Exception as exc:
-            error_message = _format_actionable_error(exc, api_key=self._api_key)
-            raise LLMProviderError(error_message) from exc
+                if not is_last_attempt and is_transient:
+                    import time
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                error_message = _format_actionable_error(exc, api_key=self._api_key)
+                raise LLMProviderError(error_message) from exc
 
         return self._parse_response(data, effective_model)
 

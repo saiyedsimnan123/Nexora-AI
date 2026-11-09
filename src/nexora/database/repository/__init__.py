@@ -18,6 +18,7 @@ from nexora.database.repository.graph_relationship import GraphRelationshipRepos
 from nexora.database.repository.paper import PaperRepository
 from nexora.database.repository.paper_author import PaperAuthorRepository
 from nexora.database.repository.paper_reference import PaperReferenceRepository
+from nexora.database.repository.research_job import ResearchJobRepository
 from nexora.database.repository.user import UserRepository
 from nexora.database.repository.workspace import WorkspaceRepository
 
@@ -38,6 +39,7 @@ __all__ = [
     "PaperRepository",
     "RecordNotFoundError",
     "RepositoryError",
+    "ResearchJobRepository",
     "UserRepository",
     "WorkspaceRepository",
 ]

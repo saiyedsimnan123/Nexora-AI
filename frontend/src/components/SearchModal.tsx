@@ -14,11 +14,17 @@ import {
   ArrowRight,
   UploadCloud
 } from 'lucide-react';
-import { queryResearchRAG, getResearchGaps } from '../services/api';
+import {
+  queryResearchRAG,
+  getResearchGaps,
+  getActiveResearchJobId,
+  clearActiveResearchJobId,
+  getResearchJob,
+} from '../services/api';
 import type {
   RAGQueryResponse,
   AttributedSource,
-  ResearchGapsResponse
+  ResearchGapsResponse,
 } from '../types/api';
 
 interface SearchModalProps {
@@ -145,6 +151,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   const [activeQuery, setActiveQuery] = useState<string>(initialQuery);
   const [prevQuery, setPrevQuery] = useState<string>(query);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [jobStatusText, setJobStatusText] = useState<string>('Querying hybrid pipeline...');
   const [error, setError] = useState<string | null>(null);
   const [liveResponse, setLiveResponse] = useState<RAGQueryResponse | null>(null);
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
@@ -170,13 +177,24 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     setIsLoading(true);
     setError(null);
     setIsDemoMode(false);
+    setJobStatusText('Submitting research question to durable worker...');
 
     try {
-      const data = await queryResearchRAG({
-        query: trimmed,
-        retrieval_mode: 'hybrid',
-        top_k: 5,
-      });
+      const data = await queryResearchRAG(
+        {
+          query: trimmed,
+          retrieval_mode: 'hybrid',
+          top_k: 5,
+        },
+        undefined,
+        (status) => {
+          if (status === 'queued') {
+            setJobStatusText('Queued in background worker...');
+          } else if (status === 'processing') {
+            setJobStatusText('Synthesizing research evidence with Gemini...');
+          }
+        }
+      );
 
       setLiveResponse(data);
       const firstLabel = data.sources?.[0]?.label || data.cited_sources?.[0]?.label || '[E1]';
@@ -189,9 +207,45 @@ export const SearchModal: React.FC<SearchModalProps> = ({
     }
   }, []);
 
-  // Trigger search on modal opening
+  // Trigger search on modal opening or resume pending job
   useEffect(() => {
     if (!isOpen) return;
+
+    const activeJobId = getActiveResearchJobId();
+    if (activeJobId) {
+      let cancelled = false;
+      setIsLoading(true);
+      setJobStatusText('Resuming background research job...');
+
+      (async () => {
+        try {
+          const job = await getResearchJob(activeJobId);
+          if (cancelled) return;
+          if (job.status === 'completed' && job.result) {
+            clearActiveResearchJobId();
+            setLiveResponse(job.result);
+            setIsLoading(false);
+            return;
+          }
+          if (job.status === 'failed') {
+            clearActiveResearchJobId();
+            setIsLoading(false);
+            return;
+          }
+          if (job.query) {
+            handleExecuteSearch(job.query);
+            return;
+          }
+        } catch {
+          clearActiveResearchJobId();
+          setIsLoading(false);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const targetQuery = query.trim() || defaultQuery;
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -411,9 +465,9 @@ export const SearchModal: React.FC<SearchModalProps> = ({
           <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-slate-400">
             <span>Research Question:</span>
             {isLoading && (
-              <span className="text-cyan-400 flex items-center gap-1 normal-case font-sans text-xs">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Querying hybrid pipeline...
+              <span className="text-cyan-400 flex items-center gap-1.5 normal-case font-sans text-xs">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                {jobStatusText}
               </span>
             )}
           </div>

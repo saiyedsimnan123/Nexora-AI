@@ -6,6 +6,8 @@
 import type {
   RAGQueryRequest,
   RAGQueryResponse,
+  ResearchJobSubmitResponse,
+  ResearchJobStatusResponse,
   HealthResponse,
   ReadinessResponse,
   PaperSearchResponse,
@@ -21,6 +23,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '
 const DEFAULT_TIMEOUT_MS = 20000;
 const GUEST_STORAGE_KEY = 'nexora_guest_session_token';
 export const DEFAULT_GUEST_TOKEN = 'nx_guest_preview_session';
+export const ACTIVE_RESEARCH_JOB_KEY = 'nexora_active_research_job_id';
 
 export class ApiError extends Error {
   public statusCode?: number;
@@ -157,9 +160,122 @@ export async function checkBackendReadiness(signal?: AbortSignal): Promise<Readi
 }
 
 /**
- * Execute research question query via POST /api/v1/research/query.
+ * Retrieve cached active research job ID if one is currently pending.
  */
-export async function queryResearchRAG(
+export function getActiveResearchJobId(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.sessionStorage?.getItem(ACTIVE_RESEARCH_JOB_KEY) || null;
+}
+
+/**
+ * Clear cached active research job ID.
+ */
+export function clearActiveResearchJobId(): void {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage?.removeItem(ACTIVE_RESEARCH_JOB_KEY);
+}
+
+/**
+ * Submit an asynchronous durable research query job via POST /api/v1/research/jobs.
+ */
+export async function submitResearchJob(
+  request: RAGQueryRequest,
+  signal?: AbortSignal
+): Promise<ResearchJobSubmitResponse> {
+  if (!request.query || !request.query.trim()) {
+    throw new ApiError('Research query must not be empty.', 400);
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/research/jobs`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        query: request.query.trim(),
+        retrieval_mode: request.retrieval_mode || 'hybrid',
+        top_k: request.top_k || 5,
+        min_score: request.min_score,
+        temperature: request.temperature,
+        max_output_tokens: request.max_output_tokens,
+        collection_id: request.collection_id,
+        paper_id: request.paper_id,
+      }),
+      signal,
+    },
+    15000
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Server error (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  const data: ResearchJobSubmitResponse = await response.json();
+  if (typeof window !== 'undefined') {
+    window.sessionStorage?.setItem(ACTIVE_RESEARCH_JOB_KEY, data.job_id);
+  }
+  return data;
+}
+
+/**
+ * Poll research job status and result via GET /api/v1/research/jobs/{job_id}.
+ */
+export async function getResearchJob(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<ResearchJobStatusResponse> {
+  if (!jobId || !jobId.trim()) {
+    throw new ApiError('Job ID must not be empty.', 400);
+  }
+
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/v1/research/jobs/${encodeURIComponent(jobId.trim())}`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+      signal,
+    },
+    10000
+  );
+
+  if (!response.ok) {
+    let errorMsg = `Server error (HTTP ${response.status})`;
+    let details: unknown = null;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) {
+        errorMsg = errJson.error.message;
+      } else if (errJson.detail) {
+        errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+      details = errJson;
+    } catch {}
+    throw new ApiError(errorMsg, response.status, details);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Execute research question query synchronously via POST /api/v1/research/query (fallback).
+ */
+export async function queryResearchRAGDirect(
   request: RAGQueryRequest,
   signal?: AbortSignal
 ): Promise<RAGQueryResponse> {
@@ -199,14 +315,72 @@ export async function queryResearchRAG(
         errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
       }
       details = errJson;
-    } catch {
-      // Body not JSON
-    }
+    } catch {}
     throw new ApiError(errorMsg, response.status, details);
   }
 
-  const data: RAGQueryResponse = await response.json();
-  return data;
+  return await response.json();
+}
+
+/**
+ * Execute research question query using durable background jobs with polling.
+ * Prevents Vercel timeouts and serverless request boundary drops.
+ */
+export async function queryResearchRAG(
+  request: RAGQueryRequest,
+  signal?: AbortSignal,
+  onProgress?: (status: string, job?: ResearchJobStatusResponse) => void
+): Promise<RAGQueryResponse> {
+  if (!request.query || !request.query.trim()) {
+    throw new ApiError('Research query must not be empty.', 400);
+  }
+
+  try {
+    // 1. Submit durable research job
+    const jobSubmit = await submitResearchJob(request, signal);
+    const jobId = jobSubmit.job_id;
+    onProgress?.('queued');
+
+    // 2. Poll until completed or failed (up to 120s)
+    const maxPollTimeMs = 120000;
+    const startTime = Date.now();
+    let delayMs = 1000;
+
+    while (Date.now() - startTime < maxPollTimeMs) {
+      if (signal?.aborted) {
+        throw new ApiError('Request aborted by user.', 499);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      const jobStatus = await getResearchJob(jobId, signal);
+      onProgress?.(jobStatus.status, jobStatus);
+
+      if (jobStatus.status === 'completed' && jobStatus.result) {
+        clearActiveResearchJobId();
+        return jobStatus.result;
+      }
+
+      if (jobStatus.status === 'failed') {
+        clearActiveResearchJobId();
+        throw new ApiError(
+          jobStatus.error || 'Research generation failed in background worker.',
+          500
+        );
+      }
+
+      delayMs = Math.min(2500, Math.floor(delayMs * 1.3));
+    }
+
+    clearActiveResearchJobId();
+    throw new ApiError('Research synthesis timed out after 120 seconds.', 504);
+  } catch (err: unknown) {
+    if (err instanceof ApiError && err.statusCode === 404) {
+      // Fallback to direct synchronous query if background job route is unmounted
+      return await queryResearchRAGDirect(request, signal);
+    }
+    throw err;
+  }
 }
 
 /**

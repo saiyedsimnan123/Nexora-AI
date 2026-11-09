@@ -31,6 +31,10 @@ from nexora.database.models.graph_relationship import (
 from nexora.database.models.paper import Paper
 from nexora.database.models.paper_author import PaperAuthor
 from nexora.database.models.paper_reference import PaperReference
+from nexora.database.models.research_job import (
+    ResearchJob,
+    ResearchJobStatus,
+)
 from nexora.database.models.user import User
 from nexora.database.models.workspace import Workspace
 
@@ -52,6 +56,8 @@ __all__ = [
     "Paper",
     "PaperAuthor",
     "PaperReference",
+    "ResearchJob",
+    "ResearchJobStatus",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
     "User",

@@ -274,20 +274,33 @@ def should_start_background_worker(environ: Mapping[str, str] | None = None) -> 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
     worker = getattr(app.state, "graph_worker", None)
+    research_worker = getattr(app.state, "research_worker", None)
     start_worker = should_start_background_worker()
-    if start_worker and worker is not None and hasattr(worker, "start"):
-        try:
-            worker.start()
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Failed to start graph_worker on app startup: %s", exc)
+    if start_worker:
+        if worker is not None and hasattr(worker, "start"):
+            try:
+                worker.start()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to start graph_worker on app startup: %s", exc)
+        if research_worker is not None and hasattr(research_worker, "start"):
+            try:
+                research_worker.start()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to start research_worker on app startup: %s", exc)
     try:
         yield
     finally:
-        if start_worker and worker is not None and hasattr(worker, "stop"):
-            try:
-                worker.stop()
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Failed to stop graph_worker on app shutdown: %s", exc)
+        if start_worker:
+            if worker is not None and hasattr(worker, "stop"):
+                try:
+                    worker.stop()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Failed to stop graph_worker on app shutdown: %s", exc)
+            if research_worker is not None and hasattr(research_worker, "stop"):
+                try:
+                    research_worker.stop()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Failed to stop research_worker on app shutdown: %s", exc)
         _run_shutdown_cleanup(app)
 
 
@@ -323,6 +336,7 @@ def create_app(
     graph_analytics_service: Any = None,
     graph_extraction_service: Any = None,
     graph_worker: Any = None,
+    research_worker: Any = None,
     session_factory: Any = None,
     vector_store: Any = None,
     vector_client: Any = None,
@@ -407,6 +421,7 @@ def create_app(
     app.state.graph_analytics_service = graph_analytics_service
     app.state.graph_extraction_service = graph_extraction_service
     app.state.graph_worker = graph_worker
+    app.state.research_worker = research_worker
     app.state.session_factory = session_factory
     app.state.vector_store = vector_store
     app.state.vector_client = vector_client

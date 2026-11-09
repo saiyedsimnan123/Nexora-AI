@@ -82,6 +82,24 @@ export interface RAGQueryResponse {
   takeaway?: string | null;
 }
 
+export interface ResearchJobSubmitResponse {
+  job_id: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  created_at: string;
+  poll_url: string;
+}
+
+export interface ResearchJobStatusResponse {
+  job_id: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  query: string;
+  result?: RAGQueryResponse | null;
+  error?: string | null;
+  attempts?: number;
+  created_at: string;
+  completed_at?: string | null;
+}
+
 export interface PaperItem {
   id: string;
   title: string;

@@ -34,3 +34,7 @@ entrypoint = "src.nexora.server:app"
 [[tool.vercel.subscribers]]
 topic = "graph-extraction-jobs"
 entrypoint = "nexora.graph.queue_consumer"
+
+[[tool.vercel.subscribers]]
+topic = "research-query-jobs"
+entrypoint = "nexora.research.queue_consumer"
