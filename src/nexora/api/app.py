@@ -55,7 +55,7 @@ from nexora.discovery.errors import (
     PaperNotFoundError,
     SSRFProtectionError,
 )
-from nexora.document.ingestion import VectorIndexingError
+from nexora.document.ingestion import IngestionError, VectorIndexingError
 
 
 def _error_response(
@@ -89,6 +89,7 @@ async def _conflict(request: Request, exc: Exception) -> JSONResponse:
 
 async def _indexing_failed(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "indexing_failed", "Document indexing failed.")
+
 
 
 async def _research_failed(request: Request, exc: Exception) -> JSONResponse:
@@ -396,6 +397,8 @@ def create_app(
     app.state.gap_service = gap_service
     app.state.trend_service = trend_service
     app.state.discovery_service = discovery_service
+    if document_pipeline is None and ingestion_service is not None:
+        document_pipeline = getattr(ingestion_service, "document_pipeline", None) or getattr(ingestion_service, "_document_pipeline", None)
     app.state.document_pipeline = document_pipeline
     app.state.tool_registry = tool_registry
     app.state.orchestrator = orchestrator
@@ -502,6 +505,7 @@ def create_app(
     app.add_exception_handler(PaperNotFoundError, _not_found)
     app.add_exception_handler(PDFNotFoundError, _not_found)
     app.add_exception_handler(DuplicateRecordError, _conflict)
+    app.add_exception_handler(IngestionError, _indexing_failed)
     app.add_exception_handler(VectorIndexingError, _indexing_failed)
     app.add_exception_handler(InvalidRequestError, _invalid_request)
     app.add_exception_handler(InvalidIdentifierError, _invalid_request)

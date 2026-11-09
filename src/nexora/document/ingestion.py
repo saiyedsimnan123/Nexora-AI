@@ -190,6 +190,7 @@ class DocumentIngestionService:
         session_factory: Any = None,
         graph_extraction_service: Any = None,
         graph_job_repository: Any = None,
+        document_pipeline: Any = None,
     ) -> None:
         if persistence_service is None and session_factory is None:
             raise TypeError("Either persistence_service or session_factory must be provided")
@@ -220,6 +221,24 @@ class DocumentIngestionService:
         self._embedding_service = embedding_service
         self._graph_service = graph_extraction_service
         self._graph_job_repo = graph_job_repository
+
+        if document_pipeline is not None:
+            self._document_pipeline = document_pipeline
+        elif embedding_service is not None:
+            try:
+                from nexora.document.pipeline import DocumentPipeline
+                self._document_pipeline = DocumentPipeline.create(embedding_service)
+            except Exception:
+                self._document_pipeline = None
+        else:
+            self._document_pipeline = None
+
+    @property
+    def document_pipeline(self) -> Any:
+        return self._document_pipeline
+
+    def get_pipeline(self) -> Any:
+        return self._document_pipeline
 
     def _persist_and_index_records(
         self,
@@ -690,7 +709,7 @@ class DocumentIngestionService:
         self,
         paper_id: UUID,
         file_path: str,
-        pipeline: Any,
+        pipeline: Any = None,
         *,
         filename: str | None = None,
         mime_type: str | None = None,
@@ -704,7 +723,22 @@ class DocumentIngestionService:
         """Process a file via DocumentPipeline and perform end-to-end ingestion."""
         if not isinstance(file_path, str):
             raise TypeError(f"file_path must be a str, got {type(file_path).__name__}")
-        if not hasattr(pipeline, "process_pdf") or not callable(pipeline.process_pdf):
+
+        if pipeline is None:
+            pipeline = self._document_pipeline
+            if pipeline is None and self._embedding_service is not None:
+                from nexora.document.pipeline import DocumentPipeline
+                pipeline = DocumentPipeline.create(self._embedding_service)
+                self._document_pipeline = pipeline
+
+        if pipeline is not None and not (hasattr(pipeline, "process_pdf") and callable(pipeline.process_pdf)):
+            from nexora.document.pipeline import DocumentPipelineAdapter
+            try:
+                pipeline = DocumentPipelineAdapter(pipeline)
+            except Exception:
+                pass
+
+        if pipeline is None or not hasattr(pipeline, "process_pdf") or not callable(pipeline.process_pdf):
             raise TypeError("pipeline must provide process_pdf(file_path)")
 
         processed = pipeline.process_pdf(file_path)

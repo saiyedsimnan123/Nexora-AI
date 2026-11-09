@@ -394,3 +394,273 @@ def test_build_http_app_wires_ingestion_service_to_api():
     assert response.status_code == 200
     assert response.json()["paper_id"] == paper_id
     assert len(recording_service.calls) == 1
+
+
+# ==============================================================================
+# Focused Regression Suite for PDF Ingestion Pipeline Wiring (Milestone Fix)
+# ==============================================================================
+
+def test_build_document_pipeline_wires_embedding_integration():
+    from nexora.bootstrap.application import build_document_pipeline
+    from nexora.document.pipeline import DocumentPipeline
+
+    emb = FakeEmbeddingService(dimension=3)
+    pipeline = build_document_pipeline(embedding_service=emb)
+
+    assert isinstance(pipeline, DocumentPipeline)
+    assert hasattr(pipeline, "process_pdf") and callable(pipeline.process_pdf)
+
+
+def test_build_http_app_wires_document_pipeline_to_app_state():
+    settings = _app_settings(dimension=3)
+    emb = FakeEmbeddingService(dimension=3)
+    store = FakeVectorStore(dimension=3)
+
+    app = build_http_app(
+        settings,
+        embedding_service=emb,
+        vector_store=store,
+        llm_provider=SimpleNamespace(generate=lambda *a, **k: None),
+    )
+
+    assert hasattr(app.state, "document_pipeline")
+    assert app.state.document_pipeline is not None
+    assert hasattr(app.state.document_pipeline, "process_pdf")
+    assert callable(app.state.document_pipeline.process_pdf)
+
+
+def test_document_pipeline_adapter_adapts_process_file_and_callable():
+    from nexora.document.models import ProcessedDocument
+    from nexora.document.pipeline import DocumentPipelineAdapter
+
+    class LegacyFileProcessor:
+        def process_file(self, file_path: str):
+            return ProcessedDocument(
+                document_id="doc-123",
+                source=file_path,
+                chunks=[],
+                metadata={},
+            )
+
+    adapter = DocumentPipelineAdapter(LegacyFileProcessor())
+    assert hasattr(adapter, "process_pdf") and callable(adapter.process_pdf)
+    res = adapter.process_pdf("paper.pdf")
+    assert isinstance(res, ProcessedDocument)
+    assert res.document_id == "doc-123"
+
+    # Callable function adapter
+    callable_adapter = DocumentPipelineAdapter(
+        lambda fp: ProcessedDocument(
+            document_id="callable-doc",
+            source=fp,
+            chunks=[],
+            metadata={},
+        )
+    )
+    res2 = callable_adapter.process_pdf("paper.pdf")
+    assert res2.document_id == "callable-doc"
+
+    # Non-compliant object raises TypeError
+    with pytest.raises(TypeError, match="does not provide a callable"):
+        DocumentPipelineAdapter(object()).process_pdf("paper.pdf")
+
+
+def test_ingest_document_with_real_document_pipeline_and_ingestion_service():
+    """Verify end-to-end PDF ingestion using DocumentPipeline and DocumentIngestionService."""
+    from contextlib import nullcontext
+    from nexora.document.models import ProcessedDocument, DocumentChunk
+    from nexora.document.pipeline import DocumentPipeline
+    from nexora.embedding.integration import EmbeddedChunk, EmbeddingIntegration
+    from nexora.embedding.pipeline import EmbeddingPipeline
+
+    class MockSession:
+        def begin_nested(self):
+            return nullcontext()
+
+    class MockChunkRecord:
+        def __init__(self, idx):
+            self.id = uuid4()
+            self.chunk_index = idx
+            self.text = f"Sample chunk text {idx}"
+
+    class MockPersistence:
+        def __init__(self):
+            self._session = MockSession()
+            self.persisted = []
+
+        def persist_processed_document(self, paper_id, processed, **kwargs):
+            from types import SimpleNamespace
+            doc = SimpleNamespace(id=uuid4(), paper_id=paper_id, filename="paper.pdf", storage_key=None, checksum="abc")
+            self.persisted.append((paper_id, processed))
+            return doc
+
+        def list_chunks_for_document(self, doc_id):
+            return [MockChunkRecord(0), MockChunkRecord(1)]
+
+        def update_document_indexing_status(self, *args, **kwargs):
+            pass
+
+    emb_service = FakeEmbeddingService(dimension=3)
+    pipeline = DocumentPipeline.create(
+        emb_service,
+        loader=lambda path: "Extracted scholarly text from PDF document for analysis.",
+    )
+    vector_store = FakeVectorStore(dimension=3)
+    persistence = MockPersistence()
+
+    ingestion_service = DocumentIngestionService(
+        persistence_service=persistence,
+        vector_store=vector_store,
+        embedding_service=emb_service,
+        document_pipeline=pipeline,
+    )
+
+    app = create_app(
+        FakeResearchService(),
+        ingestion_service=ingestion_service,
+        document_pipeline=pipeline,
+    )
+    client = TestClient(app)
+
+    paper_id = str(uuid4())
+    response = client.post(
+        URL,
+        data={"paper_id": paper_id},
+        files={"file": ("paper.pdf", io.BytesIO(b"%PDF dummy content"), "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["paper_id"] == paper_id
+    assert data["chunks_count"] > 0
+    assert data["indexed_chunks_count"] > 0
+    assert len(vector_store.records) > 0
+
+
+def test_ingest_document_auto_resolves_pipeline_when_none_on_app_state():
+    """Ensure that if request.app.state.document_pipeline is None, it resolves from ingestion_service."""
+    from contextlib import nullcontext
+    from nexora.document.pipeline import DocumentPipeline
+
+    class MockSession:
+        def begin_nested(self):
+            return nullcontext()
+
+    class MockChunkRecord:
+        def __init__(self, idx):
+            self.id = uuid4()
+            self.chunk_index = idx
+            self.text = f"Sample chunk text {idx}"
+
+    class MockPersistence:
+        def __init__(self):
+            self._session = MockSession()
+
+        def persist_processed_document(self, paper_id, processed, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(id=uuid4(), paper_id=paper_id, filename="resolved.pdf", storage_key=None, checksum="abc")
+
+        def list_chunks_for_document(self, doc_id):
+            return [MockChunkRecord(0)]
+
+        def update_document_indexing_status(self, *args, **kwargs):
+            pass
+
+    emb_service = FakeEmbeddingService(dimension=3)
+    pipeline = DocumentPipeline.create(
+        emb_service,
+        loader=lambda path: "Auto-resolved document pipeline text.",
+    )
+    ingestion_service = DocumentIngestionService(
+        persistence_service=MockPersistence(),
+        vector_store=FakeVectorStore(dimension=3),
+        embedding_service=emb_service,
+        document_pipeline=pipeline,
+    )
+
+    # Intentionally set document_pipeline=None on app
+    app = create_app(
+        FakeResearchService(),
+        ingestion_service=ingestion_service,
+        document_pipeline=None,
+    )
+    # Ensure app.state.document_pipeline is explicitly None
+    app.state.document_pipeline = None
+
+    client = TestClient(app)
+    paper_id = str(uuid4())
+    response = client.post(
+        URL,
+        data={"paper_id": paper_id},
+        files={"file": ("resolved.pdf", io.BytesIO(b"%PDF content"), "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["paper_id"] == paper_id
+
+
+def test_ingest_document_invalid_pipeline_returns_safe_error():
+    """When the pipeline object is invalid, returns server_misconfigured rather than unhandled crash."""
+    class FakePersistence:
+        def persist_processed_document(self, *a, **k):
+            pass
+
+    emb = FakeEmbeddingService(dimension=3)
+    ingestion_service = DocumentIngestionService(
+        persistence_service=FakePersistence(),
+        vector_store=FakeVectorStore(dimension=3),
+        embedding_service=emb,
+    )
+
+    app = create_app(
+        FakeResearchService(),
+        ingestion_service=ingestion_service,
+        document_pipeline=object(),  # object() does not provide process_pdf
+    )
+    client = TestClient(app)
+
+    paper_id = str(uuid4())
+    response = client.post(
+        URL,
+        data={"paper_id": paper_id},
+        files={"file": ("sample.pdf", io.BytesIO(b"%PDF content"), "application/pdf")},
+    )
+
+    assert response.status_code == 500
+    error_payload = response.json()["error"]
+    assert error_payload["code"] == "server_misconfigured"
+    # Never leak internal traces or secrets
+    assert "sk-" not in str(error_payload)
+    assert "AIza" not in str(error_payload)
+
+
+def test_gemini_dimension_boundary_and_secret_redaction():
+    """Ensure Gemini 768D embeddings pass dimension boundaries and secrets are redacted in error responses."""
+    from nexora.embedding.gemini_provider import DEFAULT_GEMINI_DIMENSION
+    assert DEFAULT_GEMINI_DIMENSION == 768
+
+    gemini_emb = FakeEmbeddingService(dimension=DEFAULT_GEMINI_DIMENSION)
+    gemini_store = FakeVectorStore(dimension=DEFAULT_GEMINI_DIMENSION)
+
+    settings = _app_settings(dimension=DEFAULT_GEMINI_DIMENSION)
+    app = build_http_app(
+        settings,
+        embedding_service=gemini_emb,
+        vector_store=gemini_store,
+        llm_provider=SimpleNamespace(generate=lambda *a, **k: None),
+    )
+
+    # Document pipeline wired with Gemini dimensions
+    assert app.state.document_pipeline is not None
+
+    # Verify secret redaction in exception handler
+    from nexora.api.app import _indexing_failed
+    import asyncio
+    import json
+
+    dummy_request = SimpleNamespace(headers={})
+    secret_exc = Exception("Gemini API call failed with key AIzaSyD9876543210abcdefghijklmnop and Bearer secret-token-xyz")
+    res = asyncio.run(_indexing_failed(dummy_request, secret_exc))
+    body = json.loads(res.body)
+    assert "AIzaSyD9876543210abcdefghijklmnop" not in body["error"]["message"]
+    assert "secret-token-xyz" not in body["error"]["message"]

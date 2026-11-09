@@ -119,6 +119,38 @@ def build_verification_service(
     )
 
 
+def build_document_pipeline(
+    settings: AppSettings | None = None,
+    *,
+    embedding_service: Any = None,
+    loader: Any = None,
+    preprocessor: Any = None,
+    chunker: Any = None,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+) -> Any:
+    """Assemble DocumentPipeline using settings and embedding_service.
+
+    Keeps construction lazy; performs no network calls.
+    """
+    if embedding_service is None:
+        raise ConfigurationError("embedding_service is required to build a DocumentPipeline")
+    from nexora.document.pipeline import DocumentPipeline
+
+    kwargs: dict[str, Any] = {
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+    }
+    if loader is not None:
+        kwargs["loader"] = loader
+    if preprocessor is not None:
+        kwargs["preprocessor"] = preprocessor
+    if chunker is not None:
+        kwargs["chunker"] = chunker
+
+    return DocumentPipeline.create(embedding_service, **kwargs)
+
+
 def build_ingestion_service(
     settings: AppSettings,
     *,
@@ -129,6 +161,7 @@ def build_ingestion_service(
     embedding_service: Any,
     qdrant_client: Any = None,
     graph_extraction_service: Any = None,
+    document_pipeline: Any = None,
 ) -> Any:
     """Assemble DocumentIngestionService using settings and injected dependencies.
 
@@ -156,6 +189,7 @@ def build_ingestion_service(
             embedding_service=embedding_service,
             session_factory=session_factory,
             graph_extraction_service=graph_extraction_service,
+            document_pipeline=document_pipeline,
         )
 
     if persistence_service is None:
@@ -174,6 +208,7 @@ def build_ingestion_service(
         vector_store=vector_store,
         embedding_service=embedding_service,
         graph_extraction_service=graph_extraction_service,
+        document_pipeline=document_pipeline,
     )
 
 
@@ -561,6 +596,12 @@ def build_http_app(
                 session_factory=session_factory,
             )
 
+    if document_pipeline is None and embedding_service is not None and ingestion_service is None:
+        document_pipeline = build_document_pipeline(
+            settings,
+            embedding_service=embedding_service,
+        )
+
     if ingestion_service is None:
         session = dependencies.get("session")
         if session_factory is not None or persistence_service is not None or session is not None:
@@ -573,6 +614,7 @@ def build_http_app(
                 embedding_service=embedding_service,
                 qdrant_client=qdrant_client,
                 graph_extraction_service=graph_extraction_service,
+                document_pipeline=document_pipeline,
             )
 
     if analysis_service is None:

@@ -1846,6 +1846,28 @@ async def ingest_document(
     try:
         pipeline = getattr(request.app.state, "document_pipeline", None)
 
+        if pipeline is None:
+            if hasattr(service, "get_pipeline") and callable(service.get_pipeline):
+                pipeline = service.get_pipeline()
+            elif hasattr(service, "document_pipeline") and service.document_pipeline is not None:
+                pipeline = service.document_pipeline
+            elif hasattr(service, "_document_pipeline") and service._document_pipeline is not None:
+                pipeline = service._document_pipeline
+            elif hasattr(service, "_embedding_service") and service._embedding_service is not None:
+                try:
+                    from nexora.document.pipeline import DocumentPipeline
+                    pipeline = DocumentPipeline.create(service._embedding_service)
+                    request.app.state.document_pipeline = pipeline
+                except Exception:
+                    pipeline = None
+
+        if pipeline is not None and not (hasattr(pipeline, "process_pdf") and callable(pipeline.process_pdf)):
+            from nexora.document.pipeline import DocumentPipelineAdapter
+            try:
+                pipeline = DocumentPipelineAdapter(pipeline)
+            except Exception:
+                pass
+
         if pipeline is not None and hasattr(pipeline, "_loader") and callable(pipeline._loader):
             try:
                 pipeline._loader(str(tmp_path))
@@ -1868,22 +1890,30 @@ async def ingest_document(
                         checksum=file_checksum,
                         durable=durable,
                     )
-                except TypeError:
-                    try:
-                        result = service.process_and_ingest(
-                            paper_id=paper_uuid,
-                            file_path=str(tmp_path),
-                            pipeline=pipeline,
-                            filename=safe_filename,
-                            checksum=file_checksum,
-                        )
-                    except TypeError:
-                        result = service.process_and_ingest(
-                            paper_id=paper_uuid,
-                            file_path=str(tmp_path),
-                            pipeline=pipeline,
-                            filename=safe_filename,
-                        )
+                except TypeError as exc:
+                    exc_msg = str(exc)
+                    if any(kw in exc_msg for kw in ("unexpected keyword", "takes", "positional argument")):
+                        try:
+                            result = service.process_and_ingest(
+                                paper_id=paper_uuid,
+                                file_path=str(tmp_path),
+                                pipeline=pipeline,
+                                filename=safe_filename,
+                                checksum=file_checksum,
+                            )
+                        except TypeError as exc2:
+                            exc_msg2 = str(exc2)
+                            if any(kw in exc_msg2 for kw in ("unexpected keyword", "takes", "positional argument")):
+                                result = service.process_and_ingest(
+                                    paper_id=paper_uuid,
+                                    file_path=str(tmp_path),
+                                    pipeline=pipeline,
+                                    filename=safe_filename,
+                                )
+                            else:
+                                raise
+                    else:
+                        raise
             elif hasattr(service, "ingest_file"):
                 result = service.ingest_file(
                     paper_id=paper_uuid,
@@ -1903,6 +1933,10 @@ async def ingest_document(
                 )
         except ValueError as exc:
             raise InvalidRequestError("The uploaded file is not a valid or readable PDF.") from exc
+        except TypeError as exc:
+            if "pipeline must provide" in str(exc) or "does not provide a callable process" in str(exc):
+                raise InvalidConfigurationError("Document processing pipeline is not configured.") from exc
+            raise InvalidRequestError(f"Invalid document ingestion request: {exc}") from exc
 
         from fastapi.responses import JSONResponse
 

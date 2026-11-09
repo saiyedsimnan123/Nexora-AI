@@ -64,6 +64,44 @@ class DocumentPipeline:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
 
+    @classmethod
+    def create(
+        cls,
+        embedding_service: Any,
+        *,
+        loader: Callable[[str], Any] = load_pdf_text,
+        preprocessor: Callable[[str], str] = clean_text,
+        chunker: Callable[..., list[str]] = chunk_text,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+    ) -> DocumentPipeline:
+        """Create a DocumentPipeline wired to an EmbeddingService or EmbeddingIntegration."""
+        if embedding_service is None:
+            raise TypeError("embedding_service is required to create a DocumentPipeline")
+
+        if isinstance(embedding_service, EmbeddingIntegration):
+            integration = embedding_service
+        elif hasattr(embedding_service, "embed_chunks") and callable(embedding_service.embed_chunks):
+            integration = embedding_service
+        elif hasattr(embedding_service, "embed_texts") or hasattr(embedding_service, "embed_text"):
+            import importlib
+            pipe_mod = importlib.import_module("nexora.embedding.pipeline")
+            pipeline = pipe_mod.EmbeddingPipeline(embedding_service)
+            integration = EmbeddingIntegration(pipeline)
+        else:
+            raise TypeError(
+                f"embedding_service must provide embed_text or embed_texts, got {type(embedding_service).__name__}"
+            )
+
+        return cls(
+            integration,
+            loader=loader,
+            preprocessor=preprocessor,
+            chunker=chunker,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
     def process_extracted_document(
         self,
         extracted: ExtractedDocument,
@@ -149,3 +187,40 @@ class DocumentPipeline:
             chunks=[_to_document_chunk(chunk) for chunk in embedded_chunks],
             metadata={},
         )
+
+
+class DocumentPipelineAdapter:
+    """Adapts an arbitrary pipeline object or callable to provide the process_pdf(file_path) interface."""
+
+    def __init__(self, target: Any) -> None:
+        if target is None:
+            raise TypeError("Cannot adapt None as a document pipeline")
+        if not (
+            (hasattr(target, "process_pdf") and callable(target.process_pdf))
+            or (hasattr(target, "process_file") and callable(target.process_file))
+            or (hasattr(target, "process_document") and callable(target.process_document))
+            or (hasattr(target, "process") and callable(target.process))
+            or callable(target)
+        ):
+            raise TypeError(
+                f"Target {type(target).__name__} does not provide a callable process_pdf/process_file/process method"
+            )
+        self._target = target
+
+    def process_pdf(self, file_path: str) -> Any:
+        if hasattr(self._target, "process_pdf") and callable(self._target.process_pdf):
+            return self._target.process_pdf(file_path)
+        if hasattr(self._target, "process_file") and callable(self._target.process_file):
+            return self._target.process_file(file_path)
+        if hasattr(self._target, "process_document") and callable(self._target.process_document):
+            return self._target.process_document(file_path)
+        if hasattr(self._target, "process") and callable(self._target.process):
+            return self._target.process(file_path)
+        if callable(self._target):
+            return self._target(file_path)
+        raise TypeError(
+            f"Pipeline {type(self._target).__name__} does not provide a callable process_pdf/process_file/process method"
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
