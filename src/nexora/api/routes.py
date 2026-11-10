@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +13,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
+
+logger = logging.getLogger(__name__)
 
 from nexora.agents.models import (
     AgentContext,
@@ -1169,30 +1174,39 @@ def rag_query_alias(
     return research_rag_query(body, request=request, current_user=current_user)
 
 
-@v1_router.post(
-    "/research/jobs",
-    response_model=ResearchJobSubmitResponseBody,
-    status_code=202,
-    summary="Submit an asynchronous durable research query job",
-    description="Asynchronously submits a research question for background literature retrieval, Gemini generation, and verification.",
-)
-def submit_research_job_endpoint(
-    body: RAGQueryRequestBody,
-    request: Request,
-    current_user: Any = Depends(get_optional_user),
-) -> ResearchJobSubmitResponseBody:
-    """Submit an asynchronous research question job and receive HTTP 202 with job ID."""
-    if not body.query.strip():
-        raise InvalidRequestError("query must not be empty or whitespace-only")
-    if body.retrieval_mode not in ("bm25", "vector", "hybrid"):
-        raise InvalidRequestError(
-            f"retrieval_mode must be 'bm25', 'vector', or 'hybrid', got {body.retrieval_mode!r}"
-        )
-    if body.temperature is not None and (body.temperature < 0.0 or body.temperature > 2.0):
-        raise InvalidRequestError("temperature must be between 0.0 and 2.0")
-    if body.max_output_tokens is not None and body.max_output_tokens <= 0:
-        raise InvalidRequestError("max_output_tokens must be greater than 0")
+def _should_dispatch_to_vercel_queue(request: Request) -> bool:
+    """Return True when research jobs must be published via Vercel Queue."""
+    if getattr(request.app.state, "queue_sender", None) is not None:
+        return True
 
+    app_env = getattr(request.app.state, "environ", None) or {}
+
+    def _env_val(key: str) -> str:
+        val = app_env.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+        return (os.getenv(key) or "").strip()
+
+    if _env_val("VERCEL") == "1":
+        return True
+    if _env_val("VERCEL_QUEUE_BASE_URL") or _env_val("VERCEL_QUEUE_TOKEN"):
+        return True
+    if _env_val("NEXORA_RESEARCH_QUEUE_ENABLED").lower() in ("true", "1", "yes"):
+        return True
+    return False
+
+
+def _create_research_job_sync(
+    *,
+    body: RAGQueryRequestBody,
+    session_factory: Any,
+    auth_service: Any,
+    current_user: Any,
+    enforce_auth: bool,
+    environ: Any,
+    guest_header: str | None,
+) -> tuple[UUID, str]:
+    """Validate ownership and persist a new durable research job record."""
     from nexora.auth.guest import GUEST_USER_ID, is_guest_access_allowed
     from nexora.database.models.research_job import ResearchJobStatus
     from nexora.database.repository.research_job import ResearchJobRepository
@@ -1201,35 +1215,31 @@ def submit_research_job_endpoint(
     guest_session_id = None
     scoped_collection_id = None
     scoped_paper_id = None
+    cleaned_guest_hdr = (guest_header or "").strip() or "guest_preview"
 
     if current_user is None:
         if body.collection_id is not None or body.paper_id is not None:
             raise AuthenticationError(
                 "Authentication credentials are required to query specific collections or papers."
             )
-        enforce_auth = getattr(request.app.state, "enforce_auth", False)
-        environ = getattr(request.app.state, "environ", None)
         if enforce_auth and not is_guest_access_allowed(environ):
             raise AuthenticationError("Authentication credentials are required to submit a research job.")
-
-        guest_session_id = request.headers.get("X-Guest-Session-ID") or "guest_preview"
+        guest_session_id = cleaned_guest_hdr
     else:
+        user_id = current_user.id
         if current_user.id == GUEST_USER_ID:
-            user_id = GUEST_USER_ID
-            guest_session_id = "guest_preview"
-        else:
-            user_id = current_user.id
-            auth_service = get_auth_service(request)
-            if auth_service is not None:
-                if body.collection_id is not None:
-                    col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
-                    scoped_collection_id = col.id
-                if body.paper_id is not None:
-                    paper, col, _ = auth_service.verify_paper_ownership(body.paper_id, current_user.id)
-                    scoped_paper_id = paper.id
-                    if scoped_collection_id is not None and col.id != scoped_collection_id:
-                        raise ForbiddenError("Specified paper does not belong to the specified collection.")
-                    scoped_collection_id = col.id
+            guest_session_id = cleaned_guest_hdr
+
+        if auth_service is not None:
+            if body.collection_id is not None:
+                col, _ = auth_service.verify_collection_ownership(body.collection_id, current_user.id)
+                scoped_collection_id = col.id
+            if body.paper_id is not None:
+                paper, col, _ = auth_service.verify_paper_ownership(body.paper_id, current_user.id)
+                scoped_paper_id = paper.id
+                if scoped_collection_id is not None and col.id != scoped_collection_id:
+                    raise ForbiddenError("Specified paper does not belong to the specified collection.")
+                scoped_collection_id = col.id
 
     if body.collection_id is not None and scoped_collection_id is None:
         try:
@@ -1241,10 +1251,6 @@ def submit_research_job_endpoint(
             scoped_paper_id = UUID(body.paper_id)
         except (ValueError, TypeError):
             raise InvalidRequestError("paper_id must be a valid UUID")
-
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if session_factory is None:
-        raise InvalidConfigurationError("session_factory is not configured for durable research jobs")
 
     with session_factory() as session:
         repo = ResearchJobRepository(session)
@@ -1265,25 +1271,117 @@ def submit_research_job_endpoint(
         session.commit()
         job_id = job.id
         created_at_str = job.created_at.isoformat() if hasattr(job.created_at, "isoformat") else str(job.created_at)
+        return job_id, created_at_str
 
-    # Trigger queue delivery via Vercel Queue SDK if available and in Vercel environment
-    if os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV"):
+
+def _mark_research_job_dispatch_failed_sync(
+    session_factory: Any,
+    job_id: UUID,
+    error_message: str,
+) -> None:
+    """Persist dispatch failure so a job never stays stuck in queued state."""
+    from nexora.database.repository.research_job import ResearchJobRepository
+
+    with session_factory() as session:
+        repo = ResearchJobRepository(session)
+        repo.mark_dispatch_failed(job_id, error_message)
+        session.commit()
+
+
+@v1_router.post(
+    "/research/jobs",
+    response_model=ResearchJobSubmitResponseBody,
+    status_code=202,
+    summary="Submit an asynchronous durable research query job",
+    description="Asynchronously submits a research question for background literature retrieval, Gemini generation, and verification.",
+)
+async def submit_research_job_endpoint(
+    body: RAGQueryRequestBody,
+    request: Request,
+    current_user: Any = Depends(get_optional_user),
+) -> ResearchJobSubmitResponseBody:
+    """Submit an asynchronous research question job and receive HTTP 202 with job ID."""
+    if not body.query.strip():
+        raise InvalidRequestError("query must not be empty or whitespace-only")
+    if body.retrieval_mode not in ("bm25", "vector", "hybrid"):
+        raise InvalidRequestError(
+            f"retrieval_mode must be 'bm25', 'vector', or 'hybrid', got {body.retrieval_mode!r}"
+        )
+    if body.temperature is not None and (body.temperature < 0.0 or body.temperature > 2.0):
+        raise InvalidRequestError("temperature must be between 0.0 and 2.0")
+    if body.max_output_tokens is not None and body.max_output_tokens <= 0:
+        raise InvalidRequestError("max_output_tokens must be greater than 0")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured for durable research jobs")
+
+    auth_service = get_auth_service(request) if current_user is not None else None
+    enforce_auth = getattr(request.app.state, "enforce_auth", False)
+    environ = getattr(request.app.state, "environ", None)
+    guest_header = request.headers.get("X-Guest-Session-ID")
+
+    job_id, created_at_str = await run_in_threadpool(
+        _create_research_job_sync,
+        body=body,
+        session_factory=session_factory,
+        auth_service=auth_service,
+        current_user=current_user,
+        enforce_auth=enforce_auth,
+        environ=environ,
+        guest_header=guest_header,
+    )
+
+    # Dispatch asynchronously via the official Vercel Queue async SDK (vercel.queue.send)
+    if _should_dispatch_to_vercel_queue(request):
         try:
-            from vercel.queue import send
+            sender = getattr(request.app.state, "queue_sender", None)
+            if sender is None:
+                from vercel.queue import send as sdk_send
+                sender = sdk_send
 
-            coro = send(
-                topic="research-query-jobs",
-                payload={"job_id": str(job_id)},
+            dispatch_result = sender(
+                "research-query-jobs",
+                {"job_id": str(job_id)},
                 idempotency_key=str(job_id),
             )
-            try:
-                import asyncio
-                loop = asyncio.get_running_loop()
-                loop.create_task(coro)
-            except RuntimeError:
-                pass
+            message_id = (
+                await dispatch_result
+                if inspect.isawaitable(dispatch_result)
+                else dispatch_result
+            )
+            logger.info(
+                "Published research job %s to Vercel Queue (message_id=%s)",
+                job_id,
+                message_id,
+            )
         except Exception as exc:
-            logger.debug("Vercel Queue send omitted or failed: %s", exc)
+            from nexora.llm.gemini_provider import sanitize_secret_text
+
+            sanitized_err = sanitize_secret_text(
+                f"Failed to dispatch research job to queue ({type(exc).__name__}): {exc}"
+            )
+            logger.error("Queue dispatch failure for research job %s: %s", job_id, sanitized_err)
+
+            research_worker = getattr(request.app.state, "research_worker", None)
+            local_worker_running = bool(
+                research_worker is not None and getattr(research_worker, "is_running", False)
+            )
+            if not local_worker_running:
+                try:
+                    await run_in_threadpool(
+                        _mark_research_job_dispatch_failed_sync,
+                        session_factory,
+                        job_id,
+                        sanitized_err,
+                    )
+                except Exception as inner_exc:
+                    logger.error(
+                        "Failed to record dispatch failure on job %s: %s",
+                        job_id,
+                        sanitize_secret_text(str(inner_exc)),
+                    )
+                raise ResearchServiceError(sanitized_err) from exc
 
     return ResearchJobSubmitResponseBody(
         job_id=str(job_id),
@@ -1311,12 +1409,18 @@ def get_research_job_endpoint(
     except (ValueError, TypeError, AttributeError):
         raise InvalidRequestError("Invalid job_id: must be a valid UUID.")
 
+    from nexora.auth.guest import GUEST_USER_ID, is_guest_access_allowed
+    from nexora.database.repository.research_job import ResearchJobRepository
+
+    if current_user is None:
+        enforce_auth = getattr(request.app.state, "enforce_auth", False)
+        environ = getattr(request.app.state, "environ", None)
+        if enforce_auth and not is_guest_access_allowed(environ):
+            raise AuthenticationError("Authentication credentials are required to access research jobs.")
+
     session_factory = getattr(request.app.state, "session_factory", None)
     if session_factory is None:
         raise InvalidConfigurationError("session_factory is not configured for durable research jobs")
-
-    from nexora.auth.guest import GUEST_USER_ID
-    from nexora.database.repository.research_job import ResearchJobRepository
 
     with session_factory() as session:
         repo = ResearchJobRepository(session)
@@ -1324,13 +1428,13 @@ def get_research_job_endpoint(
         if job is None:
             raise RecordNotFoundError(f"Research job {job_id} not found.")
 
-        # Strict tenant ownership check
-        guest_hdr = request.headers.get("X-Guest-Session-ID")
+        # Strict tenant & guest-session ownership check
+        effective_guest_id = (request.headers.get("X-Guest-Session-ID") or "").strip() or "guest_preview"
         if current_user is not None:
             if current_user.id == GUEST_USER_ID:
                 if job.user_id is not None and job.user_id != GUEST_USER_ID:
                     raise ForbiddenError("You do not have permission to access this research job.")
-                if job.guest_session_id and guest_hdr and job.guest_session_id != guest_hdr:
+                if job.guest_session_id and job.guest_session_id != effective_guest_id:
                     raise ForbiddenError("You do not have permission to access this research job.")
             else:
                 if job.user_id != current_user.id:
@@ -1338,7 +1442,7 @@ def get_research_job_endpoint(
         else:
             if job.user_id is not None and job.user_id != GUEST_USER_ID:
                 raise ForbiddenError("You do not have permission to access this research job.")
-            if job.guest_session_id and guest_hdr and job.guest_session_id != guest_hdr:
+            if job.guest_session_id and job.guest_session_id != effective_guest_id:
                 raise ForbiddenError("You do not have permission to access this research job.")
 
         res_result = None

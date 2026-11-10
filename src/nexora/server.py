@@ -15,8 +15,10 @@ Startup usage:
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 import sys
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -119,8 +121,35 @@ def _load_qdrant_config(environ: Mapping[str, str]) -> QdrantConfig:
         raise ConfigurationError(f"Invalid Qdrant configuration: {exc}") from exc
 
 
+logger = logging.getLogger(__name__)
+
+
+def _should_auto_migrate(env: Mapping[str, str]) -> bool:
+    default_auto = "false" if "PYTEST_CURRENT_TEST" in os.environ else "true"
+    return (env.get("NEXORA_AUTO_MIGRATE") or default_auto).strip().lower() in ("true", "1", "yes")
+
+
+def _run_startup_migrations_once(env: Mapping[str, str]) -> bool:
+    """Execute advisory-locked migrations once during app startup if enabled."""
+    if not _should_auto_migrate(env):
+        return False
+
+    try:
+        from nexora.database.config import DatabaseConfig
+        from nexora.database.migrations.runner import apply_pending_migrations
+
+        norm_db_config = DatabaseConfig.from_env(env)
+        apply_pending_migrations(norm_db_config.url)
+        return True
+    except Exception as exc:
+        logger.warning("Database auto-migration note: %s", exc)
+        return False
+
+
 def create_production_app(
     environ: Mapping[str, str] | None = None,
+    *,
+    run_migrations: bool | None = None,
     **overrides: Any,
 ) -> FastAPI:
     """Zero-argument production ASGI application factory.
@@ -130,6 +159,7 @@ def create_production_app(
 
     Args:
         environ: Optional environment mapping. Defaults to ``os.environ``.
+        run_migrations: Optional override controlling whether auto-migrations execute during startup.
         **overrides: Optional component overrides (for testing and DI).
 
     Returns:
@@ -196,19 +226,8 @@ def create_production_app(
             "Please configure NEXORA_DATABASE_URL (or DATABASE_URL) with a valid connection string."
         )
 
-    if has_db and not has_session_override:
-        default_auto = "false" if "PYTEST_CURRENT_TEST" in os.environ else "true"
-        auto_migrate = env.get("NEXORA_AUTO_MIGRATE", default_auto).strip().lower() in ("true", "1", "yes")
-        if auto_migrate:
-            try:
-                from nexora.database.config import DatabaseConfig
-                from nexora.database.migrations.runner import apply_pending_migrations
-
-                norm_db_config = DatabaseConfig.from_env(env)
-                apply_pending_migrations(norm_db_config.url)
-            except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning("Database auto-migration note: %s", exc)
+    if has_db and not has_session_override and run_migrations is not False:
+        _run_startup_migrations_once(env)
 
     # 3. Embedding provider & service construction
     embedding_service = overrides.get("embedding_service")
@@ -303,10 +322,34 @@ class _LazyProductionASGIApp:
 
     def __init__(self) -> None:
         self._app: FastAPI | None = None
+        self._init_lock = threading.Lock()
+        self._migration_lock = threading.Lock()
+        self._migrations_checked = False
 
-    def _get_app(self) -> FastAPI:
+    @staticmethod
+    def _is_liveness_scope(scope: Any) -> bool:
+        if scope.get("type") != "http":
+            return False
+        path = (scope.get("path") or "").rstrip("/") or "/"
+        return path == "/health"
+
+    def _ensure_migrations_once(self) -> None:
+        if self._migrations_checked:
+            return
+        with self._migration_lock:
+            if not self._migrations_checked:
+                _run_startup_migrations_once(os.environ)
+                self._migrations_checked = True
+
+    def _get_app(self, *, run_migrations: bool = True) -> FastAPI:
         if self._app is None:
-            self._app = create_production_app()
+            with self._init_lock:
+                if self._app is None:
+                    self._app = create_production_app(run_migrations=run_migrations)
+                    if run_migrations:
+                        self._migrations_checked = True
+        if run_migrations and not self._migrations_checked:
+            self._ensure_migrations_once()
         return self._app
 
     @property
@@ -323,7 +366,7 @@ class _LazyProductionASGIApp:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") == "lifespan":
             try:
-                target_app = self._get_app()
+                target_app = self._get_app(run_migrations=True)
             except Exception as exc:
                 message = await receive()
                 if message.get("type") == "lifespan.startup":
@@ -335,7 +378,9 @@ class _LazyProductionASGIApp:
             await target_app(scope, receive, send)
             return
 
-        await self._get_app()(scope, receive, send)
+        is_liveness = self._is_liveness_scope(scope)
+        target_app = self._get_app(run_migrations=not is_liveness)
+        await target_app(scope, receive, send)
 
 
 app = _LazyProductionASGIApp()

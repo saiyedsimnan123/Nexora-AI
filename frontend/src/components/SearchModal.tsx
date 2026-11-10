@@ -20,6 +20,7 @@ import {
   getActiveResearchJobId,
   clearActiveResearchJobId,
   getResearchJob,
+  pollResearchJob,
 } from '../services/api';
 import type {
   RAGQueryResponse,
@@ -211,42 +212,75 @@ export const SearchModal: React.FC<SearchModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
+    const targetQuery = query.trim() || defaultQuery;
     const activeJobId = getActiveResearchJobId();
+
     if (activeJobId) {
+      const controller = new AbortController();
       let cancelled = false;
       setIsLoading(true);
+      setError(null);
       setJobStatusText('Resuming background research job...');
 
       (async () => {
         try {
-          const job = await getResearchJob(activeJobId);
+          const job = await getResearchJob(activeJobId, controller.signal);
           if (cancelled) return;
-          if (job.status === 'completed' && job.result) {
-            clearActiveResearchJobId();
-            setLiveResponse(job.result);
-            setIsLoading(false);
+
+          if (job.query === targetQuery) {
+            if (job.status === 'completed' && job.result) {
+              clearActiveResearchJobId();
+              setLiveResponse(job.result);
+              const firstLabel = job.result.sources?.[0]?.label || job.result.cited_sources?.[0]?.label || '[E1]';
+              setSelectedCitationLabel(firstLabel);
+              setIsLoading(false);
+              return;
+            }
+            if (job.status === 'failed') {
+              clearActiveResearchJobId();
+              setError(job.error || 'Research generation failed in background worker.');
+              setIsLoading(false);
+              return;
+            }
+            const resumed = await pollResearchJob(
+              activeJobId,
+              controller.signal,
+              (status) => {
+                if (status === 'queued') {
+                  setJobStatusText('Queued in background worker...');
+                } else if (status === 'processing') {
+                  setJobStatusText('Synthesizing research evidence with Gemini...');
+                }
+              }
+            );
+            if (!cancelled) {
+              setLiveResponse(resumed);
+              const firstLabel = resumed.sources?.[0]?.label || resumed.cited_sources?.[0]?.label || '[E1]';
+              setSelectedCitationLabel(firstLabel);
+              setIsLoading(false);
+            }
             return;
           }
-          if (job.status === 'failed') {
-            clearActiveResearchJobId();
-            setIsLoading(false);
-            return;
-          }
-          if (job.query) {
-            handleExecuteSearch(job.query);
-            return;
-          }
-        } catch {
+        } catch (err: unknown) {
+          if (cancelled) return;
           clearActiveResearchJobId();
+          const msg = err instanceof Error ? err.message : 'Research generation failed.';
+          setError(msg);
           setIsLoading(false);
+          return;
+        }
+
+        // Different query requested: execute fresh search cleanly
+        if (!cancelled) {
+          handleExecuteSearch(targetQuery);
         }
       })();
       return () => {
         cancelled = true;
+        controller.abort();
       };
     }
 
-    const targetQuery = query.trim() || defaultQuery;
     let cancelled = false;
     const timer = setTimeout(() => {
       if (!cancelled) {

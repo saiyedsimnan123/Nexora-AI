@@ -437,3 +437,270 @@ def test_api_submit_validation_errors(session_factory, seed_data):
     fake_uuid = str(uuid4())
     res_404 = client.get(f"/api/v1/research/jobs/{fake_uuid}", headers=headers)
     assert res_404.status_code == 404
+
+
+def test_api_submit_awaits_vercel_queue_send_coroutine_without_warning(
+    session_factory,
+    seed_data,
+    monkeypatch,
+):
+    """Verify POST /api/v1/research/jobs awaits async vercel.queue.send with zero RuntimeWarning."""
+    import warnings
+
+    sent_calls: list[dict] = []
+
+    async def fake_async_send(topic, payload, *, idempotency_key=None, **kwargs):
+        sent_calls.append({
+            "topic": topic,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+            "awaited": True,
+        })
+        return "msg_awaited_001"
+
+    monkeypatch.setattr("vercel.queue.send", fake_async_send)
+
+    auth_service = AuthenticationService(session_factory=session_factory)
+    app = create_app(
+        DummyResearchApp(),
+        session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=True,
+        environ={"VERCEL": "1", "VERCEL_ENV": "preview"},
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {seed_data['token_a']}"}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        res = client.post(
+            "/api/v1/research/jobs",
+            json={"query": "Does flash attention await coroutines?"},
+            headers=headers,
+        )
+
+    assert res.status_code == 202
+    job_id = res.json()["job_id"]
+    assert len(sent_calls) == 1
+    assert sent_calls[0]["awaited"] is True
+    assert sent_calls[0]["topic"] == "research-query-jobs"
+    assert sent_calls[0]["payload"] == {"job_id": job_id}
+    assert sent_calls[0]["idempotency_key"] == job_id
+
+
+def test_api_queue_dispatch_failure_marks_job_failed_instead_of_queued(
+    session_factory,
+    seed_data,
+    monkeypatch,
+):
+    """Queue send failure must mark job failed in DB with scrubbed error and fail fast."""
+    async def failing_send(topic, payload, *, idempotency_key=None, **kwargs):
+        raise RuntimeError("Queue service unavailable with secret AIzaSyFakeDispatchKey123456")
+
+    monkeypatch.setattr("vercel.queue.send", failing_send)
+
+    auth_service = AuthenticationService(session_factory=session_factory)
+    app = create_app(
+        DummyResearchApp(),
+        session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=True,
+        environ={"VERCEL": "1", "VERCEL_ENV": "preview"},
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {seed_data['token_a']}"}
+
+    res = client.post(
+        "/api/v1/research/jobs",
+        json={"query": "Trigger dispatch failure"},
+        headers=headers,
+    )
+    assert res.status_code == 500
+
+    # Verify the DB job record did NOT stay stuck in queued state
+    with session_factory() as session:
+        jobs = ResearchJobRepository(session).list_jobs(user_id=seed_data["user_a_id"])
+        assert len(jobs) == 1
+        failed_job = jobs[0]
+        assert failed_job.status == ResearchJobStatus.FAILED.value
+        assert failed_job.completed_at is not None
+        assert "Queue dispatch failed" in failed_job.error_message or "Failed to dispatch" in failed_job.error_message
+        assert "AIzaSyFakeDispatchKey" not in failed_job.error_message
+        assert "[REDACTED]" in failed_job.error_message
+
+
+def test_api_guest_session_isolation_across_sessions(session_factory, seed_data):
+    """Verify distinct guest sessions cannot read each other's jobs and prod rejects unauthenticated polling."""
+    auth_service = AuthenticationService(session_factory=session_factory)
+    preview_app = create_app(
+        DummyResearchApp(),
+        session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=True,
+        environ={"VERCEL_ENV": "preview"},
+    )
+    preview_client = TestClient(preview_app)
+
+    guest1_headers = {
+        "Authorization": f"Bearer {DEFAULT_GUEST_TOKEN}",
+        "X-Guest-Session-ID": "guest-alpha",
+    }
+    guest2_headers = {
+        "Authorization": f"Bearer {DEFAULT_GUEST_TOKEN}",
+        "X-Guest-Session-ID": "guest-beta",
+    }
+
+    res = preview_client.post(
+        "/api/v1/research/jobs",
+        json={"query": "Guest alpha private inquiry"},
+        headers=guest1_headers,
+    )
+    assert res.status_code == 202
+    job_id = res.json()["job_id"]
+
+    # Same guest session can poll
+    assert preview_client.get(f"/api/v1/research/jobs/{job_id}", headers=guest1_headers).status_code == 200
+    # Different guest session is forbidden
+    assert preview_client.get(f"/api/v1/research/jobs/{job_id}", headers=guest2_headers).status_code == 403
+    # Guest omitting session header defaults to guest_preview != guest-alpha -> forbidden
+    assert preview_client.get(
+        f"/api/v1/research/jobs/{job_id}",
+        headers={"Authorization": f"Bearer {DEFAULT_GUEST_TOKEN}"},
+    ).status_code == 403
+
+    # Guest cannot access a regular user's collection
+    assert preview_client.post(
+        "/api/v1/research/jobs",
+        json={"query": "Cross tenant probe", "collection_id": str(seed_data["col_a_id"])},
+        headers=guest1_headers,
+    ).status_code == 403
+
+    # Production environment rejects unauthenticated polling
+    prod_app = create_app(
+        DummyResearchApp(),
+        session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=True,
+        environ={"VERCEL_ENV": "production"},
+    )
+    prod_client = TestClient(prod_app)
+    assert prod_client.get(f"/api/v1/research/jobs/{job_id}").status_code == 401
+
+
+def test_end_to_end_research_job_lifecycle_with_queue_consumer_and_gemini_failure(
+    session_factory,
+    seed_data,
+    monkeypatch,
+):
+    """Full lifecycle: submit -> publish queue msg -> consumer runs worker -> poll result & failure cases."""
+    from nexora.rag.models import AttributedSource, RAGResponse
+    from nexora.research.queue_consumer import handle_research_job, set_global_research_worker
+    from nexora.research.worker import ResearchJobWorker
+
+    published_messages: list[tuple[str, dict]] = []
+
+    async def capture_send(topic, payload, *, idempotency_key=None, **kwargs):
+        published_messages.append((topic, payload))
+        return "msg_e2e_1"
+
+    monkeypatch.setattr("vercel.queue.send", capture_send)
+
+    auth_service = AuthenticationService(session_factory=session_factory)
+    app = create_app(
+        DummyResearchApp(),
+        session_factory=session_factory,
+        auth_service=auth_service,
+        enforce_auth=True,
+        environ={"VERCEL": "1", "VERCEL_ENV": "preview"},
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {seed_data['token_a']}"}
+
+    # --- Case 1: Successful RAG synthesis lifecycle ---
+    class SuccessRAGPipeline:
+        def answer(self, request, **kwargs):
+            src = AttributedSource(
+                label="[E1]",
+                document_id="doc-e2e",
+                chunk_id="chk-e2e",
+                paper_id=str(seed_data["paper_a_id"]),
+                paper_title="Attention Paper",
+                score=0.95,
+                text="Self-attention computes dot-product weights.",
+                text_excerpt="Self-attention computes dot-product weights.",
+                metadata={},
+            )
+            return RAGResponse(
+                query=request,
+                answer="Transformers rely on self-attention [E1].",
+                sources=[src],
+                cited_sources=[src],
+                is_grounded=True,
+                is_mock=False,
+                model="gemini-2.5-flash",
+                status="success",
+                retrieval_mode="hybrid",
+                evidence_count=1,
+            )
+
+    submit_res = client.post(
+        "/api/v1/research/jobs",
+        json={"query": "How does self-attention work?"},
+        headers=headers,
+    )
+    assert submit_res.status_code == 202
+    job_id = submit_res.json()["job_id"]
+    assert len(published_messages) == 1
+    assert published_messages[0] == ("research-query-jobs", {"job_id": job_id})
+
+    # Poll initial status: queued
+    assert client.get(f"/api/v1/research/jobs/{job_id}", headers=headers).json()["status"] == "queued"
+
+    # Worker consumes queued message via subscriber entrypoint
+    worker = ResearchJobWorker(session_factory=session_factory, rag_pipeline=SuccessRAGPipeline())
+    set_global_research_worker(worker)
+    try:
+        consumer_res = handle_research_job(published_messages[0][1])
+        assert consumer_res == {"processed_jobs": 1}
+    finally:
+        set_global_research_worker(None)
+
+    # Poll completed result
+    poll_done = client.get(f"/api/v1/research/jobs/{job_id}", headers=headers)
+    assert poll_done.status_code == 200
+    done_data = poll_done.json()
+    assert done_data["status"] == "completed"
+    assert "self-attention [E1]" in done_data["result"]["answer"]
+    assert done_data["result"]["model"] == "gemini-2.5-flash"
+
+    # --- Case 2: Gemini permanent failure surfaces useful error without endless polling ---
+    class FailingGeminiPipeline:
+        def answer(self, request, **kwargs):
+            raise RuntimeError("Gemini HTTP 401 unauthorized: invalid API key AIzaSyBadSecretKey999")
+
+    published_messages.clear()
+    submit_fail = client.post(
+        "/api/v1/research/jobs",
+        json={"query": "Trigger Gemini error"},
+        headers=headers,
+    )
+    assert submit_fail.status_code == 202
+    fail_job_id = submit_fail.json()["job_id"]
+    assert len(published_messages) == 1
+
+    fail_worker = ResearchJobWorker(session_factory=session_factory, rag_pipeline=FailingGeminiPipeline())
+    set_global_research_worker(fail_worker)
+    try:
+        consumer_res2 = handle_research_job(published_messages[0][1])
+        assert consumer_res2 == {"processed_jobs": 1}
+    finally:
+        set_global_research_worker(None)
+
+    poll_fail = client.get(f"/api/v1/research/jobs/{fail_job_id}", headers=headers)
+    assert poll_fail.status_code == 200
+    fail_data = poll_fail.json()
+    assert fail_data["status"] == "failed"
+    assert fail_data["error"] is not None
+    assert "Gemini HTTP 401" in fail_data["error"]
+    assert "AIzaSyBadSecretKey999" not in fail_data["error"]
+    assert "[REDACTED]" in fail_data["error"]

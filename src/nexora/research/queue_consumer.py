@@ -9,18 +9,20 @@ two-gate fencing tokens, lease renewal heartbeats, and atomic status transitions
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 # Ensure 'src' is on sys.path for queue consumer serverless invocations
 _SRC_DIR = str(Path(__file__).resolve().parent.parent.parent)
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from vercel.queue import subscribe
+from vercel.queue import RetryAfter, subscribe
 
-from nexora.research.worker import ResearchJobWorker
+from nexora.research.worker import ResearchJobWorker, ResearchRunOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +71,39 @@ def get_research_queue_worker() -> ResearchJobWorker:
     )
 
 
+def _extract_target_job_id(payload: Any) -> UUID | None:
+    if not isinstance(payload, dict):
+        return None
+    raw_id = payload.get("job_id")
+    if not raw_id:
+        return None
+    try:
+        return UUID(str(raw_id).strip())
+    except (ValueError, TypeError, AttributeError):
+        logger.warning("Ignoring invalid job_id in queue payload: %r", raw_id)
+        return None
+
+
 def process_research_queue_trigger(payload: Any = None) -> dict[str, Any]:
     """Process a queue trigger by invoking the worker's durable run_once cycle."""
     worker = get_research_queue_worker()
-    logger.info("Research queue trigger received, invoking worker.run_once()")
-    processed_count = worker.run_once()
+    target_job_id = _extract_target_job_id(payload)
+    logger.info("Research queue trigger received (target_job_id=%s), invoking worker.run_once()", target_job_id)
+
+    if isinstance(worker, ResearchJobWorker):
+        processed_count = worker.run_once(target_job_id=target_job_id)
+        outcome = worker.last_run_outcome
+        if isinstance(outcome, ResearchRunOutcome) and outcome.will_retry:
+            delay_seconds = max(1, int(math.ceil(outcome.backoff_seconds)))
+            logger.info(
+                "Research job %s failed with transient error; requesting Vercel Queue RetryAfter(%ss)",
+                outcome.job_id,
+                delay_seconds,
+            )
+            raise RetryAfter(delay_seconds)
+    else:
+        processed_count = worker.run_once()
+
     logger.info("Research worker run_once completed with %d jobs processed", processed_count)
     return {"processed_jobs": processed_count}
 

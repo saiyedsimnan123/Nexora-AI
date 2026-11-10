@@ -323,6 +323,48 @@ export async function queryResearchRAGDirect(
 }
 
 /**
+ * Poll an existing research job until completed or failed.
+ */
+export async function pollResearchJob(
+  jobId: string,
+  signal?: AbortSignal,
+  onProgress?: (status: string, job?: ResearchJobStatusResponse) => void
+): Promise<RAGQueryResponse> {
+  const maxPollTimeMs = 120000;
+  const startTime = Date.now();
+  let delayMs = 1000;
+
+  while (Date.now() - startTime < maxPollTimeMs) {
+    if (signal?.aborted) {
+      throw new ApiError('Request aborted by user.', 499);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    const jobStatus = await getResearchJob(jobId, signal);
+    onProgress?.(jobStatus.status, jobStatus);
+
+    if (jobStatus.status === 'completed' && jobStatus.result) {
+      clearActiveResearchJobId();
+      return jobStatus.result;
+    }
+
+    if (jobStatus.status === 'failed') {
+      clearActiveResearchJobId();
+      throw new ApiError(
+        jobStatus.error || 'Research generation failed in background worker.',
+        500
+      );
+    }
+
+    delayMs = Math.min(2500, Math.floor(delayMs * 1.3));
+  }
+
+  clearActiveResearchJobId();
+  throw new ApiError('Research synthesis timed out after 120 seconds.', 504);
+}
+
+/**
  * Execute research question query using durable background jobs with polling.
  * Prevents Vercel timeouts and serverless request boundary drops.
  */
@@ -342,38 +384,7 @@ export async function queryResearchRAG(
     onProgress?.('queued');
 
     // 2. Poll until completed or failed (up to 120s)
-    const maxPollTimeMs = 120000;
-    const startTime = Date.now();
-    let delayMs = 1000;
-
-    while (Date.now() - startTime < maxPollTimeMs) {
-      if (signal?.aborted) {
-        throw new ApiError('Request aborted by user.', 499);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-
-      const jobStatus = await getResearchJob(jobId, signal);
-      onProgress?.(jobStatus.status, jobStatus);
-
-      if (jobStatus.status === 'completed' && jobStatus.result) {
-        clearActiveResearchJobId();
-        return jobStatus.result;
-      }
-
-      if (jobStatus.status === 'failed') {
-        clearActiveResearchJobId();
-        throw new ApiError(
-          jobStatus.error || 'Research generation failed in background worker.',
-          500
-        );
-      }
-
-      delayMs = Math.min(2500, Math.floor(delayMs * 1.3));
-    }
-
-    clearActiveResearchJobId();
-    throw new ApiError('Research synthesis timed out after 120 seconds.', 504);
+    return await pollResearchJob(jobId, signal, onProgress);
   } catch (err: unknown) {
     if (err instanceof ApiError && err.statusCode === 404) {
       // Fallback to direct synchronous query if background job route is unmounted

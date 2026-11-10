@@ -142,6 +142,7 @@ class ResearchJobRepository(BaseRepository[ResearchJob]):
         claimed_by: str,
         lease_duration_seconds: float = 300.0,
         max_attempts: int | None = None,
+        target_job_id: UUID | None = None,
     ) -> list[ResearchJob]:
         """Atomically claim a batch of queued or expired processing jobs.
 
@@ -183,20 +184,33 @@ class ResearchJobRepository(BaseRepository[ResearchJob]):
         bind = self._session.bind
         is_postgresql = bool(bind and bind.dialect.name == "postgresql")
 
-        stmt = (
-            select(ResearchJob)
-            .where(status_filter, attempts_filter)
-            .order_by(
-                ResearchJob.priority.desc(),
-                ResearchJob.created_at.asc(),
+        jobs: list[ResearchJob] = []
+        if target_job_id is not None:
+            targeted_stmt = (
+                select(ResearchJob)
+                .where(ResearchJob.id == target_job_id, status_filter, attempts_filter)
+                .limit(limit)
             )
-            .limit(limit)
-        )
+            if is_postgresql:
+                targeted_stmt = targeted_stmt.with_for_update(skip_locked=True)
+            jobs = list(self._session.scalars(targeted_stmt).all())
 
-        if is_postgresql:
-            stmt = stmt.with_for_update(skip_locked=True)
+        if not jobs:
+            stmt = (
+                select(ResearchJob)
+                .where(status_filter, attempts_filter)
+                .order_by(
+                    ResearchJob.priority.desc(),
+                    ResearchJob.created_at.asc(),
+                )
+                .limit(limit)
+            )
 
-        jobs = list(self._session.scalars(stmt).all())
+            if is_postgresql:
+                stmt = stmt.with_for_update(skip_locked=True)
+
+            jobs = list(self._session.scalars(stmt).all())
+
         claimed_jobs: list[ResearchJob] = []
 
         for job in jobs:
@@ -291,6 +305,27 @@ class ResearchJobRepository(BaseRepository[ResearchJob]):
 
         self._session.flush()
         return True
+
+    def mark_dispatch_failed(self, job_id: UUID, error_message: str) -> bool:
+        """Mark an unclaimed queued job as failed if queue dispatch fails."""
+        sanitized_error = sanitize_secret_text(error_message)[:2000]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            update(ResearchJob)
+            .where(
+                ResearchJob.id == job_id,
+                ResearchJob.status == ResearchJobStatus.QUEUED.value,
+                ResearchJob.attempts == 0,
+            )
+            .values(
+                status=ResearchJobStatus.FAILED.value,
+                completed_at=now,
+                error_message=sanitized_error,
+            )
+        )
+        res = self._session.execute(stmt)
+        self._session.flush()
+        return res.rowcount > 0
 
     def sweep_expired_leases(
         self,

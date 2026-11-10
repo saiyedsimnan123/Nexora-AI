@@ -6,6 +6,7 @@ synthesis with heartbeat lease renewals, two-gate fencing tokens, and bounded re
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import threading
 import time
@@ -24,6 +25,37 @@ from nexora.database.session import (
 from nexora.llm.gemini_provider import sanitize_secret_text
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResearchRunOutcome:
+    """Outcome summary from the most recent worker execution cycle."""
+
+    job_id: UUID
+    final_status: str
+    will_retry: bool
+    backoff_seconds: float = 0.0
+    error_message: str | None = None
+
+
+def _is_permanent_failure(error_text: str) -> bool:
+    """Return True when an error is permanent and should fail immediately without retries."""
+    lowered = error_text.lower()
+    permanent_markers = (
+        "must",
+        "invalid",
+        "api key",
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "not configured",
+        "model not found",
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+    )
+    return any(marker in lowered for marker in permanent_markers)
 
 
 class ResearchJobWorker:
@@ -52,6 +84,12 @@ class ResearchJobWorker:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._local_outcome = threading.local()
+
+    @property
+    def last_run_outcome(self) -> ResearchRunOutcome | None:
+        """Return the outcome of the last job executed on the calling thread."""
+        return getattr(self._local_outcome, "value", None)
 
     @property
     def worker_token(self) -> str:
@@ -103,17 +141,18 @@ class ResearchJobWorker:
                 logger.exception("Unexpected error in research worker polling loop: %s", exc)
                 self._stop_event.wait(self._poll_interval)
 
-    def run_once(self) -> int:
+    def run_once(self, *, target_job_id: UUID | None = None) -> int:
         """Execute a single processing cycle.
 
         1. Sweeps expired leases to failed or resets for retry.
-        2. Claims up to batch_size pending/queued jobs.
+        2. Claims up to batch_size pending/queued jobs (prioritizing target_job_id if provided).
         3. Executes RAG answer generation with background lease heartbeats.
         4. Persists grounded answer, citations, and metadata.
 
         Returns:
             Number of jobs processed in this cycle.
         """
+        self._local_outcome.value = None
         now_utc = datetime.now(timezone.utc)
 
         # 1. Sweep expired leases in a short transaction
@@ -137,6 +176,7 @@ class ResearchJobWorker:
                     claimed_by=self._worker_token,
                     lease_duration_seconds=self._lease_duration,
                     max_attempts=self._max_attempts,
+                    target_job_id=target_job_id,
                 )
                 if jobs:
                     j = jobs[0]
@@ -151,6 +191,7 @@ class ResearchJobWorker:
                         "paper_id": j.paper_id,
                         "collection_id": j.collection_id,
                         "attempts": j.attempts,
+                        "max_attempts": j.max_attempts,
                     }
         except Exception as exc:
             logger.warning("Failed to claim research job: %s", exc)
@@ -233,15 +274,21 @@ class ResearchJobWorker:
                 else:
                     logger.info("Research job %s successfully completed", job_id)
 
+            self._local_outcome.value = ResearchRunOutcome(
+                job_id=job_id,
+                final_status=ResearchJobStatus.COMPLETED.value,
+                will_retry=False,
+            )
+
         except Exception as exc:
             sanitized_err = sanitize_secret_text(str(exc))
             logger.warning("Research job %s execution failed: %s", job_id, sanitized_err)
 
-            # Determine backoff and retryability
             attempts = job_data.get("attempts", 1)
-            backoff_seconds = min(30.0, 2.0 ** attempts)
-            is_validation_error = "must" in sanitized_err.lower() or "invalid" in sanitized_err.lower()
-            retryable = not is_validation_error
+            job_max_attempts = job_data.get("max_attempts", self._max_attempts)
+            backoff_seconds = min(30.0, float(2.0 ** attempts))
+            retryable = not _is_permanent_failure(sanitized_err)
+            will_retry = bool(retryable and attempts < job_max_attempts)
 
             try:
                 with worker_database_transaction(self._session_factory) as err_session:
@@ -255,6 +302,18 @@ class ResearchJobWorker:
                     )
             except Exception as inner_exc:
                 logger.error("Failed recording failure for job %s: %s", job_id, inner_exc)
+
+            self._local_outcome.value = ResearchRunOutcome(
+                job_id=job_id,
+                final_status=(
+                    ResearchJobStatus.QUEUED.value
+                    if will_retry
+                    else ResearchJobStatus.FAILED.value
+                ),
+                will_retry=will_retry,
+                backoff_seconds=backoff_seconds if will_retry else 0.0,
+                error_message=sanitized_err,
+            )
 
         finally:
             stop_heartbeat.set()

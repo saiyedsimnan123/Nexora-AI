@@ -1,7 +1,6 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 
@@ -14,11 +13,6 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-
 import os
 import sys
 
@@ -30,32 +24,27 @@ import nexora.database.models  # Import to register all models
 
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# Dedicated signed 64-bit advisory lock key for Nexora schema migrations.
+NEXORA_MIGRATION_LOCK_KEY = 4815162342044
+_DEFAULT_PLACEHOLDER_URL = "driver://user:pass@localhost/dbname"
+
+
+def _resolve_sqlalchemy_url() -> str | None:
+    attr_url = config.attributes.get("sqlalchemy_url")
+    if attr_url:
+        return str(attr_url)
+    main_url = config.get_main_option("sqlalchemy.url")
+    if main_url and main_url != _DEFAULT_PLACEHOLDER_URL:
+        return main_url
+    try:
+        return DatabaseConfig.from_env().url
+    except Exception:
+        return os.environ.get("NEXORA_DATABASE_URL") or main_url
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
-    import os
-    url = os.environ.get("NEXORA_DATABASE_URL")
-    if not url:
-        try:
-            db_config = DatabaseConfig.from_env()
-            url = db_config.url
-        except Exception:
-            url = config.get_main_option("sqlalchemy.url")
+    """Run migrations in 'offline' mode."""
+    url = _resolve_sqlalchemy_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -68,24 +57,28 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
+    """Run migrations in 'online' mode with PostgreSQL advisory lock serialization."""
+    external_connection = config.attributes.get("connection")
+    if external_connection is not None:
+        context.configure(
+            connection=external_connection,
+            target_metadata=target_metadata,
+        )
+        with context.begin_transaction():
+            if (
+                external_connection.dialect.name == "postgresql"
+                and not config.attributes.get("advisory_lock_held", False)
+            ):
+                external_connection.execute(
+                    text(f"SELECT pg_advisory_xact_lock({NEXORA_MIGRATION_LOCK_KEY})")
+                )
+            context.run_migrations()
+        return
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
-    """
-    import os
-    url = os.environ.get("NEXORA_DATABASE_URL")
-    if not url:
-        try:
-            db_config = DatabaseConfig.from_env()
-            url = db_config.url
-        except Exception:
-            url = config.get_main_option("sqlalchemy.url")
-
+    url = _resolve_sqlalchemy_url()
     configuration = config.get_section(config.config_ini_section, {})
     if url:
-        configuration['sqlalchemy.url'] = url
+        configuration["sqlalchemy.url"] = url
 
     connectable = engine_from_config(
         configuration,
@@ -95,10 +88,15 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
         )
 
         with context.begin_transaction():
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text(f"SELECT pg_advisory_xact_lock({NEXORA_MIGRATION_LOCK_KEY})")
+                )
             context.run_migrations()
 
 

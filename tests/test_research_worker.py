@@ -228,3 +228,72 @@ def test_research_queue_consumer_invocation():
         mock_worker.run_once.assert_called_once()
     finally:
         set_global_research_worker(None)
+
+
+def test_queue_consumer_raises_retry_after_on_transient_failure_and_acks_permanent(
+    session_factory,
+    seed_user,
+):
+    """Transient errors must raise RetryAfter for Vercel Queue redelivery; permanent errors finish cleanly."""
+    from vercel.queue import RetryAfter
+
+    transient_pipeline = FakeRAGPipeline(should_fail=True)
+    worker = ResearchJobWorker(
+        session_factory=session_factory,
+        rag_pipeline=transient_pipeline,
+        worker_token="retry-test-worker",
+        max_attempts=3,
+    )
+
+    with session_factory() as session:
+        repo = ResearchJobRepository(session)
+        transient_job = repo.create_job(
+            query="Transient timeout query",
+            user_id=seed_user,
+            max_attempts=3,
+        )
+        session.commit()
+        transient_job_id = transient_job.id
+
+    set_global_research_worker(worker)
+    try:
+        with pytest.raises(RetryAfter):
+            handle_research_job({"job_id": str(transient_job_id)})
+
+        with session_factory() as session:
+            j = ResearchJobRepository(session).get_by_id(transient_job_id)
+            assert j.status == ResearchJobStatus.QUEUED.value
+            assert j.attempts == 1
+            assert j.next_retry_at is not None
+
+        # Permanent error fails immediately without raising RetryAfter
+        class PermanentErrorPipeline:
+            def answer(self, request, **kwargs):
+                raise RuntimeError("HTTP 403 forbidden: API key invalid")
+
+        perm_worker = ResearchJobWorker(
+            session_factory=session_factory,
+            rag_pipeline=PermanentErrorPipeline(),
+            worker_token="perm-test-worker",
+            max_attempts=3,
+        )
+        with session_factory() as session:
+            perm_job = ResearchJobRepository(session).create_job(
+                query="Permanent auth error query",
+                user_id=seed_user,
+                max_attempts=3,
+            )
+            session.commit()
+            perm_job_id = perm_job.id
+
+        set_global_research_worker(perm_worker)
+        res = handle_research_job({"job_id": str(perm_job_id)})
+        assert res == {"processed_jobs": 1}
+
+        with session_factory() as session:
+            pj = ResearchJobRepository(session).get_by_id(perm_job_id)
+            assert pj.status == ResearchJobStatus.FAILED.value
+            assert pj.attempts == 1
+            assert "HTTP 403" in pj.error_message
+    finally:
+        set_global_research_worker(None)
