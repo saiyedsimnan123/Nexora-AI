@@ -297,3 +297,140 @@ def test_queue_consumer_raises_retry_after_on_transient_failure_and_acks_permane
             assert "HTTP 403" in pj.error_message
     finally:
         set_global_research_worker(None)
+
+
+def test_research_worker_gemini_503_transient_retry_preserves_job_and_no_duplicates(
+    session_factory,
+    seed_user,
+):
+    """Verify Gemini 503 high demand transient error retries with backoff, avoids duplicates, and completes."""
+    from sqlalchemy import select, func
+
+    attempts = 0
+
+    class Flaky503Pipeline:
+        def answer(self, request, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError(
+                    "Answer generation error: Gemini upstream service error (HTTP 503): "
+                    "Google Generative Language service error. Details: This model is currently experiencing high demand."
+                )
+            source = AttributedSource(
+                label="[E1]",
+                document_id="doc-1",
+                chunk_id="chunk-1",
+                paper_id=None,
+                paper_title="Attention Paper",
+                score=0.95,
+                text="Attention is all you need.",
+                text_excerpt="Attention is all you need.",
+                metadata={"title": "Attention Paper"},
+            )
+            return RAGResponse(
+                query=request,
+                answer="Attention mechanism successfully resolved.",
+                sources=[source],
+                cited_sources=[source],
+                is_grounded=True,
+                is_mock=False,
+                model="gemini-2.0-flash",
+                status="success",
+                retrieval_mode="hybrid",
+                evidence_count=1,
+            )
+
+    worker = ResearchJobWorker(
+        session_factory=session_factory,
+        rag_pipeline=Flaky503Pipeline(),
+        worker_token="flaky-503-worker",
+        max_attempts=3,
+    )
+
+    with session_factory() as session:
+        repo = ResearchJobRepository(session)
+        job = repo.create_job(
+            query="Explain attention mechanisms",
+            user_id=seed_user,
+            max_attempts=3,
+        )
+        session.commit()
+        job_id = job.id
+
+    # 1. First run: encounters 503 -> should be retryable (queued)
+    processed = worker.run_once()
+    assert processed == 1
+
+    with session_factory() as session:
+        j1 = ResearchJobRepository(session).get_by_id(job_id)
+        assert j1.status == ResearchJobStatus.QUEUED.value
+        assert j1.attempts == 1
+        assert "HTTP 503" in j1.error_message
+        assert "high demand" in j1.error_message.lower()
+        # Verify no duplicate jobs created
+        count = session.scalar(select(func.count(ResearchJob.id)))
+        assert count == 1
+
+        # Reset next_retry_at so second run claims it immediately
+        j1.next_retry_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+        session.commit()
+
+    # 2. Second run: succeeds on retry -> marks completed
+    processed = worker.run_once()
+    assert processed == 1
+
+    with session_factory() as session:
+        j2 = ResearchJobRepository(session).get_by_id(job_id)
+        assert j2.status == ResearchJobStatus.COMPLETED.value
+        assert j2.attempts == 2
+        assert j2.result is not None
+        assert j2.result["model"] == "gemini-2.0-flash"
+        assert "Attention mechanism" in j2.result["answer"]
+        assert j2.error_message is None
+        # Verify still exactly 1 job row
+        count = session.scalar(select(func.count(ResearchJob.id)))
+        assert count == 1
+
+
+def test_research_worker_gemini_503_exhausted_retries_marks_failed(
+    session_factory,
+    seed_user,
+):
+    """Verify Gemini 503 fails cleanly with clear error message when max attempts are reached."""
+    class Always503Pipeline:
+        def answer(self, request, **kwargs):
+            raise RuntimeError(
+                "Answer generation error: Gemini upstream service error (HTTP 503): "
+                "Google Generative Language service error. Details: This model is currently experiencing high demand. "
+                "(Primary model 'gemini-2.5-flash' and fallback model 'gemini-2.0-flash' were both attempted and exhausted)"
+            )
+
+    worker = ResearchJobWorker(
+        session_factory=session_factory,
+        rag_pipeline=Always503Pipeline(),
+        worker_token="exhausted-503-worker",
+        max_attempts=1,
+    )
+
+    with session_factory() as session:
+        repo = ResearchJobRepository(session)
+        job = repo.create_job(
+            query="Exhaustion test query",
+            user_id=seed_user,
+            max_attempts=1,
+        )
+        session.commit()
+        job_id = job.id
+
+    processed = worker.run_once()
+    assert processed == 1
+
+    with session_factory() as session:
+        j = ResearchJobRepository(session).get_by_id(job_id)
+        assert j.status == ResearchJobStatus.FAILED.value
+        assert j.attempts == 1
+        assert "HTTP 503" in j.error_message
+        assert "high demand" in j.error_message.lower()
+        assert "gemini-2.5-flash" in j.error_message
+        assert "gemini-2.0-flash" in j.error_message

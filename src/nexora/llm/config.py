@@ -43,6 +43,11 @@ class LLMConfig:
     timeout: float = 30.0
     temperature: float | None = None
     max_output_tokens: int | None = None
+    fallback_model: str | None = None
+    max_retries: int | None = None
+    retry_delay: float | None = None
+    max_retry_delay: float | None = None
+    max_retry_duration: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("provider", "model"):
@@ -65,6 +70,26 @@ class LLMConfig:
             raise ValueError("timeout must be positive and finite")
         validate_temperature(self.temperature)
         validate_max_output_tokens(self.max_output_tokens)
+        if self.fallback_model is not None:
+            if not isinstance(self.fallback_model, str):
+                raise TypeError("fallback_model must be a string or None")
+            if not self.fallback_model.strip():
+                raise ValueError("fallback_model must not be empty if provided")
+        if self.max_retries is not None:
+            if isinstance(self.max_retries, bool) or not isinstance(self.max_retries, int):
+                raise TypeError("max_retries must be an integer or None")
+            if self.max_retries < 0:
+                raise ValueError("max_retries must be non-negative")
+        for num_field, name in (
+            (self.retry_delay, "retry_delay"),
+            (self.max_retry_delay, "max_retry_delay"),
+            (self.max_retry_duration, "max_retry_duration"),
+        ):
+            if num_field is not None:
+                if isinstance(num_field, bool) or not isinstance(num_field, (int, float)):
+                    raise TypeError(f"{name} must be a number or None")
+                if not math.isfinite(num_field) or num_field < 0:
+                    raise ValueError(f"{name} must be non-negative and finite")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> LLMConfig:
@@ -139,6 +164,45 @@ class LLMConfig:
         timeout = number("TIMEOUT", float)
         if timeout is not None:
             kwargs["timeout"] = timeout
+
+        fallback_model = get("FALLBACK_MODEL")
+        if not fallback_model and prov_lower == "gemini":
+            val = env.get("NEXORA_GEMINI_FALLBACK_MODEL") or env.get("GEMINI_FALLBACK_MODEL")
+            if val and val.strip():
+                fallback_model = val.strip()
+        if fallback_model:
+            kwargs["fallback_model"] = fallback_model
+
+        max_retries = number("MAX_RETRIES", int)
+        if max_retries is None and prov_lower == "gemini":
+            val = env.get("NEXORA_GEMINI_MAX_RETRIES") or env.get("GEMINI_MAX_RETRIES")
+            if val and val.strip():
+                try:
+                    max_retries = int(val.strip())
+                except ValueError:
+                    pass
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+
+        retry_delay = number("RETRY_DELAY", float)
+        if retry_delay is None and prov_lower == "gemini":
+            val = env.get("NEXORA_GEMINI_RETRY_DELAY") or env.get("GEMINI_RETRY_DELAY")
+            if val and val.strip():
+                try:
+                    retry_delay = float(val.strip())
+                except ValueError:
+                    pass
+        if retry_delay is not None:
+            kwargs["retry_delay"] = retry_delay
+
+        max_retry_delay = number("MAX_RETRY_DELAY", float)
+        if max_retry_delay is not None:
+            kwargs["max_retry_delay"] = max_retry_delay
+
+        max_retry_duration = number("MAX_RETRY_DURATION", float)
+        if max_retry_duration is not None:
+            kwargs["max_retry_duration"] = max_retry_duration
+
         return cls(**kwargs)
 
     @property

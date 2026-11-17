@@ -41,8 +41,24 @@ class ResearchRunOutcome:
 def _is_permanent_failure(error_text: str) -> bool:
     """Return True when an error is permanent and should fail immediately without retries."""
     lowered = error_text.lower()
+    # Explicit transient overrides: 503, 502, 504, 429, high demand are never permanent
+    transient_markers = (
+        "503",
+        "502",
+        "504",
+        "429",
+        "high demand",
+        "rate limit",
+        "temporarily unavailable",
+        "upstream service error",
+        "connection error",
+        "timed out",
+        "timeout",
+    )
+    if any(m in lowered for m in transient_markers):
+        return False
+
     permanent_markers = (
-        "must",
         "invalid",
         "api key",
         "unauthorized",

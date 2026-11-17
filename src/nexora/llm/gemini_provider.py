@@ -15,10 +15,13 @@ Key design principles:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
+import random
 import re
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
@@ -31,12 +34,70 @@ from nexora.llm.config import (
 )
 from nexora.llm.models import LLMMessage, LLMResponse
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_GEMINI_LLM_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-2.0-flash"
+SUPPORTED_GEMINI_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.5-flash-lite",
+)
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
+
+TRANSIENT_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 ENV_GEMINI_API_KEY = "GEMINI_API_KEY"
 ENV_NEXORA_GEMINI_API_KEY = "NEXORA_GEMINI_API_KEY"
 ENV_LLM_API_KEY = "NEXORA_LLM_API_KEY"
+
+
+def is_transient_gemini_error(exc: Exception) -> bool:
+    """Return True if the error is transient and eligible for backoff retry and model fallback."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        status_code = getattr(resp, "status_code", None)
+        if status_code in TRANSIENT_STATUS_CODES:
+            return True
+        if status_code in (400, 401, 403, 404):
+            return False
+
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        cause_resp = getattr(cause, "response", None)
+        if cause_resp is not None:
+            cause_status = getattr(cause_resp, "status_code", None)
+            if cause_status in TRANSIENT_STATUS_CODES:
+                return True
+            if cause_status in (400, 401, 403, 404):
+                return False
+
+    exc_type = type(exc).__name__
+    cause_type = type(cause).__name__ if cause else ""
+    if any(
+        t in exc_type or t in cause_type
+        for t in (
+            "Timeout",
+            "ConnectError",
+            "ConnectionError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+            "NetworkError",
+            "RemoteProtocolError",
+        )
+    ):
+        return True
+
+    msg = str(exc).lower()
+    if any(perm in msg for perm in ("400", "401", "403", "404", "api_key_invalid", "permission denied", "not found")):
+        return False
+    if any(m in msg for m in ("503", "429", "502", "504", "high demand", "rate limit", "temporarily unavailable", "timed out")):
+        return True
+
+    return False
 
 
 def sanitize_secret_text(text: str, extra_secrets: Sequence[str | None] = ()) -> str:
@@ -224,7 +285,18 @@ class GeminiProvider:
     provider: str = "gemini"
     name: str = "gemini"
 
-    def __init__(self, config: LLMConfig, *, client: Any = None) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        *,
+        client: Any = None,
+        fallback_model: str | None = None,
+        max_retries: int | None = None,
+        retry_delay: float | None = None,
+        max_retry_delay: float | None = None,
+        max_retry_duration: float | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> None:
         if not isinstance(config, LLMConfig):
             raise TypeError("config must be an LLMConfig")
         self._config = config
@@ -236,6 +308,22 @@ class GeminiProvider:
             self._model = DEFAULT_GEMINI_LLM_MODEL
         else:
             self._model = clean_model
+
+        # Determine fallback model
+        raw_fb = (
+            fallback_model
+            or config.fallback_model
+            or os.getenv("NEXORA_GEMINI_FALLBACK_MODEL")
+            or os.getenv("GEMINI_FALLBACK_MODEL")
+        )
+        if raw_fb and raw_fb.strip():
+            clean_fb = raw_fb.strip().removeprefix("models/")
+            self._fallback_model = clean_fb if clean_fb != self._model else None
+        else:
+            if self._model != DEFAULT_GEMINI_FALLBACK_MODEL:
+                self._fallback_model = DEFAULT_GEMINI_FALLBACK_MODEL
+            else:
+                self._fallback_model = "gemini-1.5-flash"
 
         raw_base = (
             config.base_url
@@ -256,9 +344,75 @@ class GeminiProvider:
         self._client = client
         self._owns_client = False
 
+        # Retry configuration: fast defaults for test doubles, realistic bounded defaults for live clients
+        is_test_client = client is not None
+        default_max_retries = 2
+        default_delay = 0.01 if is_test_client else 0.5
+        default_max_delay = 0.05 if is_test_client else 4.0
+        default_max_duration = 1.0 if is_test_client else 15.0
+
+        resolved_retries = max_retries if max_retries is not None else config.max_retries
+        if resolved_retries is None:
+            raw_r = os.getenv("NEXORA_LLM_MAX_RETRIES") or os.getenv("GEMINI_MAX_RETRIES")
+            if raw_r and raw_r.strip():
+                try:
+                    resolved_retries = int(raw_r.strip())
+                except ValueError:
+                    resolved_retries = default_max_retries
+            else:
+                resolved_retries = default_max_retries
+        self._max_retries = max(0, resolved_retries)
+
+        resolved_delay = retry_delay if retry_delay is not None else config.retry_delay
+        if resolved_delay is None:
+            raw_d = os.getenv("NEXORA_LLM_RETRY_DELAY") or os.getenv("GEMINI_RETRY_DELAY")
+            if raw_d and raw_d.strip():
+                try:
+                    resolved_delay = float(raw_d.strip())
+                except ValueError:
+                    resolved_delay = default_delay
+            else:
+                resolved_delay = default_delay
+        self._retry_delay = max(0.0, float(resolved_delay))
+
+        resolved_max_delay = max_retry_delay if max_retry_delay is not None else config.max_retry_delay
+        self._max_retry_delay = max(0.0, float(resolved_max_delay if resolved_max_delay is not None else default_max_delay))
+
+        resolved_duration = max_retry_duration if max_retry_duration is not None else config.max_retry_duration
+        self._max_retry_duration = max(0.0, float(resolved_duration if resolved_duration is not None else default_max_duration))
+
+        self._sleep_fn = sleep_fn or time.sleep
+
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def fallback_model(self) -> str | None:
+        return self._fallback_model
+
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
+    @property
+    def retry_delay(self) -> float:
+        return self._retry_delay
+
+    @property
+    def max_retry_delay(self) -> float:
+        return self._max_retry_delay
+
+    @property
+    def max_retry_duration(self) -> float:
+        return self._max_retry_duration
+
+    def _calculate_backoff_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff delay with full jitter."""
+        base = min(self._max_retry_delay, self._retry_delay * (2.0 ** attempt))
+        if base <= 0:
+            return 0.0
+        return random.uniform(0.5 * base, base)
 
     def __repr__(self) -> str:
         return f"GeminiProvider(model={self._model!r}, base_url={self._base_url!r})"
@@ -387,47 +541,115 @@ class GeminiProvider:
 
         client = self._get_client()
 
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            try:
-                if hasattr(client, "post"):
-                    response = client.post(path, json=payload, headers=headers)
-                    if hasattr(response, "raise_for_status"):
-                        response.raise_for_status()
-                    if callable(getattr(response, "json", None)):
-                        data = response.json()
-                    else:
-                        data = getattr(response, "data", response)
-                    break
-                elif hasattr(client, "generate"):
-                    # Direct test double
-                    return client.generate(
-                        messages,
-                        model=effective_model,
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                    )
-                else:
-                    raise LLMProviderError("Client does not provide a callable 'post' or 'generate' method")
-            except LLMProviderError:
-                raise
-            except Exception as exc:
-                is_last_attempt = (attempt == max_attempts - 1)
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                is_transient = (
-                    status_code in (429, 500, 502, 503, 504)
-                    or isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
-                    or "Timeout" in type(exc).__name__
-                    or "Connect" in type(exc).__name__
-                )
-                if not is_last_attempt and is_transient:
-                    import time
-                    time.sleep(0.05 * (attempt + 1))
-                    continue
-                error_message = _format_actionable_error(exc, api_key=self._api_key)
-                raise LLMProviderError(error_message) from exc
+        models_to_try: list[str] = [effective_model]
+        if self._fallback_model and self._fallback_model != effective_model:
+            models_to_try.append(self._fallback_model)
 
-        return self._parse_response(data, effective_model)
+        start_time = time.monotonic()
+        last_exception: Exception | None = None
+        max_attempts_per_model = self._max_retries + 1
+
+        for model_idx, target_model in enumerate(models_to_try):
+            path = f"/v1beta/models/{target_model}:generateContent"
+            is_fallback = (model_idx > 0)
+
+            for attempt in range(max_attempts_per_model):
+                elapsed = time.monotonic() - start_time
+                if elapsed >= self._max_retry_duration and (model_idx > 0 or attempt > 0):
+                    logger.warning(
+                        "Gemini retry deadline exceeded (%.2fs >= %.2fs). Terminating retry loop.",
+                        elapsed,
+                        self._max_retry_duration,
+                    )
+                    break
+
+                try:
+                    if hasattr(client, "post"):
+                        response = client.post(path, json=payload, headers=headers)
+                        if hasattr(response, "raise_for_status"):
+                            response.raise_for_status()
+                        if callable(getattr(response, "json", None)):
+                            data = response.json()
+                        else:
+                            data = getattr(response, "data", response)
+                        parsed = self._parse_response(data, target_model)
+                        if is_fallback and parsed.raw is not None:
+                            parsed.raw["fallback_from"] = effective_model
+                        return parsed
+
+                    elif hasattr(client, "generate"):
+                        response = client.generate(
+                            messages,
+                            model=target_model,
+                            temperature=temperature,
+                            max_output_tokens=max_output_tokens,
+                        )
+                        if is_fallback and getattr(response, "raw", None) is not None:
+                            response.raw["fallback_from"] = effective_model
+                        return response
+                    else:
+                        raise LLMProviderError("Client does not provide a callable 'post' or 'generate' method")
+
+                except LLMProviderError:
+                    raise
+                except Exception as exc:
+                    last_exception = exc
+
+                    # Fail fast on non-transient errors (400, 401, 403, 404, etc.)
+                    if not is_transient_gemini_error(exc):
+                        error_message = _format_actionable_error(exc, api_key=self._api_key)
+                        raise LLMProviderError(error_message) from exc
+
+                    is_last_attempt = (attempt == max_attempts_per_model - 1)
+                    has_fallback = (model_idx < len(models_to_try) - 1)
+
+                    if not is_last_attempt:
+                        delay = self._calculate_backoff_delay(attempt)
+                        if (time.monotonic() - start_time + delay) > self._max_retry_duration:
+                            logger.warning(
+                                "Gemini retry delay (%.3fs) would exceed max retry duration (%.2fs).",
+                                delay,
+                                self._max_retry_duration,
+                            )
+                            if has_fallback:
+                                break
+                            else:
+                                break
+
+                        logger.info(
+                            "Gemini model %s transient error (%s). Retrying in %.3fs (attempt %d/%d)...",
+                            target_model,
+                            type(exc).__name__,
+                            delay,
+                            attempt + 1,
+                            max_attempts_per_model,
+                        )
+                        self._sleep_fn(delay)
+                        continue
+                    else:
+                        if has_fallback:
+                            next_model = models_to_try[model_idx + 1]
+                            logger.warning(
+                                "Gemini model %s exhausted %d attempts due to transient error: %s. "
+                                "Falling back to supported Gemini model %s.",
+                                target_model,
+                                max_attempts_per_model,
+                                _format_actionable_error(exc, api_key=self._api_key),
+                                next_model,
+                            )
+                            break
+
+        if last_exception is not None:
+            base_err = _format_actionable_error(last_exception, api_key=self._api_key)
+            if len(models_to_try) > 1:
+                detail = (
+                    f"{base_err} (Primary model '{effective_model}' and fallback model "
+                    f"'{self._fallback_model}' were both attempted with bounded retries and exhausted)"
+                )
+                raise LLMProviderError(detail) from last_exception
+            raise LLMProviderError(base_err) from last_exception
+
+        raise LLMProviderError("Gemini generation failed: retries exhausted without a response")
 
     def _parse_response(self, data: Any, model: str) -> LLMResponse:
         """Parse Gemini REST response JSON into LLMResponse."""

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -352,3 +353,251 @@ def test_live_gemini_generation_smoke():
     assert response.model == "gemini-2.5-flash"
     assert response.usage is not None
     assert response.usage.get("total_tokens", 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# 6. HTTP 503 Resilience, Exponential Backoff, Jitter, and Fallback
+# ---------------------------------------------------------------------------
+def test_gemini_503_retry_succeeds_on_primary_model():
+    """Verify transient 503 error retries with backoff and succeeds on primary model."""
+    import httpx
+
+    sleep_calls: list[float] = []
+
+    class RetrySuccessClient:
+        def __init__(self):
+            self.calls = 0
+            self.requests = []
+
+        def post(self, path, json=None, headers=None):
+            self.requests.append({"path": path, "json": json})
+            self.calls += 1
+            if self.calls == 1:
+                # First attempt fails with 503
+                req = httpx.Request("POST", f"https://generativelanguage.googleapis.com{path}")
+                err_data = json_module.dumps({
+                    "error": {
+                        "message": "This model is currently experiencing high demand.",
+                        "status": "UNAVAILABLE",
+                    }
+                }).encode("utf-8")
+                resp = httpx.Response(503, request=req, content=err_data)
+                raise httpx.HTTPStatusError("HTTP 503 Service Unavailable", request=req, response=resp)
+
+            # Second attempt succeeds
+            class Resp:
+                def raise_for_status(self): pass
+                def json(self):
+                    return {
+                        "candidates": [{
+                            "content": {"parts": [{"text": "Answer after retry"}], "role": "model"},
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}
+                    }
+            return Resp()
+
+    import json as json_module
+    client = RetrySuccessClient()
+    config = LLMConfig(provider="gemini", model="gemini-2.5-flash", api_key=FAKE_GEMINI_KEY, max_retries=2, retry_delay=0.1)
+    provider = GeminiProvider(config, client=client, sleep_fn=sleep_calls.append)
+
+    messages = [LLMMessage(role="user", content="Research prompt")]
+    res = provider.generate(messages)
+
+    assert res.text == "Answer after retry"
+    assert res.model == "gemini-2.5-flash"
+    assert client.calls == 2
+    assert len(client.requests) == 2
+    assert "gemini-2.5-flash" in client.requests[0]["path"]
+    assert "gemini-2.5-flash" in client.requests[1]["path"]
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] > 0.0  # Jittered backoff delay was applied
+
+
+def test_gemini_503_fallback_to_secondary_model():
+    """Verify primary model 503 exhaustion falls back to secondary supported Gemini model."""
+    import httpx
+    import json as json_module
+
+    sleep_calls: list[float] = []
+
+    class FallbackClient:
+        def __init__(self):
+            self.requests = []
+
+        def post(self, path, json=None, headers=None):
+            self.requests.append({"path": path, "json": json})
+            if "gemini-2.5-flash" in path:
+                req = httpx.Request("POST", f"https://generativelanguage.googleapis.com{path}")
+                err_data = json_module.dumps({
+                    "error": {
+                        "message": "This model is currently experiencing high demand.",
+                        "status": "UNAVAILABLE",
+                    }
+                }).encode("utf-8")
+                resp = httpx.Response(503, request=req, content=err_data)
+                raise httpx.HTTPStatusError("HTTP 503 Service Unavailable", request=req, response=resp)
+
+            # Fallback model succeeds
+            class Resp:
+                def raise_for_status(self): pass
+                def json(self):
+                    return {
+                        "candidates": [{
+                            "content": {"parts": [{"text": "Answer from fallback model"}], "role": "model"},
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 6, "totalTokenCount": 18}
+                    }
+            return Resp()
+
+    client = FallbackClient()
+    config = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        fallback_model="gemini-2.0-flash",
+        api_key=FAKE_GEMINI_KEY,
+        max_retries=1,  # 2 attempts on primary, then fallback
+        retry_delay=0.01,
+    )
+    provider = GeminiProvider(config, client=client, sleep_fn=sleep_calls.append)
+
+    messages = [LLMMessage(role="user", content="Research prompt")]
+    res = provider.generate(messages)
+
+    assert res.text == "Answer from fallback model"
+    assert res.model == "gemini-2.0-flash"
+    assert res.raw.get("fallback_from") == "gemini-2.5-flash"
+
+    # Verify requests sequence: 2 on gemini-2.5-flash, then 1 on gemini-2.0-flash
+    assert len(client.requests) == 3
+    assert "gemini-2.5-flash" in client.requests[0]["path"]
+    assert "gemini-2.5-flash" in client.requests[1]["path"]
+    assert "gemini-2.0-flash" in client.requests[2]["path"]
+
+
+def test_gemini_503_exhausted_retries_raises_actionable_error():
+    """Verify when both primary and fallback fail with 503, an actionable error is raised without secret leaks."""
+    import httpx
+    import json as json_module
+
+    class Always503Client:
+        def __init__(self):
+            self.requests = []
+
+        def post(self, path, json=None, headers=None):
+            self.requests.append({"path": path})
+            req = httpx.Request("POST", f"https://generativelanguage.googleapis.com{path}")
+            err_data = json_module.dumps({
+                "error": {
+                    "message": "This model is currently experiencing high demand.",
+                    "status": "UNAVAILABLE",
+                }
+            }).encode("utf-8")
+            resp = httpx.Response(503, request=req, content=err_data)
+            raise httpx.HTTPStatusError("HTTP 503 Service Unavailable", request=req, response=resp)
+
+    client = Always503Client()
+    config = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        fallback_model="gemini-2.0-flash",
+        api_key=FAKE_GEMINI_KEY,
+        max_retries=1,
+        retry_delay=0.01,
+    )
+    provider = GeminiProvider(config, client=client, sleep_fn=lambda _: None)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.generate([LLMMessage(role="user", content="test")])
+
+    err_msg = str(exc_info.value)
+    assert "HTTP 503" in err_msg
+    assert "high demand" in err_msg.lower()
+    assert "gemini-2.5-flash" in err_msg
+    assert "gemini-2.0-flash" in err_msg
+    assert "exhausted" in err_msg.lower()
+    assert FAKE_GEMINI_KEY not in err_msg
+
+
+def test_gemini_non_transient_error_fails_fast_without_retry():
+    """Verify permanent errors like 400 Bad Request or 401 fail immediately without retrying or falling back."""
+    import httpx
+    import json as json_module
+
+    sleep_calls = []
+
+    class BadReqClient:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, path, json=None, headers=None):
+            self.calls += 1
+            req = httpx.Request("POST", f"https://generativelanguage.googleapis.com{path}")
+            err_data = json_module.dumps({
+                "error": {
+                    "message": "API_KEY_INVALID: Key not valid",
+                    "status": "INVALID_ARGUMENT",
+                }
+            }).encode("utf-8")
+            resp = httpx.Response(400, request=req, content=err_data)
+            raise httpx.HTTPStatusError("HTTP 400 Bad Request", request=req, response=resp)
+
+    client = BadReqClient()
+    config = LLMConfig(provider="gemini", model="gemini-2.5-flash", api_key=FAKE_GEMINI_KEY, max_retries=3)
+    provider = GeminiProvider(config, client=client, sleep_fn=sleep_calls.append)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.generate([LLMMessage(role="user", content="test")])
+
+    assert client.calls == 1  # Exactly one attempt, no retries
+    assert len(sleep_calls) == 0  # No sleeping
+    assert "HTTP 400" in str(exc_info.value)
+
+
+def test_gemini_configurable_fallback_model_from_env(monkeypatch):
+    """Verify fallback model is configurable via environment variable."""
+    monkeypatch.setenv("NEXORA_GEMINI_FALLBACK_MODEL", "gemini-1.5-flash")
+    cfg = LLMConfig.from_env({
+        "NEXORA_LLM_PROVIDER": "gemini",
+        "NEXORA_LLM_MODEL": "gemini-2.5-flash",
+        "NEXORA_GEMINI_FALLBACK_MODEL": "gemini-1.5-flash",
+        "GEMINI_API_KEY": FAKE_GEMINI_KEY,
+    })
+    provider = GeminiProvider(cfg, client=FakeGeminiHttpClient())
+    assert provider.model == "gemini-2.5-flash"
+    assert provider.fallback_model == "gemini-1.5-flash"
+
+
+def test_gemini_retry_deadline_exceeded_stops_retries():
+    """Verify max_retry_duration enforces a strict time budget."""
+    import httpx
+
+    class Slow503Client:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, path, json=None, headers=None):
+            self.calls += 1
+            req = httpx.Request("POST", f"https://generativelanguage.googleapis.com{path}")
+            resp = httpx.Response(503, request=req, content=b'{"error":{"message":"high demand"}}')
+            raise httpx.HTTPStatusError("503", request=req, response=resp)
+
+    client = Slow503Client()
+    config = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        fallback_model="gemini-2.0-flash",
+        api_key=FAKE_GEMINI_KEY,
+        max_retries=5,
+        max_retry_duration=0.01,  # Strict 10ms budget
+    )
+    provider = GeminiProvider(config, client=client, sleep_fn=lambda _: time.sleep(0.02))
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.generate([LLMMessage(role="user", content="test")])
+
+    # Should have terminated well before 5 retries on both models
+    assert client.calls < 10
+    assert "HTTP 503" in str(exc_info.value)
