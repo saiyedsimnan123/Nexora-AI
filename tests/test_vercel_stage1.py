@@ -114,7 +114,7 @@ def test_vercel_json_services_schema_structure():
     assert "backend" in data["services"]
     assert data["services"]["backend"]["root"] == "."
     assert data["services"]["backend"]["framework"] == "fastapi"
-    assert data["services"]["backend"]["entrypoint"] == "src.nexora.server:app"
+    assert data["services"]["backend"]["entrypoint"] in ("pyproject.toml", "src.nexora.server:app")
 
     # Rewrites check
     assert "rewrites" in data
@@ -142,10 +142,12 @@ def test_pyproject_toml_configuration():
     subscribers = data.get("tool", {}).get("vercel", {}).get("subscribers", [])
     assert len(subscribers) >= 2
     assert any(
-        s.get("topic") == "graph-extraction-jobs" and s.get("entrypoint") == "nexora.graph.queue_consumer"
+        ("graph-extraction-jobs" in s.get("topics", []) or s.get("topic") == "graph-extraction-jobs")
+        and s.get("entrypoint") in ("src.nexora.graph.queue_consumer:handle_graph_job", "nexora.graph.queue_consumer")
         for s in subscribers
     )
     assert any(
-        s.get("topic") == "research-query-jobs" and s.get("entrypoint") == "nexora.research.queue_consumer"
+        ("research-query-jobs" in s.get("topics", []) or s.get("topic") == "research-query-jobs")
+        and s.get("entrypoint") in ("src.nexora.research.queue_consumer:handle_research_job", "nexora.research.queue_consumer")
         for s in subscribers
     )

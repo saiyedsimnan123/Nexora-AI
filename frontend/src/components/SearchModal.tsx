@@ -272,6 +272,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 
         // Different query requested: execute fresh search cleanly
         if (!cancelled) {
+          clearActiveResearchJobId();
           handleExecuteSearch(targetQuery);
         }
       })();

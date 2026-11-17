@@ -88,8 +88,31 @@ async function fetchWithTimeout(
   options: RequestInit = {},
   timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const id = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, timeoutMs);
+
+  let combinedSignal: AbortSignal;
+  if (options.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(id);
+      throw new ApiError('Request aborted by user.', 499);
+    }
+    if (typeof AbortSignal.any === 'function') {
+      combinedSignal = AbortSignal.any([options.signal, timeoutController.signal]);
+    } else {
+      const merged = new AbortController();
+      const onAbort = () => merged.abort();
+      options.signal.addEventListener('abort', onAbort, { once: true });
+      timeoutController.signal.addEventListener('abort', onAbort, { once: true });
+      combinedSignal = merged.signal;
+    }
+  } else {
+    combinedSignal = timeoutController.signal;
+  }
 
   try {
     const headers = new Headers(options.headers || {});
@@ -109,12 +132,15 @@ async function fetchWithTimeout(
     const response = await fetch(url, {
       ...options,
       headers,
-      signal: options.signal || controller.signal,
+      signal: combinedSignal,
     });
     return response;
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (timedOut) {
       throw new ApiError(`Request timed out after ${timeoutMs / 1000}s`, 504);
+    }
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('Request aborted by user.', 499);
     }
     if (error instanceof TypeError && error.message.includes('fetch')) {
       throw new ApiError('Unable to connect to the backend server. Is the API service running?', 503);
@@ -251,7 +277,7 @@ export async function getResearchJob(
       },
       signal,
     },
-    10000
+    15000
   );
 
   if (!response.ok) {
@@ -339,24 +365,34 @@ export async function pollResearchJob(
       throw new ApiError('Request aborted by user.', 499);
     }
 
+    try {
+      const jobStatus = await getResearchJob(jobId, signal);
+      onProgress?.(jobStatus.status, jobStatus);
+
+      if (jobStatus.status === 'completed' && jobStatus.result) {
+        clearActiveResearchJobId();
+        return jobStatus.result;
+      }
+
+      if (jobStatus.status === 'failed') {
+        clearActiveResearchJobId();
+        throw new ApiError(
+          jobStatus.error || 'Research generation failed in background worker.',
+          500
+        );
+      }
+    } catch (pollErr: unknown) {
+      if (signal?.aborted) {
+        throw new ApiError('Request aborted by user.', 499);
+      }
+      if (pollErr instanceof ApiError && pollErr.statusCode === 500) {
+        throw pollErr;
+      }
+      // On transient polling errors (cold-start timeout, 502/503/504, network hiccups), continue polling
+      console.warn(`Transient polling error for research job ${jobId}; retrying in ${delayMs}ms...`, pollErr);
+    }
+
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-
-    const jobStatus = await getResearchJob(jobId, signal);
-    onProgress?.(jobStatus.status, jobStatus);
-
-    if (jobStatus.status === 'completed' && jobStatus.result) {
-      clearActiveResearchJobId();
-      return jobStatus.result;
-    }
-
-    if (jobStatus.status === 'failed') {
-      clearActiveResearchJobId();
-      throw new ApiError(
-        jobStatus.error || 'Research generation failed in background worker.',
-        500
-      );
-    }
-
     delayMs = Math.min(2500, Math.floor(delayMs * 1.3));
   }
 

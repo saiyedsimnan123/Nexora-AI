@@ -32,9 +32,9 @@ where = ["src"]
 entrypoint = "src.nexora.server:app"
 
 [[tool.vercel.subscribers]]
-topic = "graph-extraction-jobs"
-entrypoint = "nexora.graph.queue_consumer"
+entrypoint = "src.nexora.graph.queue_consumer:handle_graph_job"
+topics = ["graph-extraction-jobs"]
 
 [[tool.vercel.subscribers]]
-topic = "research-query-jobs"
-entrypoint = "nexora.research.queue_consumer"
+entrypoint = "src.nexora.research.queue_consumer:handle_research_job"
+topics = ["research-query-jobs"]

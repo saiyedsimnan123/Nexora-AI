@@ -1391,45 +1391,23 @@ async def submit_research_job_endpoint(
     )
 
 
-@v1_router.get(
-    "/research/jobs/{job_id}",
-    response_model=ResearchJobStatusResponseBody,
-    status_code=200,
-    summary="Get status and results of a research job",
-    description="Polls the lifecycle status ('queued', 'processing', 'completed', 'failed') and retrieves synthesized answers and evidence.",
-)
-def get_research_job_endpoint(
-    job_id: str,
-    request: Request,
-    current_user: Any = Depends(get_optional_user),
-) -> ResearchJobStatusResponseBody:
-    """Fetch the status and results of an enqueued research job."""
-    try:
-        job_uuid = UUID(str(job_id).strip())
-    except (ValueError, TypeError, AttributeError):
-        raise InvalidRequestError("Invalid job_id: must be a valid UUID.")
-
-    from nexora.auth.guest import GUEST_USER_ID, is_guest_access_allowed
+def _get_research_job_sync(
+    session_factory: Any,
+    job_uuid: UUID,
+    current_user: Any,
+    effective_guest_id: str,
+) -> dict[str, Any]:
+    """Synchronously load and authorize a research job inside a dedicated DB session."""
+    from nexora.auth.guest import GUEST_USER_ID
     from nexora.database.repository.research_job import ResearchJobRepository
-
-    if current_user is None:
-        enforce_auth = getattr(request.app.state, "enforce_auth", False)
-        environ = getattr(request.app.state, "environ", None)
-        if enforce_auth and not is_guest_access_allowed(environ):
-            raise AuthenticationError("Authentication credentials are required to access research jobs.")
-
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if session_factory is None:
-        raise InvalidConfigurationError("session_factory is not configured for durable research jobs")
 
     with session_factory() as session:
         repo = ResearchJobRepository(session)
         job = repo.get_by_id(job_uuid)
         if job is None:
-            raise RecordNotFoundError(f"Research job {job_id} not found.")
+            raise RecordNotFoundError(f"Research job {job_uuid} not found.")
 
         # Strict tenant & guest-session ownership check
-        effective_guest_id = (request.headers.get("X-Guest-Session-ID") or "").strip() or "guest_preview"
         if current_user is not None:
             if current_user.id == GUEST_USER_ID:
                 if job.user_id is not None and job.user_id != GUEST_USER_ID:
@@ -1445,23 +1423,82 @@ def get_research_job_endpoint(
             if job.guest_session_id and job.guest_session_id != effective_guest_id:
                 raise ForbiddenError("You do not have permission to access this research job.")
 
-        res_result = None
-        if job.result:
-            try:
-                res_result = RAGQueryResponseBody(**job.result)
-            except Exception:
-                res_result = job.result
-
-        return ResearchJobStatusResponseBody(
-            job_id=str(job.id),
-            status=job.status.value if hasattr(job.status, "value") else str(job.status),
-            query=job.query,
-            result=res_result,
-            error=job.error_message,
-            attempts=job.attempts,
-            created_at=job.created_at.isoformat() if hasattr(job.created_at, "isoformat") else str(job.created_at),
-            completed_at=job.completed_at.isoformat() if job.completed_at and hasattr(job.completed_at, "isoformat") else (str(job.completed_at) if job.completed_at else None),
+        status_val = job.status.value if hasattr(job.status, "value") else str(job.status)
+        created_at_val = job.created_at.isoformat() if hasattr(job.created_at, "isoformat") else str(job.created_at)
+        completed_at_val = (
+            job.completed_at.isoformat()
+            if job.completed_at and hasattr(job.completed_at, "isoformat")
+            else (str(job.completed_at) if job.completed_at else None)
         )
+        return {
+            "id": str(job.id),
+            "status": status_val,
+            "query": job.query,
+            "result": job.result,
+            "error_message": job.error_message,
+            "attempts": job.attempts,
+            "created_at": created_at_val,
+            "completed_at": completed_at_val,
+        }
+
+
+@v1_router.get(
+    "/research/jobs/{job_id}",
+    response_model=ResearchJobStatusResponseBody,
+    status_code=200,
+    summary="Get status and results of a research job",
+    description="Polls the lifecycle status ('queued', 'processing', 'completed', 'failed') and retrieves synthesized answers and evidence.",
+)
+async def get_research_job_endpoint(
+    job_id: str,
+    request: Request,
+    current_user: Any = Depends(get_optional_user),
+) -> ResearchJobStatusResponseBody:
+    """Fetch the status and results of an enqueued research job."""
+    try:
+        job_uuid = UUID(str(job_id).strip())
+    except (ValueError, TypeError, AttributeError):
+        raise InvalidRequestError("Invalid job_id: must be a valid UUID.")
+
+    from nexora.auth.guest import is_guest_access_allowed
+
+    if current_user is None:
+        enforce_auth = getattr(request.app.state, "enforce_auth", False)
+        environ = getattr(request.app.state, "environ", None)
+        if enforce_auth and not is_guest_access_allowed(environ):
+            raise AuthenticationError("Authentication credentials are required to access research jobs.")
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise InvalidConfigurationError("session_factory is not configured for durable research jobs")
+
+    effective_guest_id = (request.headers.get("X-Guest-Session-ID") or "").strip() or "guest_preview"
+
+    job_data = await run_in_threadpool(
+        _get_research_job_sync,
+        session_factory=session_factory,
+        job_uuid=job_uuid,
+        current_user=current_user,
+        effective_guest_id=effective_guest_id,
+    )
+
+    res_result = None
+    if job_data.get("result"):
+        try:
+            res_result = RAGQueryResponseBody(**job_data["result"])
+        except Exception:
+            res_result = job_data["result"]
+
+    return ResearchJobStatusResponseBody(
+        job_id=job_data["id"],
+        status=job_data["status"],
+        query=job_data["query"],
+        result=res_result,
+        error=job_data["error_message"],
+        attempts=job_data["attempts"],
+        created_at=job_data["created_at"],
+        completed_at=job_data["completed_at"],
+    )
 
 
 @v1_router.post(

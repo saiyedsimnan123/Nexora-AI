@@ -8,7 +8,7 @@
     "backend": {
       "root": ".",
       "framework": "fastapi",
-      "entrypoint": "src.nexora.server:app"
+      "entrypoint": "pyproject.toml"
     }
   },
   "rewrites": [
