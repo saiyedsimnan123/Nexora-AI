@@ -356,7 +356,7 @@ export async function pollResearchJob(
   signal?: AbortSignal,
   onProgress?: (status: string, job?: ResearchJobStatusResponse) => void
 ): Promise<RAGQueryResponse> {
-  const maxPollTimeMs = 120000;
+  const maxPollTimeMs = 300000; // Bounded 5 minutes (300 seconds)
   const startTime = Date.now();
   let delayMs = 1000;
 
@@ -385,8 +385,12 @@ export async function pollResearchJob(
       if (signal?.aborted) {
         throw new ApiError('Request aborted by user.', 499);
       }
-      if (pollErr instanceof ApiError && pollErr.statusCode === 500) {
-        throw pollErr;
+      if (pollErr instanceof ApiError) {
+        if (pollErr.statusCode === 502 || pollErr.statusCode === 503 || pollErr.statusCode === 504) {
+          console.warn(`Transient gateway error (${pollErr.statusCode}) polling research job ${jobId}; retrying...`);
+        } else if (pollErr.statusCode === 500) {
+          throw pollErr;
+        }
       }
       // On transient polling errors (cold-start timeout, 502/503/504, network hiccups), continue polling
       console.warn(`Transient polling error for research job ${jobId}; retrying in ${delayMs}ms...`, pollErr);
@@ -396,8 +400,49 @@ export async function pollResearchJob(
     delayMs = Math.min(2500, Math.floor(delayMs * 1.3));
   }
 
-  clearActiveResearchJobId();
-  throw new ApiError('Research synthesis timed out after 120 seconds.', 504);
+  // Final check before declaring timeout in case worker completed in the final cycle
+  try {
+    const finalCheck = await getResearchJob(jobId, signal);
+    if (finalCheck.status === 'completed' && finalCheck.result) {
+      clearActiveResearchJobId();
+      return finalCheck.result;
+    }
+    if (finalCheck.status === 'failed') {
+      clearActiveResearchJobId();
+      throw new ApiError(
+        finalCheck.error || 'Research generation failed in background worker.',
+        500
+      );
+    }
+  } catch (finalErr: unknown) {
+    if (signal?.aborted) {
+      throw new ApiError('Request aborted by user.', 499);
+    }
+    if (finalErr instanceof ApiError && finalErr.statusCode === 500) {
+      throw finalErr;
+    }
+  }
+
+  // Do NOT clear active research job ID on polling window expiration: the durable job
+  // continues running in background and can be resumed.
+  throw new ApiError(
+    `Research synthesis timed out after 5 minutes. The background job (${jobId}) is still running and can be resumed.`,
+    504,
+    { jobId, status: 'processing', recoverable: true }
+  );
+}
+
+/**
+ * Resume polling an active or previously submitted research job.
+ */
+export async function resumeResearchJob(
+  jobId?: string,
+  signal?: AbortSignal,
+  onProgress?: (status: string, job?: ResearchJobStatusResponse) => void
+): Promise<RAGQueryResponse | null> {
+  const targetId = jobId || getActiveResearchJobId();
+  if (!targetId) return null;
+  return await pollResearchJob(targetId, signal, onProgress);
 }
 
 /**
@@ -409,8 +454,34 @@ export async function queryResearchRAG(
   signal?: AbortSignal,
   onProgress?: (status: string, job?: ResearchJobStatusResponse) => void
 ): Promise<RAGQueryResponse> {
-  if (!request.query || !request.query.trim()) {
+  const trimmedQuery = request.query ? request.query.trim() : '';
+  if (!trimmedQuery) {
     throw new ApiError('Research query must not be empty.', 400);
+  }
+
+  // Check if an existing active research job already exists for this query to prevent duplicate job submissions
+  const activeJobId = getActiveResearchJobId();
+  if (activeJobId) {
+    try {
+      const existingJob = await getResearchJob(activeJobId, signal);
+      if (
+        existingJob.query === trimmedQuery &&
+        (existingJob.status === 'queued' || existingJob.status === 'processing')
+      ) {
+        onProgress?.(existingJob.status, existingJob);
+        return await pollResearchJob(activeJobId, signal, onProgress);
+      }
+      if (
+        existingJob.query === trimmedQuery &&
+        existingJob.status === 'completed' &&
+        existingJob.result
+      ) {
+        clearActiveResearchJobId();
+        return existingJob.result;
+      }
+    } catch {
+      // If unable to query active job, proceed with normal submission
+    }
   }
 
   try {
@@ -419,7 +490,7 @@ export async function queryResearchRAG(
     const jobId = jobSubmit.job_id;
     onProgress?.('queued');
 
-    // 2. Poll until completed or failed (up to 120s)
+    // 2. Poll until completed or failed (bounded 5 minutes)
     return await pollResearchJob(jobId, signal, onProgress);
   } catch (err: unknown) {
     if (err instanceof ApiError && err.statusCode === 404) {
