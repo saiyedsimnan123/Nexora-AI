@@ -142,8 +142,12 @@ def _run_startup_migrations_once(env: Mapping[str, str]) -> bool:
         apply_pending_migrations(norm_db_config.url)
         return True
     except Exception as exc:
-        logger.warning("Database auto-migration note: %s", exc)
-        return False
+        from nexora.api.logging import redact_sensitive_data
+        from nexora.llm.gemini_provider import sanitize_secret_text
+
+        sanitized = redact_sensitive_data(sanitize_secret_text(str(exc)))
+        logger.error("Database startup migration failed: %s", sanitized)
+        raise ConfigurationError(f"Database startup migration failed: {sanitized}") from exc
 
 
 def create_production_app(

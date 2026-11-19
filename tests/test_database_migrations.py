@@ -273,10 +273,11 @@ def test_alembic_linear_history_and_revisions():
     script = ScriptDirectory.from_config(alembic_cfg)
 
     heads = script.get_heads()
-    assert heads == ["044c24ad4c35"], f"Expected single head '044c24ad4c35', got {heads}"
+    assert heads == ["044c24ad4c36"], f"Expected single head '044c24ad4c36', got {heads}"
 
     revisions = [rev.revision for rev in script.walk_revisions()]
     assert revisions == [
+        "044c24ad4c36",
         "044c24ad4c35",
         "044c24ad4c34",
         "044c24ad4c33",

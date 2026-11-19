@@ -94,12 +94,40 @@ def get_applied_migration_heads(session_or_conn: Any) -> tuple[str, ...]:
         except Exception:
             return ()
 
+    # Safely determine whether alembic_version table exists BEFORE executing SELECT.
+    # On PostgreSQL, querying a nonexistent table inside an active transaction marks
+    # the transaction as aborted, causing InFailedSqlTransaction on subsequent calls.
+    try:
+        bind = session_or_conn
+        if hasattr(session_or_conn, "get_bind") and callable(session_or_conn.get_bind):
+            try:
+                bind = session_or_conn.get_bind()
+            except Exception:
+                bind = getattr(session_or_conn, "bind", session_or_conn)
+        elif hasattr(session_or_conn, "bind"):
+            bind = session_or_conn.bind or session_or_conn
+
+        inspector = inspect(bind)
+        if hasattr(inspector, "has_table") and callable(inspector.has_table):
+            if not inspector.has_table("alembic_version"):
+                return ()
+        elif hasattr(inspector, "get_table_names") and callable(inspector.get_table_names):
+            if "alembic_version" not in {t.lower() for t in inspector.get_table_names()}:
+                return ()
+    except Exception:
+        return ()
+
     try:
         rows = session_or_conn.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalars().all()
         return tuple(sorted(str(r).strip() for r in rows if r and str(r).strip()))
     except Exception:
+        try:
+            if hasattr(session_or_conn, "rollback") and callable(session_or_conn.rollback):
+                session_or_conn.rollback()
+        except Exception:
+            pass
         return ()
 
 

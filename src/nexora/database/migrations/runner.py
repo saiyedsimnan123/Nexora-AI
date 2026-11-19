@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection, Engine
 from nexora.database.config import DatabaseConfig
 from nexora.database.readiness import (
     EXPECTED_CORE_TABLES,
+    DatabaseSchemaError,
     get_applied_migration_heads,
     get_expected_migration_heads,
 )
@@ -45,11 +46,18 @@ def _is_schema_at_expected_head(
     expected_heads: tuple[str, ...],
 ) -> bool:
     """Return True only when alembic_version matches head and required tables/columns exist."""
+    inspector = inspect(conn)
+    if hasattr(inspector, "has_table") and callable(inspector.has_table):
+        if not inspector.has_table("alembic_version"):
+            return False
+    elif hasattr(inspector, "get_table_names") and callable(inspector.get_table_names):
+        if "alembic_version" not in {t.lower() for t in inspector.get_table_names()}:
+            return False
+
     applied_heads = get_applied_migration_heads(conn)
     if applied_heads != expected_heads:
         return False
 
-    inspector = inspect(conn)
     actual_tables = {name.lower() for name in inspector.get_table_names()}
     if EXPECTED_CORE_TABLES - actual_tables:
         return False
@@ -152,14 +160,31 @@ def apply_pending_migrations(
                         return False
 
                     applied_heads = get_applied_migration_heads(conn)
+                    inspector = inspect(conn)
+                    actual_tables = {name.lower() for name in inspector.get_table_names()}
+                    missing_core_tables = EXPECTED_CORE_TABLES - actual_tables
+
                     if applied_heads == expected_heads:
-                        # Head matches yet table/column reconciliation is needed (partial DB state)
-                        logger.warning(
-                            "Migration head is %s but schema verification failed; reconciling partial state cleanly.",
-                            applied_heads,
-                        )
-                        _reconcile_partial_research_jobs_table(conn)
-                        return True
+                        if "users" in missing_core_tables or len(missing_core_tables) >= 2:
+                            logger.warning(
+                                "Migration head is %s but core tables %s are missing; "
+                                "clearing stale alembic_version to replay migrations from base.",
+                                applied_heads,
+                                sorted(missing_core_tables),
+                            )
+                            conn.execute(text("DELETE FROM alembic_version"))
+                        else:
+                            # Head matches yet table/column reconciliation is needed (partial DB state)
+                            logger.warning(
+                                "Migration head is %s but schema verification failed; reconciling partial state cleanly.",
+                                applied_heads,
+                            )
+                            _reconcile_partial_research_jobs_table(conn)
+                            if not _is_schema_at_expected_head(conn, expected_heads):
+                                raise DatabaseSchemaError(
+                                    "Schema reconciliation failed: database still not at expected head"
+                                )
+                            return True
 
                     cfg = Config()
                     cfg.set_main_option("script_location", str(migrations_dir).replace("%", "%%"))
@@ -171,6 +196,11 @@ def apply_pending_migrations(
                     logger.info("Applying pending database migrations up to head...")
                     command.upgrade(cfg, "head")
                     logger.info("Database migrations applied cleanly up to %s.", expected_heads)
+
+                    if not _is_schema_at_expected_head(conn, expected_heads):
+                        raise DatabaseSchemaError(
+                            f"Migration upgrade finished but schema verification failed for head {expected_heads}"
+                        )
                     return True
         finally:
             if owns_engine:

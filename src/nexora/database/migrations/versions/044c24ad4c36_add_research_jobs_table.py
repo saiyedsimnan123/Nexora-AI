@@ -102,11 +102,19 @@ def upgrade() -> None:
     table_exists = inspector.has_table('research_jobs')
 
     if not table_exists:
-        if 'research_jobs' in existing_pg_types:
-            logger.warning(
-                "PostgreSQL type 'research_jobs' already exists without table relation; "
-                "proceeding cautiously without dropping user data."
-            )
+        if bind.dialect.name == 'postgresql':
+            if 'research_jobs' in existing_pg_types:
+                logger.warning(
+                    "PostgreSQL orphaned composite type 'research_jobs' exists without table; "
+                    "dropping orphaned type before creating table."
+                )
+                bind.execute(sa.text("DROP TYPE IF EXISTS research_jobs CASCADE"))
+            if 'researchjobstatus' in existing_pg_types:
+                logger.warning(
+                    "PostgreSQL orphaned type 'researchjobstatus' exists without table; "
+                    "dropping orphaned type before creating table."
+                )
+                bind.execute(sa.text("DROP TYPE IF EXISTS researchjobstatus CASCADE"))
         op.create_table(
             'research_jobs',
             sa.Column('id', sa.Uuid(), nullable=False),
