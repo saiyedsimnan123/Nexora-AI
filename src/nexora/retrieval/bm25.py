@@ -286,11 +286,31 @@ class BM25Index:
         if collection_ids is not None and len(collection_ids) == 0:
             return SearchResult(query=query, results=[])
 
+        target_paper_ids: set[str] | None = None
+        if paper_id is not None:
+            if isinstance(paper_id, (list, tuple, set)):
+                target_paper_ids = {str(p) for p in paper_id}
+            else:
+                pid_str = str(paper_id)
+                target_paper_ids = {pid_str}
+                try:
+                    from nexora.research.comparison_table import UUID_TO_BENCHMARK, BENCHMARK_PAPERS
+
+                    bm_key = UUID_TO_BENCHMARK.get(pid_str, pid_str)
+                    target_paper_ids.add(bm_key)
+                    if bm_key in BENCHMARK_PAPERS:
+                        target_paper_ids.add(BENCHMARK_PAPERS[bm_key]["uuid"])
+                except ImportError:
+                    pass
+
         # Score documents that contain at least one query token and match any filters
         scored_docs: list[tuple[float, BM25Document]] = []
         for doc in self._documents.values():
-            if paper_id is not None and str(doc.metadata.get("paper_id")) != str(paper_id):
-                continue
+            if target_paper_ids is not None:
+                doc_pid = str(doc.metadata.get("paper_id") or "")
+                doc_uuid = str(doc.metadata.get("paper_uuid") or "")
+                if doc_pid not in target_paper_ids and doc_uuid not in target_paper_ids:
+                    continue
             if document_id is not None and doc.document_id != str(document_id):
                 continue
             if collection_ids is not None:

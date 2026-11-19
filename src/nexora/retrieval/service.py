@@ -137,7 +137,17 @@ class RetrievalService:
 
         effective_filter: dict[str, Any] = dict(filter) if filter else {}
         if paper_id is not None:
-            effective_filter["paper_id"] = str(paper_id)
+            pid_str = str(paper_id)
+            try:
+                from nexora.research.comparison_table import UUID_TO_BENCHMARK, BENCHMARK_PAPERS
+
+                bm_key = UUID_TO_BENCHMARK.get(pid_str)
+                if bm_key and bm_key in BENCHMARK_PAPERS:
+                    effective_filter["paper_id"] = [bm_key, BENCHMARK_PAPERS[bm_key]["uuid"]]
+                else:
+                    effective_filter["paper_id"] = pid_str
+            except ImportError:
+                effective_filter["paper_id"] = pid_str
         if document_id is not None:
             effective_filter["document_id"] = str(document_id)
         if collection_ids is not None:

@@ -58,6 +58,7 @@ def build_research_application(
     llm_provider: Any = None,
     qdrant_client: Any = None,
     verifier: Any = None,
+    bm25_index: Any = None,
 ) -> ResearchApplicationService:
     """Assemble the full research pipeline from settings and injected pieces.
 
@@ -81,7 +82,7 @@ def build_research_application(
         llm_provider = create_llm_provider(settings.llm)
     llm_service = LLMService(llm_provider)
 
-    retrieval = RetrievalService(embedding_service, vector_store)
+    retrieval = RetrievalService(embedding_service, vector_store, bm25_index=bm25_index)
     quality = RetrievalQualityService(retrieval, settings.retrieval)
     evidence = EvidenceContextBuilder(
         quality, max_total_characters=settings.max_evidence_characters
@@ -587,6 +588,57 @@ def build_http_app(
         raise ConfigurationError("vector_store must implement the VectorStore protocol")
     _check_dimension("vector_store", vector_store, settings.embedding_dimension)
 
+    bm25_index = dependencies.get("bm25_index")
+    if bm25_index is None:
+        from nexora.retrieval.bm25 import BM25Index
+
+        bm25_index = BM25Index()
+
+    # Pre-seed canonical benchmark research papers into BM25 and vector stores
+    # so research queries immediately have grounded evidence.
+    try:
+        from nexora.research.comparison_table import BENCHMARK_PAPERS
+        from nexora.retrieval.dataset import get_default_research_dataset
+        from nexora.retrieval.models import VectorRecord
+
+        ds = get_default_research_dataset()
+        seeded_chunks = []
+        for c in ds.chunks:
+            chunk_copy = dict(c)
+            bm_meta = BENCHMARK_PAPERS.get(chunk_copy.get("paper_id"))
+            if bm_meta:
+                chunk_copy["paper_uuid"] = bm_meta["uuid"]
+            chunk_copy["is_benchmark"] = True
+            chunk_copy["source"] = "benchmark"
+            seeded_chunks.append(chunk_copy)
+
+        if getattr(bm25_index, "total_documents", 0) == 0:
+            bm25_index.index_chunks(seeded_chunks)
+
+        store_count = 0
+        if hasattr(vector_store, "count"):
+            try:
+                store_count = vector_store.count()
+            except Exception:
+                store_count = 0
+        if store_count == 0 and hasattr(vector_store, "upsert"):
+            texts = [c["text"] for c in seeded_chunks]
+            if hasattr(embedding_service, "embed_texts"):
+                vectors = embedding_service.embed_texts(texts)
+            else:
+                vectors = [embedding_service.embed_text(t) for t in texts]
+            records = [
+                VectorRecord(id=c["chunk_id"], vector=vec, payload=dict(c))
+                for c, vec in zip(seeded_chunks, vectors)
+            ]
+            vector_store.upsert(records)
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not pre-seed benchmark research corpus into retrieval store: %s", exc
+        )
+
     verifier = dependencies.get("verifier") or dependencies.get("verification_service")
     research_service = build_research_application(
         settings,
@@ -595,6 +647,7 @@ def build_http_app(
         llm_provider=llm_provider,
         qdrant_client=qdrant_client,
         verifier=verifier,
+        bm25_index=bm25_index,
     )
 
     if session_factory is None and getattr(settings, "database", None) is not None:
@@ -690,7 +743,9 @@ def build_http_app(
         from nexora.rag.generator import DeterministicMockGenerator, LLMAnswerGenerator
         from nexora.rag.pipeline import create_rag_pipeline
 
-        retrieval_service = RetrievalService(embedding_service, vector_store)
+        retrieval_service = RetrievalService(
+            embedding_service, vector_store, bm25_index=bm25_index
+        )
         if settings.llm.api_key:
             llm_inst = LLMService(
                 llm_provider
